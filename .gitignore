@@ -1,0 +1,4 @@
+.venv/
+.state/
+otel_hook.log
+otel_config.json
