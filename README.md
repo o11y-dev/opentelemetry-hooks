@@ -58,6 +58,45 @@ ide.session (root)
 | `BeforeReadFile` | `beforeReadFile` | — |
 | `AfterFileEdit` | `afterFileEdit` | — |
 
+## Installation
+
+### Download from GitHub Releases
+
+Each tagged version (`v*`) produces a GitHub Release with pre-built packages:
+
+1. Go to [Releases](https://github.com/o11y-dev/opentelemetry-hooks/releases)
+2. Download the `.whl` or `.tar.gz` from the latest release
+3. Install with pip:
+
+```bash
+pip install opentelemetry_hooks-*.whl
+```
+
+### Install directly from GitHub
+
+```bash
+pip install git+https://github.com/o11y-dev/opentelemetry-hooks.git@v0.1.0
+```
+
+Or install the latest from `main`:
+
+```bash
+pip install git+https://github.com/o11y-dev/opentelemetry-hooks.git
+```
+
+### Versioning
+
+This project uses [semantic versioning](https://semver.org/). Versions are derived automatically from git tags using `setuptools-scm`.
+
+To create a new release:
+
+```bash
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+The CI pipeline will run tests, build the package, and create a GitHub Release with the artifacts.
+
 ## Quick Start
 
 ### One-Command Setup (Cursor IDE)
@@ -118,6 +157,14 @@ cp .cursor/hooks/opentelemetry-hook/examples/copilot-hooks.example.json .github/
 
 Replace `{{SCRIPT_PATH}}` with `python3 .cursor/hooks/opentelemetry-hook/otel_hook.py`.
 See [GitHub Copilot hooks docs](https://docs.github.com/en/copilot/concepts/agents/coding-agent/about-hooks).
+
+#### GitHub Copilot — Recommended Repositories
+
+To make this hook automatically available to the GitHub Copilot coding agent across your organization's repositories, add it as a [recommended repository](https://docs.github.com/en/copilot/customizing-copilot/adding-repository-instructions-for-github-copilot):
+
+1. Go to your organization settings → **Copilot** → **Coding agent** → **Recommended repositories**
+2. Add `o11y-dev/opentelemetry-hooks` to the list
+3. The Copilot coding agent will now be able to reference this repo for hook setup and configuration
 
 ### Configuration
 

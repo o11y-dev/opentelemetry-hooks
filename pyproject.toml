@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=64", "setuptools-scm>=8"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "opentelemetry-hooks"
+dynamic = ["version"]
+description = "OpenTelemetry integration for AI coding agents (Cursor IDE, GitHub Copilot)"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.8"
+dependencies = [
+    "opentelemetry-sdk",
+    "opentelemetry-exporter-otlp-proto-grpc",
+    "opentelemetry-exporter-otlp-proto-http",
+]
+
+[project.urls]
+Homepage = "https://github.com/o11y-dev/opentelemetry-hooks"
+
+[tool.setuptools]
+py-modules = ["otel_hook"]
+
+[tool.setuptools_scm]
+fallback_version = "0.1.0"
