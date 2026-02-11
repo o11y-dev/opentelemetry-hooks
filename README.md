@@ -457,11 +457,9 @@ echo '{"hook_event_name":"SessionStart","session_id":"test-123"}' | python3 .cur
 ## Credits
 
 - Built on pure [OpenTelemetry Python SDK](https://opentelemetry.io/docs/languages/python/)
-- Inspired by [cursor-otel-hook](https://github.com/LangGuard-AI/cursor-otel-hook) by LangGuard AI
 - Uses [OpenTelemetry GenAI Semantic Conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/)
 - Supports [GitHub Copilot hooks](https://docs.github.com/en/copilot/concepts/agents/coding-agent/about-hooks)
 
 ## License
 
 MIT
-# opentelemetry-hooks
