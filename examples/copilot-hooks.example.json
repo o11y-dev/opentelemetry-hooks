@@ -1,0 +1,13 @@
+{
+  "_comment": "Template for GitHub Copilot. Replace {{SCRIPT_PATH}} and adjust timeoutSec if needed.",
+  "_comment_timeout": "timeoutSec is in seconds. Default is 30.",
+  "version": 1,
+  "hooks": {
+    "sessionStart": [{ "type": "command", "bash": "{{SCRIPT_PATH}}", "timeoutSec": 30 }],
+    "sessionEnd": [{ "type": "command", "bash": "{{SCRIPT_PATH}}", "timeoutSec": 30 }],
+    "userPromptSubmitted": [{ "type": "command", "bash": "{{SCRIPT_PATH}}", "timeoutSec": 30 }],
+    "preToolUse": [{ "type": "command", "bash": "{{SCRIPT_PATH}}", "timeoutSec": 30 }],
+    "postToolUse": [{ "type": "command", "bash": "{{SCRIPT_PATH}}", "timeoutSec": 30 }],
+    "errorOccurred": [{ "type": "command", "bash": "{{SCRIPT_PATH}}", "timeoutSec": 30 }]
+  }
+}

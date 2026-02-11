@@ -1,0 +1,21 @@
+{
+  "_comment": "Template for Cursor hooks. Replace {{SCRIPT_PATH}} with the hook command.",
+  "version": 1,
+  "hooks": {
+    "sessionStart": [{ "command": "{{SCRIPT_PATH}}" }],
+    "sessionEnd": [{ "command": "{{SCRIPT_PATH}}" }],
+    "subagentStart": [{ "command": "{{SCRIPT_PATH}}" }],
+    "subagentStop": [{ "command": "{{SCRIPT_PATH}}" }],
+    "preToolUse": [{ "command": "{{SCRIPT_PATH}}" }],
+    "postToolUse": [{ "command": "{{SCRIPT_PATH}}" }],
+    "postToolUseFailure": [{ "command": "{{SCRIPT_PATH}}" }],
+    "beforeShellExecution": [{ "command": "{{SCRIPT_PATH}}" }],
+    "afterShellExecution": [{ "command": "{{SCRIPT_PATH}}" }],
+    "beforeMCPExecution": [{ "command": "{{SCRIPT_PATH}}" }],
+    "afterMCPExecution": [{ "command": "{{SCRIPT_PATH}}" }],
+    "beforeReadFile": [{ "command": "{{SCRIPT_PATH}}" }],
+    "afterFileEdit": [{ "command": "{{SCRIPT_PATH}}" }],
+    "beforeSubmitPrompt": [{ "command": "{{SCRIPT_PATH}}" }],
+    "stop": [{ "command": "{{SCRIPT_PATH}}" }]
+  }
+}
