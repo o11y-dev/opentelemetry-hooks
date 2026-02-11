@@ -2,3 +2,8 @@
 .state/
 otel_hook.log
 otel_config.json
+dist/
+build/
+*.egg-info/
+__pycache__/
+.pytest_cache/

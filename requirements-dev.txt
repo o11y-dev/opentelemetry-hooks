@@ -1,0 +1,4 @@
+pytest>=7.0
+opentelemetry-sdk
+opentelemetry-exporter-otlp-proto-grpc
+opentelemetry-exporter-otlp-proto-http
