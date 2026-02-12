@@ -191,6 +191,156 @@ class TestConfigParsing:
         assert otel_hook._coerce_env_value("key", None) == ""
 
 
+# ── MDM configuration ────────────────────────────────────────────────────
+
+
+class TestLoadMdmConfig:
+    def test_returns_empty_on_linux(self):
+        with mock.patch("sys.platform", "linux"):
+            assert otel_hook._load_mdm_config() == {}
+
+    def test_dispatches_to_macos(self):
+        with mock.patch("sys.platform", "darwin"):
+            with mock.patch.object(otel_hook, "_load_mdm_config_macos", return_value={"k": "v"}) as m:
+                assert otel_hook._load_mdm_config() == {"k": "v"}
+                m.assert_called_once()
+
+    def test_dispatches_to_windows(self):
+        with mock.patch("sys.platform", "win32"):
+            with mock.patch.object(otel_hook, "_load_mdm_config_windows", return_value={"k": "v"}) as m:
+                assert otel_hook._load_mdm_config() == {"k": "v"}
+                m.assert_called_once()
+
+
+class TestLoadMdmConfigMacOS:
+    def test_reads_system_managed_plist(self, tmp_path):
+        import plistlib
+        plist_data = {"OTEL_EXPORTER_OTLP_ENDPOINT": "https://mdm.example.com:4317"}
+        plist_file = tmp_path / "managed.plist"
+        with open(plist_file, "wb") as fh:
+            plistlib.dump(plist_data, fh)
+        domain = otel_hook._MDM_DOMAIN
+        system_path = f"/Library/Managed Preferences/{domain}.plist"
+        real_open = open
+        def fake_open(p, *a, **kw):
+            if p == system_path:
+                return real_open(str(plist_file), *a, **kw)
+            return real_open(p, *a, **kw)
+        with mock.patch("os.path.exists", side_effect=lambda p: p == system_path):
+            with mock.patch("builtins.open", side_effect=fake_open):
+                result = otel_hook._load_mdm_config_macos()
+        assert result == plist_data
+
+    def test_falls_back_to_user_managed_plist(self, tmp_path):
+        import plistlib
+        plist_data = {"OTEL_SERVICE_NAME": "mdm-agent"}
+        plist_file = tmp_path / "user.plist"
+        with open(plist_file, "wb") as fh:
+            plistlib.dump(plist_data, fh)
+        domain = otel_hook._MDM_DOMAIN
+        system_path = f"/Library/Managed Preferences/{domain}.plist"
+        user_path = os.path.expanduser(f"~/Library/Managed Preferences/{domain}.plist")
+        real_open = open
+        def fake_exists(p):
+            if p == system_path:
+                return False
+            if p == user_path:
+                return True
+            return False
+        def fake_open(p, *a, **kw):
+            if p == user_path:
+                return real_open(str(plist_file), *a, **kw)
+            return real_open(p, *a, **kw)
+        with mock.patch("os.path.exists", side_effect=fake_exists):
+            with mock.patch("builtins.open", side_effect=fake_open):
+                result = otel_hook._load_mdm_config_macos()
+        assert result == plist_data
+
+    def test_returns_empty_when_no_plist(self):
+        with mock.patch("os.path.exists", return_value=False):
+            assert otel_hook._load_mdm_config_macos() == {}
+
+    def test_returns_empty_on_read_error(self):
+        with mock.patch("os.path.exists", return_value=True):
+            with mock.patch("builtins.open", side_effect=OSError("permission denied")):
+                assert otel_hook._load_mdm_config_macos() == {}
+
+
+class TestLoadMdmConfigWindows:
+    def test_returns_empty_when_no_winreg(self):
+        with mock.patch.dict("sys.modules", {"winreg": None}):
+            # On non-Windows, winreg import fails; function should return {}
+            result = otel_hook._load_mdm_config_windows()
+            assert result == {}
+
+    def test_reads_registry_values(self):
+        fake_winreg = mock.MagicMock()
+        fake_winreg.HKEY_LOCAL_MACHINE = 0x80000002
+        fake_winreg.HKEY_CURRENT_USER = 0x80000001
+        fake_key = mock.MagicMock()
+        fake_winreg.OpenKey.return_value.__enter__ = mock.Mock(return_value=fake_key)
+        fake_winreg.OpenKey.return_value.__exit__ = mock.Mock(return_value=False)
+        call_count = [0]
+        def enum_side_effect(key, idx):
+            if key is fake_key and idx == 0:
+                return ("OTEL_SERVICE_NAME", "mdm-service", 1)
+            if key is fake_key and idx == 1:
+                return ("IDE_OTEL_CAPTURE_TEXT", "false", 1)
+            raise OSError("no more values")
+        fake_winreg.EnumValue.side_effect = enum_side_effect
+        with mock.patch.dict("sys.modules", {"winreg": fake_winreg}):
+            # Need to re-import to pick up mock
+            import importlib
+            result = otel_hook._load_mdm_config_windows()
+        assert result.get("OTEL_SERVICE_NAME") == "mdm-service"
+        assert result.get("IDE_OTEL_CAPTURE_TEXT") == "false"
+
+    def test_returns_empty_on_registry_not_found(self):
+        fake_winreg = mock.MagicMock()
+        fake_winreg.HKEY_LOCAL_MACHINE = 0x80000002
+        fake_winreg.HKEY_CURRENT_USER = 0x80000001
+        fake_winreg.OpenKey.side_effect = OSError("key not found")
+        with mock.patch.dict("sys.modules", {"winreg": fake_winreg}):
+            result = otel_hook._load_mdm_config_windows()
+        assert result == {}
+
+
+class TestMdmConfigPrecedence:
+    def test_mdm_overrides_json_config(self, tmp_path):
+        config_file = tmp_path / "otel_config.json"
+        config_file.write_text(json.dumps({
+            "OTEL_SERVICE_NAME": "json-service",
+            "IDE_OTEL_CAPTURE_TEXT": "true",
+        }))
+        mdm_config = {"OTEL_SERVICE_NAME": "mdm-enforced-service"}
+        with mock.patch.object(otel_hook, "_CONFIG_DEFAULT", str(config_file)):
+            with mock.patch.object(otel_hook, "_load_mdm_config", return_value=mdm_config):
+                with mock.patch.dict(os.environ, {}, clear=True):
+                    result = otel_hook._load_config()
+        assert result["OTEL_SERVICE_NAME"] == "mdm-enforced-service"
+        assert result["IDE_OTEL_CAPTURE_TEXT"] == "true"
+
+    def test_env_overrides_mdm(self, tmp_path):
+        config_file = tmp_path / "otel_config.json"
+        config_file.write_text(json.dumps({"OTEL_SERVICE_NAME": "json-service"}))
+        mdm_config = {"OTEL_SERVICE_NAME": "mdm-service"}
+        with mock.patch.object(otel_hook, "_CONFIG_DEFAULT", str(config_file)):
+            with mock.patch.object(otel_hook, "_load_mdm_config", return_value=mdm_config):
+                with mock.patch.dict(os.environ, {"OTEL_SERVICE_NAME": "env-service"}, clear=False):
+                    result = otel_hook._load_config()
+                    otel_hook._apply_config_env(result)
+                    assert os.environ["OTEL_SERVICE_NAME"] == "env-service"
+
+    def test_mdm_empty_no_effect(self, tmp_path):
+        config_file = tmp_path / "otel_config.json"
+        config_file.write_text(json.dumps({"OTEL_SERVICE_NAME": "json-service"}))
+        with mock.patch.object(otel_hook, "_CONFIG_DEFAULT", str(config_file)):
+            with mock.patch.object(otel_hook, "_load_mdm_config", return_value={}):
+                with mock.patch.dict(os.environ, {}, clear=True):
+                    result = otel_hook._load_config()
+        assert result["OTEL_SERVICE_NAME"] == "json-service"
+
+
 # ── Session & generation key extraction ───────────────────────────────────
 
 

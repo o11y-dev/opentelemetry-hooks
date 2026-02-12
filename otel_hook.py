@@ -123,6 +123,10 @@ _BATCH_DIR = os.path.join(_STATE_DIR, "batches")
 _LOCK_DIR = os.path.join(_STATE_DIR, "locks")
 _CLEANUP_MARKER = os.path.join(_STATE_DIR, "last_cleanup")
 
+# MDM (Managed Device Management) configuration
+_MDM_DOMAIN = "dev.o11y.opentelemetry-hook"  # macOS managed preferences domain
+_MDM_REGISTRY_PATH = r"SOFTWARE\Policies\OpenTelemetryHook"  # Windows registry path
+
 # Privacy patterns
 _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 _TOKEN_RE = re.compile(r"\b[A-Za-z0-9_\-]{24,}\b")
@@ -551,6 +555,68 @@ def _span_context(span):
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
+def _load_mdm_config() -> dict:
+    """Read managed configuration pushed by MDM (macOS or Windows).
+
+    macOS: reads the managed preferences domain via ``defaults read``.
+    Windows: reads string values from HKLM registry under *_MDM_REGISTRY_PATH*.
+
+    Returns a dict of key/value pairs (may be empty).  Never raises.
+    """
+    if sys.platform == "darwin":
+        return _load_mdm_config_macos()
+    if sys.platform == "win32":
+        return _load_mdm_config_windows()
+    return {}
+
+
+def _load_mdm_config_macos() -> dict:
+    """Load managed preferences from macOS MDM profile."""
+    try:
+        import plistlib
+        managed_path = f"/Library/Managed Preferences/{_MDM_DOMAIN}.plist"
+        if os.path.exists(managed_path):
+            with open(managed_path, "rb") as fh:
+                return plistlib.load(fh) or {}
+        # Fall back to current-user managed preferences
+        user_managed = os.path.expanduser(
+            f"~/Library/Managed Preferences/{_MDM_DOMAIN}.plist"
+        )
+        if os.path.exists(user_managed):
+            with open(user_managed, "rb") as fh:
+                return plistlib.load(fh) or {}
+    except Exception:
+        _LOGGER.debug("MDM: unable to read macOS managed preferences")
+    return {}
+
+
+def _load_mdm_config_windows() -> dict:
+    """Load managed configuration from Windows registry (HKLM)."""
+    try:
+        import winreg
+        result = {}
+        for hive in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+            try:
+                with winreg.OpenKey(hive, _MDM_REGISTRY_PATH) as key:
+                    idx = 0
+                    while True:
+                        try:
+                            name, value, _ = winreg.EnumValue(key, idx)
+                            if name and value is not None:
+                                result[name] = str(value)
+                            idx += 1
+                        except OSError:
+                            break
+            except OSError:
+                continue
+        return result
+    except ImportError:
+        pass
+    except Exception:
+        _LOGGER.debug("MDM: unable to read Windows registry")
+    return {}
+
+
 def _load_config() -> dict:
     path = os.getenv("IDE_OTEL_CONFIG", _CONFIG_DEFAULT)
     if not os.path.isabs(path):
@@ -564,7 +630,19 @@ def _load_config() -> dict:
             except OSError:
                 pass
         if not os.path.exists(path):
-            return {}
+            config = {}
+        else:
+            config = _load_json_config(path)
+    else:
+        config = _load_json_config(path)
+    # MDM settings override JSON config (IT admin policy takes precedence)
+    mdm = _load_mdm_config()
+    if mdm:
+        config.update(mdm)
+    return config
+
+
+def _load_json_config(path: str) -> dict:
     try:
         with open(path, "r", encoding="utf-8") as fh:
             return json.load(fh) or {}

@@ -236,6 +236,58 @@ Then restart your IDE.
 | `IDE_OTEL_LOG_EVENTS` | Log each hook event to file | `false` |
 | `IDE_OTEL_DEBUG_CONSOLE` | Print spans to stdout (for debugging) | `false` |
 
+## MDM / Managed Configuration
+
+For enterprise deployments, configuration can be pushed to developer machines via MDM (Mobile Device Management) systems such as Jamf, Intune, or Group Policy. MDM-managed settings override `otel_config.json` values but can still be overridden by environment variables.
+
+**Precedence** (highest to lowest):
+
+1. Environment variables
+2. MDM-managed configuration (macOS plist / Windows registry)
+3. `otel_config.json` file
+4. Built-in defaults
+
+### macOS (Configuration Profile)
+
+The hook reads managed preferences from the domain `dev.o11y.opentelemetry-hook`. Deploy a `.mobileconfig` profile via Jamf, Mosyle, or Apple Business Manager with the following payload:
+
+```xml
+<dict>
+    <key>PayloadType</key>
+    <string>dev.o11y.opentelemetry-hook</string>
+    <key>OTEL_EXPORTER_OTLP_ENDPOINT</key>
+    <string>https://otel-collector.corp.example.com:4317</string>
+    <key>OTEL_EXPORTER_OTLP_PROTOCOL</key>
+    <string>grpc</string>
+    <key>OTEL_SERVICE_NAME</key>
+    <string>corp-ide-agent</string>
+    <key>IDE_OTEL_CAPTURE_TEXT</key>
+    <string>false</string>
+</dict>
+```
+
+The managed plist is read from:
+- `/Library/Managed Preferences/dev.o11y.opentelemetry-hook.plist` (device-level)
+- `~/Library/Managed Preferences/dev.o11y.opentelemetry-hook.plist` (user-level fallback)
+
+### Windows (Registry / Group Policy)
+
+The hook reads string values from the Windows registry under:
+
+```
+HKEY_LOCAL_MACHINE\SOFTWARE\Policies\OpenTelemetryHook
+```
+
+with a fallback to `HKEY_CURRENT_USER`. Deploy via Intune, Group Policy (ADMX), or any MDM that manages registry keys:
+
+| Registry Value Name | Type | Example |
+|---------------------|------|---------|
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `REG_SZ` | `https://otel-collector.corp.example.com:4317` |
+| `OTEL_SERVICE_NAME` | `REG_SZ` | `corp-ide-agent` |
+| `IDE_OTEL_CAPTURE_TEXT` | `REG_SZ` | `false` |
+
+Any key from the [Configuration Reference](#configuration-reference) can be set via MDM.
+
 ## Backend Examples
 
 ### Jaeger (Local Development)
