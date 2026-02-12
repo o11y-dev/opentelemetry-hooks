@@ -337,6 +337,105 @@ class TestAdvanceGeneration:
                 assert gen2 == "sess-adv_gen_2"
 
 
+# ── Flush stale sessions ─────────────────────────────────────────────────
+
+
+class TestFlushStaleSessions:
+    def test_flushes_stale_session_and_removes_file(self, tmp_path):
+        """Stale session files should emit ide.session root span and be removed."""
+        session_dir = tmp_path / "sessions"
+        session_dir.mkdir()
+        ctx = {
+            "trace_id": "a" * 32,
+            "phantom_parent_id": "b" * 16,
+            "start_time_ns": 1000000000,
+            "ide": "cursor",
+            "generation_count": 2,
+        }
+        sess_file = session_dir / "stale-sess.json"
+        sess_file.write_text(json.dumps(ctx))
+        # Make file appear old (mtime in the past)
+        old_mtime = time.time() - 100_000
+        os.utime(str(sess_file), (old_mtime, old_mtime))
+
+        tracer = mock.MagicMock()
+        mock_span = mock.MagicMock()
+        tracer.start_span.return_value = mock_span
+        mock_span.__enter__ = mock.MagicMock(return_value=mock_span)
+        mock_span.__exit__ = mock.MagicMock(return_value=False)
+
+        with mock.patch.object(otel_hook, "_SESSION_DIR", str(session_dir)):
+            with mock.patch.object(otel_hook, "_force_flush_provider"):
+                otel_hook._flush_stale_sessions(tracer)
+
+        # Session span should have been emitted
+        tracer.start_span.assert_called_once()
+        assert tracer.start_span.call_args[0][0] == "ide.session"
+        # File should be removed
+        assert not sess_file.exists()
+
+    def test_skips_recent_sessions(self, tmp_path):
+        """Sessions that are not yet stale should not be flushed."""
+        session_dir = tmp_path / "sessions"
+        session_dir.mkdir()
+        ctx = {
+            "trace_id": "c" * 32,
+            "phantom_parent_id": "d" * 16,
+            "start_time_ns": time.time_ns(),
+            "ide": "copilot",
+            "generation_count": 0,
+        }
+        sess_file = session_dir / "recent-sess.json"
+        sess_file.write_text(json.dumps(ctx))
+
+        tracer = mock.MagicMock()
+        with mock.patch.object(otel_hook, "_SESSION_DIR", str(session_dir)):
+            otel_hook._flush_stale_sessions(tracer)
+
+        tracer.start_span.assert_not_called()
+        assert sess_file.exists()
+
+    def test_no_crash_on_missing_dir(self):
+        """Should not crash when session directory does not exist."""
+        tracer = mock.MagicMock()
+        with mock.patch.object(otel_hook, "_SESSION_DIR", "/nonexistent/path"):
+            otel_hook._flush_stale_sessions(tracer)
+        tracer.start_span.assert_not_called()
+
+    def test_skips_empty_json(self, tmp_path):
+        """Empty JSON files should be removed without emitting a span."""
+        session_dir = tmp_path / "sessions"
+        session_dir.mkdir()
+        sess_file = session_dir / "empty-sess.json"
+        sess_file.write_text("{}")
+        old_mtime = time.time() - 100_000
+        os.utime(str(sess_file), (old_mtime, old_mtime))
+
+        tracer = mock.MagicMock()
+        with mock.patch.object(otel_hook, "_SESSION_DIR", str(session_dir)):
+            otel_hook._flush_stale_sessions(tracer)
+
+        tracer.start_span.assert_not_called()
+        assert not sess_file.exists()
+
+    def test_disabled_when_ttl_zero(self, tmp_path):
+        """Should not flush anything when TTL is zero (disabled)."""
+        session_dir = tmp_path / "sessions"
+        session_dir.mkdir()
+        sess_file = session_dir / "sess.json"
+        sess_file.write_text(json.dumps({"trace_id": "a" * 32}))
+        old_mtime = time.time() - 100_000
+        os.utime(str(sess_file), (old_mtime, old_mtime))
+
+        tracer = mock.MagicMock()
+        with mock.patch.object(otel_hook, "_SESSION_DIR", str(session_dir)):
+            with mock.patch.dict(os.environ, {"IDE_OTEL_STATE_TTL_SECONDS": "0"}):
+                otel_hook._flush_stale_sessions(tracer)
+
+        tracer.start_span.assert_not_called()
+        assert sess_file.exists()
+
+
 # ── Flatten helper ────────────────────────────────────────────────────────
 
 

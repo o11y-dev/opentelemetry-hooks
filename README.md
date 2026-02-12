@@ -88,14 +88,16 @@ pip install git+https://github.com/o11y-dev/opentelemetry-hooks.git
 
 This project uses [semantic versioning](https://semver.org/). Versions are derived automatically from git tags using `setuptools-scm`.
 
-To create a new release:
+To create a new release, go to **Actions → Release → Run workflow**, enter a version number (e.g. `0.2.0`), and click **Run workflow**. The workflow will run tests, create the git tag, build the package, and publish a GitHub Release with the artifacts.
+
+Alternatively, push a tag manually:
 
 ```bash
 git tag v0.2.0
 git push origin v0.2.0
 ```
 
-The CI pipeline will run tests, build the package, and create a GitHub Release with the artifacts.
+The CI pipeline will then build the package and create a GitHub Release automatically.
 
 ## Quick Start
 

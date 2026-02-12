@@ -348,6 +348,40 @@ def _cleanup_state() -> None:
                 continue
 
 
+def _flush_stale_sessions(tracer) -> None:
+    """Emit ``ide.session`` root spans for stale sessions that were never closed.
+
+    When an IDE crashes or fails to send ``SessionEnd``, the session context
+    file lingers on disk.  This function finds sessions older than the
+    configured TTL and emits the missing root span before removing them, so
+    that the trace tree remains complete.
+    """
+    ttl = _state_ttl_seconds()
+    if ttl <= 0:
+        return
+    if not os.path.isdir(_SESSION_DIR):
+        return
+
+    cutoff = time.time() - ttl
+    for name in os.listdir(_SESSION_DIR):
+        path = os.path.join(_SESSION_DIR, name)
+        try:
+            if not os.path.isfile(path) or os.path.getmtime(path) >= cutoff:
+                continue
+            with open(path, "r", encoding="utf-8") as fh:
+                ctx = json.load(fh)
+            if not ctx:
+                os.remove(path)
+                continue
+            session_key = name.removesuffix(".json")
+            ide = ctx.get("ide", "unknown")
+            _flush_session(tracer, session_key, ctx, ide)
+            os.remove(path)
+            _LOGGER.info("Flushed stale session %s", session_key)
+        except Exception:
+            continue
+
+
 # ---------------------------------------------------------------------------
 # Logging — JSON structured format with trace context & extra attributes
 # ---------------------------------------------------------------------------
@@ -1527,6 +1561,7 @@ def main() -> int:
         return 0
 
     tracer = trace.get_tracer("ide-hooks")
+    _flush_stale_sessions(tracer)
 
     try:
         sk = _session_key(data)
