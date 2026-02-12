@@ -280,7 +280,6 @@ class TestLoadMdmConfigWindows:
         fake_key = mock.MagicMock()
         fake_winreg.OpenKey.return_value.__enter__ = mock.Mock(return_value=fake_key)
         fake_winreg.OpenKey.return_value.__exit__ = mock.Mock(return_value=False)
-        call_count = [0]
         def enum_side_effect(key, idx):
             if key is fake_key and idx == 0:
                 return ("OTEL_SERVICE_NAME", "mdm-service", 1)

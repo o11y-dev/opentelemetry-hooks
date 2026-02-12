@@ -558,7 +558,7 @@ def _span_context(span):
 def _load_mdm_config() -> dict:
     """Read managed configuration pushed by MDM (macOS or Windows).
 
-    macOS: reads the managed preferences domain via ``defaults read``.
+    macOS: reads managed preferences plist files directly via ``plistlib``.
     Windows: reads string values from HKLM registry under *_MDM_REGISTRY_PATH*.
 
     Returns a dict of key/value pairs (may be empty).  Never raises.
