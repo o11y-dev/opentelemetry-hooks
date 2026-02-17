@@ -1,4 +1,4 @@
-name: Weekly Agentic Code Improvement
+name: Weekly Code Health Report
 
 on:
   schedule:
@@ -14,6 +14,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -35,12 +37,17 @@ jobs:
 
       - name: Check outdated dependencies
         id: deps
+        continue-on-error: true
         run: |
-          pip list --outdated --format=json > outdated-deps.json
-          python -c "import json, os; count = len(json.load(open('outdated-deps.json', 'r', encoding='utf-8'))); open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8').write(f'count={count}\\n')"
+          if pip list --outdated --format=json > outdated-deps.json; then
+            python -c "import json, os; count = len(json.load(open('outdated-deps.json', 'r', encoding='utf-8'))); open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8').write(f'count={count}\\n')"
+          else
+            echo '[]' > outdated-deps.json
+            echo "count=0" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Create weekly improvement issue
-        if: !cancelled()
+        if: ${{ always() && !cancelled() }}
         uses: actions/github-script@v7
         env:
           TEST_STATUS: ${{ steps.tests.outcome }}
@@ -50,7 +57,14 @@ jobs:
           script: |
             const fs = require('fs');
             const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
-            const outdatedDeps = JSON.parse(fs.readFileSync('outdated-deps.json', 'utf8'));
+            let outdatedDeps = [];
+            if (fs.existsSync('outdated-deps.json')) {
+              try {
+                outdatedDeps = JSON.parse(fs.readFileSync('outdated-deps.json', 'utf8'));
+              } catch (error) {
+                outdatedDeps = [];
+              }
+            }
 
             const title = `[Weekly Health] Code health report - ${new Date().toISOString().slice(0, 10)}`;
             const summary = [
@@ -65,6 +79,23 @@ jobs:
               `- [ ] Review and safely upgrade outdated dependencies`,
               `- [ ] Add or refine tests for any changed behavior`,
             ];
+
+            const existing = await github.paginate(github.rest.issues.listForRepo, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              per_page: 100
+            });
+            for (const issue of existing) {
+              if (issue.title.startsWith('[Weekly Health] Code health report -')) {
+                await github.rest.issues.update({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  state: 'closed'
+                });
+              }
+            }
 
             if (outdatedDeps.length > 0) {
               summary.push('', '### Outdated dependencies');
