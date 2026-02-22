@@ -1336,6 +1336,10 @@ def _batch_enabled() -> bool:
     return _safe_bool(os.getenv("IDE_OTEL_BATCH_ON_STOP", ""))
 
 
+def _continue_response_json() -> str:
+    return json.dumps({"continue": True, "local_trace_saving": _batch_enabled()})
+
+
 def _batch_path(key: str) -> str:
     safe_key = re.sub(r"[^A-Za-z0-9_.-]+", "_", key)
     return os.path.join(_BATCH_DIR, f"{safe_key}.jsonl")
@@ -1635,7 +1639,7 @@ def main() -> int:
         )
 
     if not _init_tracing(ide):
-        print(json.dumps({"continue": True}))
+        print(_continue_response_json())
         return 0
 
     tracer = trace.get_tracer("ide-hooks")
@@ -1653,7 +1657,7 @@ def main() -> int:
                 if sk:
                     session_ctx = _create_session_context(sk, data, ide)
                     _append_batch_event(f"{sk}_session", event_name, data)
-                print(json.dumps({"continue": True}))
+                print(_continue_response_json())
                 return 0
 
             # UserPromptSubmit: start a new generation
@@ -1664,7 +1668,7 @@ def main() -> int:
                     session_ctx = _load_session_context(sk)
                 if gen_key:
                     _append_batch_event(gen_key, event_name, data)
-                print(json.dumps({"continue": True}))
+                print(_continue_response_json())
                 return 0
 
             # Stop: flush generation
@@ -1677,7 +1681,7 @@ def main() -> int:
                     if sk and session_ctx:
                         session_ctx.pop("current_generation", None)
                         _write_session_context(sk, session_ctx)
-                print(json.dumps({"continue": True}))
+                print(_continue_response_json())
                 return 0
 
             # SessionEnd: emit session root span, clean up
@@ -1685,7 +1689,7 @@ def main() -> int:
                 if sk and session_ctx:
                     _flush_session(tracer, sk, session_ctx, ide)
                     _clear_session_context(sk)
-                print(json.dumps({"continue": True}))
+                print(_continue_response_json())
                 return 0
 
             # All other events: buffer under current generation
@@ -1706,7 +1710,7 @@ def main() -> int:
                 ) as span:
                     _populate_span(span, event_name, data, ide)
 
-            print(json.dumps({"continue": True}))
+            print(_continue_response_json())
             return 0
 
         # ── Streaming mode: emit spans immediately ──
@@ -1748,7 +1752,7 @@ def main() -> int:
                 cur.set_status(Status(StatusCode.ERROR, str(exc)))
         _LOGGER.exception("Hook failure: %s", exc)
 
-    print(json.dumps({"continue": True}))
+    print(_continue_response_json())
     return 0
 
 
