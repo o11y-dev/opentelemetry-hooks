@@ -1336,17 +1336,21 @@ def _batch_enabled() -> bool:
     return _safe_bool(os.getenv("IDE_OTEL_BATCH_ON_STOP", ""))
 
 
+def _local_trace_saving_configured() -> bool:
+    return bool(os.getenv("IDE_OTEL_LOCAL_TRACE_SAVING", ""))
+
+
 def _local_trace_saving_enabled() -> bool:
     """Return whether local trace saving is enabled for the current session."""
-    val = os.getenv("IDE_OTEL_LOCAL_TRACE_SAVING", "")
-    if val != "":
+    if _local_trace_saving_configured():
+        val = os.getenv("IDE_OTEL_LOCAL_TRACE_SAVING", "")
         return _safe_bool(val)
     return _batch_enabled()
 
 
 def _continue_response_json() -> str:
     payload = {"continue": True}
-    if os.getenv("IDE_OTEL_LOCAL_TRACE_SAVING", "") != "":
+    if _local_trace_saving_configured():
         payload["local_trace_saving"] = _local_trace_saving_enabled()
     return json.dumps(payload)
 
