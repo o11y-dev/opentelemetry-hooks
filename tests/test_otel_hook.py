@@ -607,7 +607,7 @@ class TestFlatten:
 
 class TestMainFlow:
     def test_outputs_continue_true(self, monkeypatch):
-        """Main always outputs continue=true and the local trace-saving flag."""
+        """Main outputs legacy continue response by default."""
         monkeypatch.setattr("sys.stdin", __import__("io").StringIO('{"hook_event_name":"stop"}'))
         # Prevent actual tracing init
         monkeypatch.setattr(otel_hook, "_init_tracing", lambda ide: False)
@@ -615,18 +615,24 @@ class TestMainFlow:
         monkeypatch.setattr(otel_hook, "_cleanup_state", lambda: None)
         monkeypatch.setattr(otel_hook, "_load_config", lambda: {})
         monkeypatch.delenv("IDE_OTEL_BATCH_ON_STOP", raising=False)
+        monkeypatch.delenv("IDE_OTEL_LOCAL_TRACE_SAVING", raising=False)
 
         captured = []
         monkeypatch.setattr("builtins.print", lambda s: captured.append(s))
         result = otel_hook.main()
         assert result == 0
-        assert json.loads(captured[0]) == {"continue": True, "local_trace_saving": False}
+        assert json.loads(captured[0]) == {"continue": True}
 
-    def test_continue_response_respects_batch_flag(self, monkeypatch):
-        monkeypatch.setenv("IDE_OTEL_BATCH_ON_STOP", "true")
+    def test_continue_response_opt_in_local_trace_saving_flag(self, monkeypatch):
+        monkeypatch.setenv("IDE_OTEL_LOCAL_TRACE_SAVING", "true")
         assert json.loads(otel_hook._continue_response_json()) == {
             "continue": True, "local_trace_saving": True
         }
+
+    def test_local_trace_saving_uses_batch_fallback(self, monkeypatch):
+        monkeypatch.setenv("IDE_OTEL_BATCH_ON_STOP", "true")
+        monkeypatch.delenv("IDE_OTEL_LOCAL_TRACE_SAVING", raising=False)
+        assert otel_hook._local_trace_saving_enabled() is True
 
     def test_empty_input(self, monkeypatch):
         """Empty stdin should not crash."""

@@ -200,6 +200,7 @@ Then restart your IDE.
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `IDE_OTEL_BATCH_ON_STOP` | Enable session-level batching (recommended) | `false` |
+| `IDE_OTEL_LOCAL_TRACE_SAVING` | Controls `local_trace_saving` in hook stdout response; if unset, behavior falls back to `IDE_OTEL_BATCH_ON_STOP` internally | unset |
 | `IDE_OTEL_CAPTURE_TEXT` | Include prompt/response text in spans | `false` |
 | `IDE_OTEL_MASK_PROMPTS` | Redact emails, tokens, usernames from text | `false` |
 | `IDE_OTEL_TEXT_MAX_CHARS` | Max characters for captured text | `4000` |
@@ -235,6 +236,24 @@ Then restart your IDE.
 | `IDE_OTEL_LOG_FILE` | Log file path | `.cursor/hooks/opentelemetry-hook/otel_hook.log` |
 | `IDE_OTEL_LOG_EVENTS` | Log each hook event to file | `false` |
 | `IDE_OTEL_DEBUG_CONSOLE` | Print spans to stdout (for debugging) | `false` |
+
+## Hook Stdout Response
+
+The hook writes a JSON response to stdout for the IDE/client.
+
+- Default (backward compatible):
+
+```json
+{"continue": true}
+```
+
+- If `IDE_OTEL_LOCAL_TRACE_SAVING` is explicitly set (`true` or `false`), the response includes:
+
+```json
+{"continue": true, "local_trace_saving": true}
+```
+
+`local_trace_saving` uses `IDE_OTEL_LOCAL_TRACE_SAVING` when set; otherwise internal behavior falls back to `IDE_OTEL_BATCH_ON_STOP`.
 
 ## MDM / Managed Configuration
 
