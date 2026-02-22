@@ -1,0 +1,116 @@
+name: Weekly Code Health Report
+
+on:
+  schedule:
+    - cron: "0 9 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  weekly-health-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt build setuptools-scm
+
+      - name: Run tests
+        id: tests
+        continue-on-error: true
+        run: python -m pytest tests/ -v
+
+      - name: Build package
+        id: build
+        continue-on-error: true
+        run: python -m build
+
+      - name: Check outdated dependencies
+        id: deps
+        continue-on-error: true
+        run: |
+          if pip list --outdated --format=json > outdated-deps.json; then
+            python -c "import json, os; count = len(json.load(open('outdated-deps.json', 'r', encoding='utf-8'))); open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8').write(f'count={count}\\n')"
+          else
+            echo '[]' > outdated-deps.json
+            echo "count=0" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create weekly improvement issue
+        if: ${{ always() && !cancelled() }}
+        uses: actions/github-script@v7
+        env:
+          TEST_STATUS: ${{ steps.tests.outcome }}
+          BUILD_STATUS: ${{ steps.build.outcome }}
+          OUTDATED_COUNT: ${{ steps.deps.outputs.count }}
+        with:
+          script: |
+            const fs = require('fs');
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            let outdatedDeps = [];
+            if (fs.existsSync('outdated-deps.json')) {
+              try {
+                outdatedDeps = JSON.parse(fs.readFileSync('outdated-deps.json', 'utf8'));
+              } catch (error) {
+                outdatedDeps = [];
+              }
+            }
+
+            const title = `[Weekly Health] Code health report - ${new Date().toISOString().slice(0, 10)}`;
+            const summary = [
+              `## Weekly automated code health check`,
+              `- Workflow run: ${runUrl}`,
+              `- Tests: ${process.env.TEST_STATUS || 'not-run'}`,
+              `- Build: ${process.env.BUILD_STATUS || 'not-run'}`,
+              `- Outdated dependencies: ${process.env.OUTDATED_COUNT || '0'}`,
+              ``,
+              `## Suggested improvement actions`,
+              `- [ ] Fix failing tests/build if any status is failure`,
+              `- [ ] Review and safely upgrade outdated dependencies`,
+              `- [ ] Add or refine tests for any changed behavior`,
+            ];
+
+            const existing = await github.paginate(github.rest.issues.listForRepo, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              per_page: 100
+            });
+            for (const issue of existing) {
+              if (issue.title.startsWith('[Weekly Health] Code health report -')) {
+                await github.rest.issues.update({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  state: 'closed'
+                });
+              }
+            }
+
+            if (outdatedDeps.length > 0) {
+              summary.push('', '### Outdated dependencies');
+              for (const dep of outdatedDeps) {
+                summary.push(`- ${dep.name}: ${dep.version} → ${dep.latest_version}`);
+              }
+            }
+
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title,
+              body: summary.join('\n')
+            });
+
+      - name: Fail workflow when checks fail
+        if: steps.tests.outcome == 'failure' || steps.build.outcome == 'failure'
+        run: exit 1
