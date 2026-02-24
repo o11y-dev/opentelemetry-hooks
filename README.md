@@ -200,7 +200,7 @@ Then restart your IDE.
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `IDE_OTEL_BATCH_ON_STOP` | Enable session-level batching (recommended) | `false` |
-| `IDE_OTEL_LOCAL_TRACE_SAVING` | Controls `local_trace_saving` in hook stdout response; if unset, behavior falls back to `IDE_OTEL_BATCH_ON_STOP` internally | unset |
+| `IDE_OTEL_LOCAL_TRACE_SAVING` | Save hook traces locally as JSONL files for agent analysis (`.state/local_traces/*.jsonl`) | unset |
 | `IDE_OTEL_CAPTURE_TEXT` | Include prompt/response text in spans | `false` |
 | `IDE_OTEL_MASK_PROMPTS` | Redact emails, tokens, usernames from text | `false` |
 | `IDE_OTEL_TEXT_MAX_CHARS` | Max characters for captured text | `4000` |
@@ -253,7 +253,31 @@ The hook writes a JSON response to stdout for the IDE/client.
 {"continue": true, "local_trace_saving": true}
 ```
 
-`local_trace_saving` uses `IDE_OTEL_LOCAL_TRACE_SAVING` when set; otherwise internal behavior falls back to `IDE_OTEL_BATCH_ON_STOP`.
+For the stdout response field, `local_trace_saving` uses `IDE_OTEL_LOCAL_TRACE_SAVING` when set; otherwise internal behavior falls back to `IDE_OTEL_BATCH_ON_STOP`.
+
+## Local Trace Files (Agent-Friendly)
+
+When local trace saving is enabled, each hook event is also written to JSONL in:
+
+- `.cursor/hooks/opentelemetry-hook/.state/local_traces/<session_key>.jsonl`
+- `.cursor/hooks/opentelemetry-hook/.state/local_traces/unscoped.jsonl` (if no session key exists)
+
+Each line is a single JSON object, for example:
+
+```json
+{
+  "timestamp_ns": 1771976482308258082,
+  "event": "UserPromptSubmit",
+  "ide": "copilot",
+  "session_key": "agent-s1",
+  "generation_key": null,
+  "data": {
+    "hook_event_name": "beforeSubmitPrompt",
+    "session_id": "agent-s1",
+    "prompt": "hello"
+  }
+}
+```
 
 ## MDM / Managed Configuration
 
