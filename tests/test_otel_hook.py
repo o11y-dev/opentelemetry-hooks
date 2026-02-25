@@ -717,7 +717,7 @@ class TestMainFlow:
         monkeypatch.setattr("builtins.print", lambda s: captured.append(s))
         result = otel_hook.main()
         assert result == 0
-        assert calls  # file exporter was registered
+        assert len(calls) == 1 and calls[0].endswith(".jsonl")
 
     def test_empty_input(self, monkeypatch):
         """Empty stdin should not crash."""
