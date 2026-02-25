@@ -192,8 +192,9 @@ Then restart your IDE.
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP collector endpoint | `http://localhost:4317` |
 | `OTEL_EXPORTER_OTLP_PROTOCOL` | `grpc`, `http/protobuf`, or `http/json` | `grpc` |
 | `OTEL_EXPORTER_OTLP_HEADERS` | Auth headers (URL-encoded `key=value` pairs) | — |
-| `OTEL_EXPORTER_OTLP_INSECURE` | Allow insecure TLS | `true` |
 | `OTEL_SERVICE_NAME` | Service name in traces | `ide-agent` |
+
+> **Note**: `OTEL_EXPORTER_OTLP_INSECURE` is only used by the OTLP **gRPC** exporter (`OTEL_EXPORTER_OTLP_PROTOCOL=grpc`). It defaults to `true` (plaintext); set to `false` for TLS-secured gRPC endpoints. For `http/protobuf` and `http/json` exporters, TLS is determined by the endpoint scheme (`https://` vs `http://`).
 
 ### Hook Behavior
 
@@ -206,10 +207,6 @@ Then restart your IDE.
 | `IDE_OTEL_TEXT_MAX_CHARS` | Max characters for captured text | `4000` |
 | `IDE_OTEL_CAPTURE_TOOL_INPUT_CONTENT` | Include tool input content in logs | `false` |
 | `IDE_OTEL_CAPTURE_TOOL_DEFINITIONS` | Include tool definitions in spans | `false` |
-| `IDE_OTEL_DISABLE_BATCH` | Disable OpenTelemetry batch span processor | `false` |
-| `IDE_OTEL_STATE_TTL_SECONDS` | TTL for state files before cleanup | `86400` |
-| `IDE_OTEL_STATE_CLEANUP_INTERVAL_SECONDS` | Minimum interval between cleanup runs | `3600` |
-| `IDE_OTEL_STATE_LOCK_TIMEOUT_SECONDS` | Max time to wait for state file locks | `2` |
 
 ### OTel Logs
 
@@ -236,6 +233,18 @@ Then restart your IDE.
 | `IDE_OTEL_LOG_FILE` | Log file path | `.cursor/hooks/opentelemetry-hook/otel_hook.log` |
 | `IDE_OTEL_LOG_EVENTS` | Log each hook event to file | `false` |
 | `IDE_OTEL_DEBUG_CONSOLE` | Print spans to stdout (for debugging) | `false` |
+
+### Advanced (Rarely Needed)
+
+These settings have sensible defaults and typically don't need to be changed:
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `OTEL_EXPORTER_OTLP_INSECURE` | **gRPC only**: `true` for plaintext, `false` for TLS | `true` |
+| `IDE_OTEL_DISABLE_BATCH` | Disable OpenTelemetry batch span processor | `false` |
+| `IDE_OTEL_STATE_TTL_SECONDS` | TTL for state files before cleanup | `86400` |
+| `IDE_OTEL_STATE_CLEANUP_INTERVAL_SECONDS` | Minimum interval between cleanup runs | `3600` |
+| `IDE_OTEL_STATE_LOCK_TIMEOUT_SECONDS` | Max time to wait for state file locks | `2` |
 
 ## Hook Stdout Response
 
