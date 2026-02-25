@@ -339,6 +339,13 @@ class TestMdmConfigPrecedence:
                     result = otel_hook._load_config()
         assert result["OTEL_SERVICE_NAME"] == "json-service"
 
+    def test_apply_config_skips_underscore_keys(self):
+        config = {"_comment_1": "=== Section ===", "OTEL_SERVICE_NAME": "test-svc"}
+        with mock.patch.dict(os.environ, {}, clear=True):
+            otel_hook._apply_config_env(config)
+            assert "_comment_1" not in os.environ
+            assert os.environ["OTEL_SERVICE_NAME"] == "test-svc"
+
 
 # ── Session & generation key extraction ───────────────────────────────────
 

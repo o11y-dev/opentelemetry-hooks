@@ -670,7 +670,7 @@ def _coerce_env_value(key: str, value) -> str:
 
 def _apply_config_env(config: dict) -> None:
     for key, value in config.items():
-        if not key or value is None or key in os.environ:
+        if not key or value is None or key in os.environ or key.startswith("_"):
             continue
         os.environ[key] = _coerce_env_value(key, value)
 

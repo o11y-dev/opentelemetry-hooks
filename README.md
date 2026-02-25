@@ -194,7 +194,7 @@ Then restart your IDE.
 | `OTEL_EXPORTER_OTLP_HEADERS` | Auth headers (URL-encoded `key=value` pairs) | — |
 | `OTEL_SERVICE_NAME` | Service name in traces | `ide-agent` |
 
-> **Note**: `OTEL_EXPORTER_OTLP_INSECURE` defaults to `true` (plaintext / no TLS). You only need to set it to `false` when connecting to a TLS-secured endpoint.
+> **Note**: `OTEL_EXPORTER_OTLP_INSECURE` is only used by the OTLP **gRPC** exporter (`OTEL_EXPORTER_OTLP_PROTOCOL=grpc`). It defaults to `true` (plaintext); set to `false` for TLS-secured gRPC endpoints. For `http/protobuf` and `http/json` exporters, TLS is determined by the endpoint scheme (`https://` vs `http://`).
 
 ### Hook Behavior
 
@@ -240,7 +240,7 @@ These settings have sensible defaults and typically don't need to be changed:
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `OTEL_EXPORTER_OTLP_INSECURE` | Disable TLS for OTLP connection (plaintext) | `true` |
+| `OTEL_EXPORTER_OTLP_INSECURE` | **gRPC only**: `true` for plaintext, `false` for TLS | `true` |
 | `IDE_OTEL_DISABLE_BATCH` | Disable OpenTelemetry batch span processor | `false` |
 | `IDE_OTEL_STATE_TTL_SECONDS` | TTL for state files before cleanup | `86400` |
 | `IDE_OTEL_STATE_CLEANUP_INTERVAL_SECONDS` | Minimum interval between cleanup runs | `3600` |
