@@ -120,7 +120,8 @@ _CONFIG_DEFAULT = os.path.join(_HOOK_DIR, "otel_config.json")
 _STATE_DIR = os.path.join(_HOOK_DIR, ".state")
 _SESSION_DIR = os.path.join(_STATE_DIR, "sessions")
 _BATCH_DIR = os.path.join(_STATE_DIR, "batches")
-_LOCAL_TRACE_DIR = os.path.join(_STATE_DIR, "local_traces")
+_LOCAL_SPANS_DIR = os.path.join(_STATE_DIR, "local_spans")
+_LOCAL_TRACE_DIR = _LOCAL_SPANS_DIR  # backward-compatible alias
 _LOCK_DIR = os.path.join(_STATE_DIR, "locks")
 _CLEANUP_MARKER = os.path.join(_STATE_DIR, "last_cleanup")
 
@@ -1337,33 +1338,33 @@ def _batch_enabled() -> bool:
     return _safe_bool(os.getenv("IDE_OTEL_BATCH_ON_STOP", ""))
 
 
-def _local_trace_saving_configured() -> bool:
-    return bool(os.getenv("IDE_OTEL_LOCAL_TRACE_SAVING", ""))
+def _local_spans_configured() -> bool:
+    return bool(os.getenv("IDE_OTEL_LOCAL_SPANS", "") or os.getenv("IDE_OTEL_LOCAL_TRACE_SAVING", ""))
 
 
-def _local_trace_saving_enabled() -> bool:
-    """Return whether local trace saving is enabled for the current session."""
-    if _local_trace_saving_configured():
-        val = os.getenv("IDE_OTEL_LOCAL_TRACE_SAVING", "")
+def _local_spans_enabled() -> bool:
+    """Return whether local spans are enabled for the current session."""
+    if _local_spans_configured():
+        val = os.getenv("IDE_OTEL_LOCAL_SPANS", "") or os.getenv("IDE_OTEL_LOCAL_TRACE_SAVING", "")
         return _safe_bool(val)
     return _batch_enabled()
 
 
 def _continue_response_json() -> str:
     payload = {"continue": True}
-    if _local_trace_saving_configured():
-        payload["local_trace_saving"] = _local_trace_saving_enabled()
+    if _local_spans_configured():
+        payload["local_spans"] = _local_spans_enabled()
     return json.dumps(payload)
 
 
-def _local_trace_path(session_key: Optional[str]) -> str:
+def _local_span_path(session_key: Optional[str]) -> str:
     key = session_key or "unscoped"
     safe_key = re.sub(r"[^A-Za-z0-9_.-]+", "_", key)
-    return os.path.join(_LOCAL_TRACE_DIR, f"{safe_key}.jsonl")
+    return os.path.join(_LOCAL_SPANS_DIR, f"{safe_key}.jsonl")
 
 
-def _save_local_trace_event(event_name: str, ide: str, data: dict) -> None:
-    if not _local_trace_saving_enabled():
+def _save_local_span_event(event_name: str, ide: str, data: dict) -> None:
+    if not _local_spans_enabled():
         return
     session_key = _session_key(data)
     record = {
@@ -1376,14 +1377,26 @@ def _save_local_trace_event(event_name: str, ide: str, data: dict) -> None:
     }
     lock_key = session_key or "unscoped"
     lock_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", lock_key)
-    lock_path = os.path.join(_LOCK_DIR, f"local_trace_{lock_name}.lock")
+    lock_path = os.path.join(_LOCK_DIR, f"local_spans_{lock_name}.lock")
     try:
-        os.makedirs(_LOCAL_TRACE_DIR, exist_ok=True)
+        os.makedirs(_LOCAL_SPANS_DIR, exist_ok=True)
         with _acquire_lock(lock_path):
-            with open(_local_trace_path(session_key), "a", encoding="utf-8") as fh:
+            with open(_local_span_path(session_key), "a", encoding="utf-8") as fh:
                 fh.write(json.dumps(record, ensure_ascii=True, default=str) + "\n")
     except OSError as exc:
-        _LOGGER.debug("local trace save failed: %s", exc)
+        _LOGGER.debug("local spans save failed: %s", exc)
+
+
+def _local_trace_saving_configured() -> bool:
+    return _local_spans_configured()
+
+
+def _local_trace_saving_enabled() -> bool:
+    return _local_spans_enabled()
+
+
+def _save_local_trace_event(event_name: str, ide: str, data: dict) -> None:
+    _save_local_span_event(event_name, ide, data)
 
 
 def _batch_path(key: str) -> str:
@@ -1677,7 +1690,7 @@ def main() -> int:
     raw_event = _get_event_name(data)
     event_name = _normalize_event(raw_event)
     ide = _detect_ide(data)
-    _save_local_trace_event(event_name, ide, data)
+    _save_local_span_event(event_name, ide, data)
 
     if _safe_bool(os.getenv("IDE_OTEL_LOG_EVENTS", "")):
         _LOGGER.info(
