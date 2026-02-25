@@ -851,8 +851,9 @@ def _span_to_dict(span) -> dict:
     """Serialize an OTel ReadableSpan to a JSON-compatible dict."""
     ctx = span.context
     parent_id = None
-    if span.parent and hasattr(span.parent, "span_id"):
-        parent_id = format(span.parent.span_id, "016x")
+    parent_ctx = span.parent
+    if parent_ctx is not None and getattr(parent_ctx, "span_id", 0) != 0:
+        parent_id = format(parent_ctx.span_id, "016x")
     return {
         "name": span.name,
         "trace_id": format(ctx.trace_id, "032x") if ctx else None,
