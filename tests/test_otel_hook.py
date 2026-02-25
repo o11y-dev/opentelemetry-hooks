@@ -450,29 +450,58 @@ class TestBatchBuffer:
 
 
 class TestLocalTracePersistence:
-    def test_saves_jsonl_record_when_enabled(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("IDE_OTEL_LOCAL_SPANS", "true")
-        with mock.patch.object(otel_hook, "_LOCAL_SPANS_DIR", str(tmp_path)):
-            with mock.patch.object(otel_hook, "_LOCK_DIR", str(tmp_path / "locks")):
-                otel_hook._save_local_span_event(
-                    "UserPromptSubmit", "cursor", {"session_id": "sess-1", "prompt": "hello"}
-                )
-        saved = tmp_path / "sess-1.jsonl"
-        assert saved.exists()
-        rec = json.loads(saved.read_text().strip())
-        assert rec["event"] == "UserPromptSubmit"
-        assert rec["session_key"] == "sess-1"
+    def _make_mock_span(self, name="ide.generation", session_key="sess-1", trace_id=0xABCD, span_id=0x1234):
+        span = mock.MagicMock()
+        span.name = name
+        ctx = mock.MagicMock()
+        ctx.trace_id = trace_id
+        ctx.span_id = span_id
+        span.context = ctx
+        span.parent = None
+        span.start_time = 1_000_000_000
+        span.end_time = 2_000_000_000
+        span.attributes = {"ide.session.key": session_key}
+        span.status = mock.MagicMock()
+        span.status.status_code.name = "OK"
+        return span
 
-    def test_uses_batch_fallback_when_local_flag_unset(self, tmp_path, monkeypatch):
+    def test_file_span_exporter_writes_jsonl(self, tmp_path):
+        out_file = str(tmp_path / "spans.jsonl")
+        exporter = otel_hook._FileSpanExporter(out_file)
+        span = self._make_mock_span()
+        with mock.patch.object(otel_hook, "_LOCK_DIR", str(tmp_path / "locks")):
+            exporter.export([span])
+        assert os.path.exists(out_file)
+        rec = json.loads(open(out_file).read().strip())
+        assert rec["name"] == "ide.generation"
+        assert rec["attributes"]["ide.session.key"] == "sess-1"
+        assert rec["status"] == "OK"
+
+    def test_file_span_exporter_appends_multiple_spans(self, tmp_path):
+        out_file = str(tmp_path / "spans.jsonl")
+        exporter = otel_hook._FileSpanExporter(out_file)
+        with mock.patch.object(otel_hook, "_LOCK_DIR", str(tmp_path / "locks")):
+            exporter.export([self._make_mock_span("span-1")])
+            exporter.export([self._make_mock_span("span-2")])
+        lines = open(out_file).read().strip().splitlines()
+        assert len(lines) == 2
+        assert json.loads(lines[0])["name"] == "span-1"
+        assert json.loads(lines[1])["name"] == "span-2"
+
+    def test_file_span_exporter_shutdown_is_noop(self, tmp_path):
+        exporter = otel_hook._FileSpanExporter(str(tmp_path / "spans.jsonl"))
+        exporter.shutdown()  # must not raise
+
+    def test_file_span_exporter_force_flush_returns_true(self, tmp_path):
+        exporter = otel_hook._FileSpanExporter(str(tmp_path / "spans.jsonl"))
+        assert exporter.force_flush() is True
+
+    def test_uses_batch_fallback_when_local_flag_unset(self, monkeypatch):
         monkeypatch.delenv("IDE_OTEL_LOCAL_SPANS", raising=False)
         monkeypatch.delenv("IDE_OTEL_LOCAL_TRACE_SAVING", raising=False)
         monkeypatch.setenv("IDE_OTEL_BATCH_ON_STOP", "true")
         # Local trace saving should still be enabled via the batch fallback mechanism.
         assert otel_hook._local_spans_enabled() is True
-        with mock.patch.object(otel_hook, "_LOCAL_SPANS_DIR", str(tmp_path)):
-            with mock.patch.object(otel_hook, "_LOCK_DIR", str(tmp_path / "locks")):
-                otel_hook._save_local_span_event("Stop", "copilot", {"session_id": "sess-2"})
-        assert (tmp_path / "sess-2.jsonl").exists()
 
 
 # ── Session context persistence ───────────────────────────────────────────
@@ -665,23 +694,30 @@ class TestMainFlow:
         monkeypatch.delenv("IDE_OTEL_LOCAL_TRACE_SAVING", raising=False)
         assert otel_hook._local_spans_enabled() is True
 
-    def test_main_saves_local_span_event_when_enabled(self, monkeypatch):
+    def test_main_enables_file_exporter_when_local_spans_enabled(self, monkeypatch):
         monkeypatch.setenv("IDE_OTEL_LOCAL_SPANS", "true")
         monkeypatch.setattr("sys.stdin", __import__("io").StringIO('{"hook_event_name":"Stop"}'))
-        monkeypatch.setattr(otel_hook, "_init_tracing", lambda ide: False)
         monkeypatch.setattr(otel_hook, "_configure_logging", lambda: None)
         monkeypatch.setattr(otel_hook, "_cleanup_state", lambda: None)
         monkeypatch.setattr(otel_hook, "_load_config", lambda: {})
+        monkeypatch.setattr(otel_hook, "_init_tracing", lambda ide: True)
+        monkeypatch.setattr(otel_hook, "_flush_stale_sessions", lambda tracer: None)
+        monkeypatch.setattr(otel_hook, "_force_flush_provider", lambda **kw: None)
+        mock_span_cm = mock.MagicMock()
+        mock_span_cm.__enter__ = mock.MagicMock(return_value=mock_span_cm)
+        mock_span_cm.__exit__ = mock.MagicMock(return_value=False)
+        mock_tracer = mock.MagicMock()
+        mock_tracer.start_as_current_span.return_value = mock_span_cm
+        mock_trace = mock.MagicMock()
+        mock_trace.get_tracer.return_value = mock_tracer
+        monkeypatch.setattr(otel_hook, "trace", mock_trace)
+        calls = []
+        monkeypatch.setattr(otel_hook, "_enable_file_exporter", lambda path: calls.append(path))
         captured = []
         monkeypatch.setattr("builtins.print", lambda s: captured.append(s))
-        calls = []
-        monkeypatch.setattr(
-            otel_hook, "_save_local_span_event",
-            lambda event_name, ide, data: calls.append((event_name, ide, data)),
-        )
         result = otel_hook.main()
         assert result == 0
-        assert calls and calls[0][0] == "Stop"
+        assert calls  # file exporter was registered
 
     def test_empty_input(self, monkeypatch):
         """Empty stdin should not crash."""

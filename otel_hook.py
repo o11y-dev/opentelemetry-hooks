@@ -847,6 +847,68 @@ def _enable_console_log_exporter() -> None:
         provider.add_log_record_processor(SimpleLogRecordProcessor(ConsoleExporter()))
 
 
+def _span_to_dict(span) -> dict:
+    """Serialize an OTel ReadableSpan to a JSON-compatible dict."""
+    ctx = span.context
+    parent_id = None
+    if span.parent and hasattr(span.parent, "span_id"):
+        parent_id = format(span.parent.span_id, "016x")
+    return {
+        "name": span.name,
+        "trace_id": format(ctx.trace_id, "032x") if ctx else None,
+        "span_id": format(ctx.span_id, "016x") if ctx else None,
+        "parent_span_id": parent_id,
+        "start_time_ns": span.start_time,
+        "end_time_ns": span.end_time,
+        "attributes": dict(span.attributes or {}),
+        "status": span.status.status_code.name if span.status else None,
+    }
+
+
+class _FileSpanExporter:
+    """OTel SpanExporter that appends spans as JSONL to a file."""
+
+    def __init__(self, path: str) -> None:
+        self._path = path
+        lock_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", os.path.basename(path))
+        self._lock_path = os.path.join(_LOCK_DIR, f"file_exporter_{lock_name}.lock")
+
+    def export(self, spans) -> int:
+        try:
+            from opentelemetry.sdk.trace.export import SpanExportResult
+        except ImportError:
+            return 1  # FAILURE
+        try:
+            os.makedirs(os.path.dirname(self._path), exist_ok=True)
+            with _acquire_lock(self._lock_path):
+                with open(self._path, "a", encoding="utf-8") as fh:
+                    for span in spans:
+                        fh.write(json.dumps(_span_to_dict(span), ensure_ascii=True, default=str) + "\n")
+            return SpanExportResult.SUCCESS
+        except OSError as exc:
+            _LOGGER.debug("file span exporter write failed: %s", exc)
+            return SpanExportResult.FAILURE
+
+    def shutdown(self) -> None:
+        pass
+
+    def force_flush(self, timeout_millis: int = 30000) -> bool:
+        return True
+
+
+def _enable_file_exporter(path: str) -> None:
+    """Add a file span exporter to the TracerProvider for local span persistence."""
+    try:
+        from opentelemetry.sdk.trace import TracerProvider
+        from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    except ImportError as exc:
+        _LOGGER.warning("File exporter unavailable: %s", exc)
+        return
+    provider = trace.get_tracer_provider()
+    if isinstance(provider, TracerProvider):
+        provider.add_span_processor(SimpleSpanProcessor(_FileSpanExporter(path)))
+
+
 def _force_flush_provider(timeout_millis: int = 5000) -> None:
     """Flush the SDK TracerProvider and LoggerProvider to push pending data."""
     try:
@@ -1690,7 +1752,6 @@ def main() -> int:
     raw_event = _get_event_name(data)
     event_name = _normalize_event(raw_event)
     ide = _detect_ide(data)
-    _save_local_span_event(event_name, ide, data)
 
     if _safe_bool(os.getenv("IDE_OTEL_LOG_EVENTS", "")):
         _LOGGER.info(
@@ -1701,6 +1762,9 @@ def main() -> int:
     if not _init_tracing(ide):
         print(_continue_response_json())
         return 0
+
+    if _local_spans_enabled():
+        _enable_file_exporter(_local_span_path(_session_key(data)))
 
     tracer = trace.get_tracer("ide-hooks")
     _flush_stale_sessions(tracer)
