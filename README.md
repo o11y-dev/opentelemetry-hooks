@@ -200,6 +200,7 @@ Then restart your IDE.
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `IDE_OTEL_BATCH_ON_STOP` | Enable session-level batching (recommended) | `false` |
+| `IDE_OTEL_LOCAL_SPANS` | Save hook spans locally as JSONL files for agent analysis (`.state/local_spans/*.jsonl`) | unset |
 | `IDE_OTEL_CAPTURE_TEXT` | Include prompt/response text in spans | `false` |
 | `IDE_OTEL_MASK_PROMPTS` | Redact emails, tokens, usernames from text | `false` |
 | `IDE_OTEL_TEXT_MAX_CHARS` | Max characters for captured text | `4000` |
@@ -235,6 +236,48 @@ Then restart your IDE.
 | `IDE_OTEL_LOG_FILE` | Log file path | `.cursor/hooks/opentelemetry-hook/otel_hook.log` |
 | `IDE_OTEL_LOG_EVENTS` | Log each hook event to file | `false` |
 | `IDE_OTEL_DEBUG_CONSOLE` | Print spans to stdout (for debugging) | `false` |
+
+## Hook Stdout Response
+
+The hook writes a JSON response to stdout for the IDE/client.
+
+- Default (backward compatible):
+
+```json
+{"continue": true}
+```
+
+- If `IDE_OTEL_LOCAL_SPANS` is explicitly set (`true` or `false`), the response includes:
+
+```json
+{"continue": true, "local_spans": true}
+```
+
+For the stdout response field, `local_spans` uses `IDE_OTEL_LOCAL_SPANS` when set; otherwise internal behavior falls back to `IDE_OTEL_BATCH_ON_STOP`.
+
+## Local Trace Files (Agent-Friendly)
+
+When local trace saving is enabled, each hook event is also written to JSONL in:
+
+- `.cursor/hooks/opentelemetry-hook/.state/local_spans/<session_key>.jsonl`
+- `.cursor/hooks/opentelemetry-hook/.state/local_spans/unscoped.jsonl` (if no session key exists)
+
+Each line is a single JSON object, for example:
+
+```json
+{
+  "timestamp_ns": 1771976482308258082,
+  "event": "UserPromptSubmit",
+  "ide": "copilot",
+  "session_key": "agent-s1",
+  "generation_key": null,
+  "data": {
+    "hook_event_name": "beforeSubmitPrompt",
+    "session_id": "agent-s1",
+    "prompt": "hello"
+  }
+}
+```
 
 ## MDM / Managed Configuration
 

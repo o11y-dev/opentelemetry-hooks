@@ -120,6 +120,8 @@ _CONFIG_DEFAULT = os.path.join(_HOOK_DIR, "otel_config.json")
 _STATE_DIR = os.path.join(_HOOK_DIR, ".state")
 _SESSION_DIR = os.path.join(_STATE_DIR, "sessions")
 _BATCH_DIR = os.path.join(_STATE_DIR, "batches")
+_LOCAL_SPANS_DIR = os.path.join(_STATE_DIR, "local_spans")
+_LOCAL_TRACE_DIR = _LOCAL_SPANS_DIR  # backward-compatible alias
 _LOCK_DIR = os.path.join(_STATE_DIR, "locks")
 _CLEANUP_MARKER = os.path.join(_STATE_DIR, "last_cleanup")
 
@@ -1336,6 +1338,67 @@ def _batch_enabled() -> bool:
     return _safe_bool(os.getenv("IDE_OTEL_BATCH_ON_STOP", ""))
 
 
+def _local_spans_configured() -> bool:
+    return bool(os.getenv("IDE_OTEL_LOCAL_SPANS", "") or os.getenv("IDE_OTEL_LOCAL_TRACE_SAVING", ""))
+
+
+def _local_spans_enabled() -> bool:
+    """Return whether local spans are enabled for the current session."""
+    if _local_spans_configured():
+        val = os.getenv("IDE_OTEL_LOCAL_SPANS", "") or os.getenv("IDE_OTEL_LOCAL_TRACE_SAVING", "")
+        return _safe_bool(val)
+    return _batch_enabled()
+
+
+def _continue_response_json() -> str:
+    payload = {"continue": True}
+    if _local_spans_configured():
+        payload["local_spans"] = _local_spans_enabled()
+    return json.dumps(payload)
+
+
+def _local_span_path(session_key: Optional[str]) -> str:
+    key = session_key or "unscoped"
+    safe_key = re.sub(r"[^A-Za-z0-9_.-]+", "_", key)
+    return os.path.join(_LOCAL_SPANS_DIR, f"{safe_key}.jsonl")
+
+
+def _save_local_span_event(event_name: str, ide: str, data: dict) -> None:
+    if not _local_spans_enabled():
+        return
+    session_key = _session_key(data)
+    record = {
+        "timestamp_ns": time.time_ns(),
+        "event": event_name,
+        "ide": ide,
+        "session_key": session_key,
+        "generation_key": _generation_key_from_data(data),
+        "data": data,
+    }
+    lock_key = session_key or "unscoped"
+    lock_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", lock_key)
+    lock_path = os.path.join(_LOCK_DIR, f"local_spans_{lock_name}.lock")
+    try:
+        os.makedirs(_LOCAL_SPANS_DIR, exist_ok=True)
+        with _acquire_lock(lock_path):
+            with open(_local_span_path(session_key), "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(record, ensure_ascii=True, default=str) + "\n")
+    except OSError as exc:
+        _LOGGER.debug("local spans save failed: %s", exc)
+
+
+def _local_trace_saving_configured() -> bool:
+    return _local_spans_configured()
+
+
+def _local_trace_saving_enabled() -> bool:
+    return _local_spans_enabled()
+
+
+def _save_local_trace_event(event_name: str, ide: str, data: dict) -> None:
+    _save_local_span_event(event_name, ide, data)
+
+
 def _batch_path(key: str) -> str:
     safe_key = re.sub(r"[^A-Za-z0-9_.-]+", "_", key)
     return os.path.join(_BATCH_DIR, f"{safe_key}.jsonl")
@@ -1627,6 +1690,7 @@ def main() -> int:
     raw_event = _get_event_name(data)
     event_name = _normalize_event(raw_event)
     ide = _detect_ide(data)
+    _save_local_span_event(event_name, ide, data)
 
     if _safe_bool(os.getenv("IDE_OTEL_LOG_EVENTS", "")):
         _LOGGER.info(
@@ -1635,7 +1699,7 @@ def main() -> int:
         )
 
     if not _init_tracing(ide):
-        print(json.dumps({"continue": True}))
+        print(_continue_response_json())
         return 0
 
     tracer = trace.get_tracer("ide-hooks")
@@ -1653,7 +1717,7 @@ def main() -> int:
                 if sk:
                     session_ctx = _create_session_context(sk, data, ide)
                     _append_batch_event(f"{sk}_session", event_name, data)
-                print(json.dumps({"continue": True}))
+                print(_continue_response_json())
                 return 0
 
             # UserPromptSubmit: start a new generation
@@ -1664,7 +1728,7 @@ def main() -> int:
                     session_ctx = _load_session_context(sk)
                 if gen_key:
                     _append_batch_event(gen_key, event_name, data)
-                print(json.dumps({"continue": True}))
+                print(_continue_response_json())
                 return 0
 
             # Stop: flush generation
@@ -1677,7 +1741,7 @@ def main() -> int:
                     if sk and session_ctx:
                         session_ctx.pop("current_generation", None)
                         _write_session_context(sk, session_ctx)
-                print(json.dumps({"continue": True}))
+                print(_continue_response_json())
                 return 0
 
             # SessionEnd: emit session root span, clean up
@@ -1685,7 +1749,7 @@ def main() -> int:
                 if sk and session_ctx:
                     _flush_session(tracer, sk, session_ctx, ide)
                     _clear_session_context(sk)
-                print(json.dumps({"continue": True}))
+                print(_continue_response_json())
                 return 0
 
             # All other events: buffer under current generation
@@ -1706,7 +1770,7 @@ def main() -> int:
                 ) as span:
                     _populate_span(span, event_name, data, ide)
 
-            print(json.dumps({"continue": True}))
+            print(_continue_response_json())
             return 0
 
         # ── Streaming mode: emit spans immediately ──
@@ -1748,7 +1812,7 @@ def main() -> int:
                 cur.set_status(Status(StatusCode.ERROR, str(exc)))
         _LOGGER.exception("Hook failure: %s", exc)
 
-    print(json.dumps({"continue": True}))
+    print(_continue_response_json())
     return 0
 
 

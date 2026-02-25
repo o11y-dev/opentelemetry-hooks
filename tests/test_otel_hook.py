@@ -446,6 +446,35 @@ class TestBatchBuffer:
             assert otel_hook._load_batch_events("nonexistent") == []
 
 
+# ── Local trace persistence ────────────────────────────────────────────────
+
+
+class TestLocalTracePersistence:
+    def test_saves_jsonl_record_when_enabled(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("IDE_OTEL_LOCAL_SPANS", "true")
+        with mock.patch.object(otel_hook, "_LOCAL_SPANS_DIR", str(tmp_path)):
+            with mock.patch.object(otel_hook, "_LOCK_DIR", str(tmp_path / "locks")):
+                otel_hook._save_local_span_event(
+                    "UserPromptSubmit", "cursor", {"session_id": "sess-1", "prompt": "hello"}
+                )
+        saved = tmp_path / "sess-1.jsonl"
+        assert saved.exists()
+        rec = json.loads(saved.read_text().strip())
+        assert rec["event"] == "UserPromptSubmit"
+        assert rec["session_key"] == "sess-1"
+
+    def test_uses_batch_fallback_when_local_flag_unset(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("IDE_OTEL_LOCAL_SPANS", raising=False)
+        monkeypatch.delenv("IDE_OTEL_LOCAL_TRACE_SAVING", raising=False)
+        monkeypatch.setenv("IDE_OTEL_BATCH_ON_STOP", "true")
+        # Local trace saving should still be enabled via the batch fallback mechanism.
+        assert otel_hook._local_spans_enabled() is True
+        with mock.patch.object(otel_hook, "_LOCAL_SPANS_DIR", str(tmp_path)):
+            with mock.patch.object(otel_hook, "_LOCK_DIR", str(tmp_path / "locks")):
+                otel_hook._save_local_span_event("Stop", "copilot", {"session_id": "sess-2"})
+        assert (tmp_path / "sess-2.jsonl").exists()
+
+
 # ── Session context persistence ───────────────────────────────────────────
 
 
@@ -607,19 +636,52 @@ class TestFlatten:
 
 class TestMainFlow:
     def test_outputs_continue_true(self, monkeypatch):
-        """Main always outputs {"continue": true} for the IDE to proceed."""
+        """Main outputs legacy continue response by default."""
         monkeypatch.setattr("sys.stdin", __import__("io").StringIO('{"hook_event_name":"stop"}'))
         # Prevent actual tracing init
         monkeypatch.setattr(otel_hook, "_init_tracing", lambda ide: False)
         monkeypatch.setattr(otel_hook, "_configure_logging", lambda: None)
         monkeypatch.setattr(otel_hook, "_cleanup_state", lambda: None)
         monkeypatch.setattr(otel_hook, "_load_config", lambda: {})
+        monkeypatch.delenv("IDE_OTEL_BATCH_ON_STOP", raising=False)
+        monkeypatch.delenv("IDE_OTEL_LOCAL_SPANS", raising=False)
+        monkeypatch.delenv("IDE_OTEL_LOCAL_TRACE_SAVING", raising=False)
 
         captured = []
         monkeypatch.setattr("builtins.print", lambda s: captured.append(s))
         result = otel_hook.main()
         assert result == 0
         assert json.loads(captured[0]) == {"continue": True}
+
+    def test_continue_response_opt_in_local_spans_flag(self, monkeypatch):
+        monkeypatch.setenv("IDE_OTEL_LOCAL_SPANS", "true")
+        assert json.loads(otel_hook._continue_response_json()) == {
+            "continue": True, "local_spans": True
+        }
+
+    def test_local_spans_uses_batch_fallback(self, monkeypatch):
+        monkeypatch.setenv("IDE_OTEL_BATCH_ON_STOP", "true")
+        monkeypatch.delenv("IDE_OTEL_LOCAL_SPANS", raising=False)
+        monkeypatch.delenv("IDE_OTEL_LOCAL_TRACE_SAVING", raising=False)
+        assert otel_hook._local_spans_enabled() is True
+
+    def test_main_saves_local_span_event_when_enabled(self, monkeypatch):
+        monkeypatch.setenv("IDE_OTEL_LOCAL_SPANS", "true")
+        monkeypatch.setattr("sys.stdin", __import__("io").StringIO('{"hook_event_name":"Stop"}'))
+        monkeypatch.setattr(otel_hook, "_init_tracing", lambda ide: False)
+        monkeypatch.setattr(otel_hook, "_configure_logging", lambda: None)
+        monkeypatch.setattr(otel_hook, "_cleanup_state", lambda: None)
+        monkeypatch.setattr(otel_hook, "_load_config", lambda: {})
+        captured = []
+        monkeypatch.setattr("builtins.print", lambda s: captured.append(s))
+        calls = []
+        monkeypatch.setattr(
+            otel_hook, "_save_local_span_event",
+            lambda event_name, ide, data: calls.append((event_name, ide, data)),
+        )
+        result = otel_hook.main()
+        assert result == 0
+        assert calls and calls[0][0] == "Stop"
 
     def test_empty_input(self, monkeypatch):
         """Empty stdin should not crash."""
