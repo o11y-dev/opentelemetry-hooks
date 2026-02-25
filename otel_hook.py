@@ -880,7 +880,9 @@ class _FileSpanExporter:
         except ImportError:
             return 1  # FAILURE
         try:
-            os.makedirs(os.path.dirname(self._path), exist_ok=True)
+            dir_path = os.path.dirname(self._path)
+            if dir_path:
+                os.makedirs(dir_path, exist_ok=True)
             with _acquire_lock(self._lock_path):
                 with open(self._path, "a", encoding="utf-8") as fh:
                     for span in spans:
