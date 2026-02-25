@@ -108,6 +108,13 @@ except Exception:
     TraceState = None
     use_span = None
 
+try:
+    from opentelemetry.sdk.trace.export import SpanExportResult
+except ImportError:
+    class SpanExportResult:  # minimal shim for SDK-unavailable environments
+        SUCCESS = 0
+        FAILURE = 1
+
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -875,11 +882,6 @@ class _FileSpanExporter:
         self._lock_path = os.path.join(_LOCK_DIR, f"file_exporter_{lock_name}.lock")
 
     def export(self, spans):
-        try:
-            from opentelemetry.sdk.trace.export import SpanExportResult
-        except ImportError as exc:
-            _LOGGER.warning("opentelemetry-sdk not importable; span export skipped: %s", exc)
-            return 1
         try:
             dir_path = os.path.dirname(self._path)
             if dir_path:
