@@ -472,7 +472,8 @@ class TestLocalTracePersistence:
         with mock.patch.object(otel_hook, "_LOCK_DIR", str(tmp_path / "locks")):
             exporter.export([span])
         assert os.path.exists(out_file)
-        rec = json.loads(open(out_file).read().strip())
+        with open(out_file) as f:
+            rec = json.loads(f.read().strip())
         assert rec["name"] == "ide.generation"
         assert rec["attributes"]["ide.session.key"] == "sess-1"
         assert rec["status"] == "OK"
@@ -483,7 +484,8 @@ class TestLocalTracePersistence:
         with mock.patch.object(otel_hook, "_LOCK_DIR", str(tmp_path / "locks")):
             exporter.export([self._make_mock_span("span-1")])
             exporter.export([self._make_mock_span("span-2")])
-        lines = open(out_file).read().strip().splitlines()
+        with open(out_file) as f:
+            lines = f.read().strip().splitlines()
         assert len(lines) == 2
         assert json.loads(lines[0])["name"] == "span-1"
         assert json.loads(lines[1])["name"] == "span-2"
@@ -714,7 +716,7 @@ class TestMainFlow:
         calls = []
         monkeypatch.setattr(otel_hook, "_enable_file_exporter", lambda path: calls.append(path))
         captured = []
-        monkeypatch.setattr("builtins.print", lambda s: captured.append(s))
+        monkeypatch.setattr("builtins.print", lambda *a, **kw: captured.append(a[0] if a else ""))
         result = otel_hook.main()
         assert result == 0
         assert len(calls) == 1 and calls[0].endswith(".jsonl")

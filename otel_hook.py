@@ -874,11 +874,12 @@ class _FileSpanExporter:
         lock_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", os.path.basename(path))
         self._lock_path = os.path.join(_LOCK_DIR, f"file_exporter_{lock_name}.lock")
 
-    def export(self, spans) -> int:
+    def export(self, spans):
         try:
             from opentelemetry.sdk.trace.export import SpanExportResult
-        except ImportError:
-            return 1  # FAILURE
+        except ImportError as exc:
+            _LOGGER.warning("opentelemetry-sdk not importable; span export skipped: %s", exc)
+            return 1
         try:
             dir_path = os.path.dirname(self._path)
             if dir_path:
