@@ -1,6 +1,40 @@
 {
+  "_comment_1": "=== OTLP Exporter ===",
   "OTEL_EXPORTER_OTLP_ENDPOINT": "http://localhost:4317",
   "OTEL_EXPORTER_OTLP_PROTOCOL": "grpc",
+  "OTEL_EXPORTER_OTLP_HEADERS": "",
+  "OTEL_EXPORTER_OTLP_INSECURE": "true",
   "OTEL_SERVICE_NAME": "ide-agent",
-  "IDE_OTEL_BATCH_ON_STOP": "true"
+
+  "_comment_2": "=== Hook Behavior ===",
+  "IDE_OTEL_BATCH_ON_STOP": "true",
+  "IDE_OTEL_LOCAL_SPANS": "false",
+  "IDE_OTEL_CAPTURE_TEXT": "false",
+  "IDE_OTEL_MASK_PROMPTS": "false",
+  "IDE_OTEL_TEXT_MAX_CHARS": "4000",
+  "IDE_OTEL_CAPTURE_TOOL_INPUT_CONTENT": "false",
+  "IDE_OTEL_CAPTURE_TOOL_DEFINITIONS": "false",
+
+  "_comment_3": "=== OTel Logs ===",
+  "IDE_OTEL_ENABLE_LOGS": "true",
+  "IDE_OTEL_MCP_LOG_PAYLOAD": "true",
+  "IDE_OTEL_LOG_ALL_EVENTS": "false",
+  "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "",
+
+  "_comment_4": "=== Resource Attributes ===",
+  "OTEL_RESOURCE_ATTRIBUTES": "",
+  "IDE_OTEL_APP_NAME": "ide-agent",
+  "IDE_OTEL_SUBSYSTEM_NAME": "ide-hooks",
+
+  "_comment_5": "=== Logging & Debug ===",
+  "IDE_OTEL_LOG_LEVEL": "WARNING",
+  "IDE_OTEL_LOG_FILE": "",
+  "IDE_OTEL_LOG_EVENTS": "false",
+  "IDE_OTEL_DEBUG_CONSOLE": "false",
+
+  "_comment_6": "=== Advanced ===",
+  "IDE_OTEL_DISABLE_BATCH": "false",
+  "IDE_OTEL_STATE_TTL_SECONDS": "86400",
+  "IDE_OTEL_STATE_CLEANUP_INTERVAL_SECONDS": "3600",
+  "IDE_OTEL_STATE_LOCK_TIMEOUT_SECONDS": "2"
 }
