@@ -139,10 +139,14 @@ vim .cursor/hooks/opentelemetry-hook/otel_config.json
 If your project doesn't have the hook yet, copy the entire hook directory and run setup:
 
 ```bash
-# Clone the hook repo and copy into your project
+# Clone the hook repo and copy the essential files into your project
 git clone https://github.com/o11y-dev/opentelemetry-hooks.git /tmp/otel-hook-source
 mkdir -p .cursor/hooks/opentelemetry-hook
-cp -r /tmp/otel-hook-source/* .cursor/hooks/opentelemetry-hook/
+cp /tmp/otel-hook-source/otel_hook.py .cursor/hooks/opentelemetry-hook/
+cp /tmp/otel-hook-source/setup.sh .cursor/hooks/opentelemetry-hook/
+cp /tmp/otel-hook-source/otel_config.example.json .cursor/hooks/opentelemetry-hook/
+cp /tmp/otel-hook-source/.gitignore .cursor/hooks/opentelemetry-hook/
+cp -r /tmp/otel-hook-source/examples .cursor/hooks/opentelemetry-hook/
 
 # Run setup — creates/merges hooks.json automatically
 bash .cursor/hooks/opentelemetry-hook/setup.sh
