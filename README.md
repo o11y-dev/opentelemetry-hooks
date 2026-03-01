@@ -399,14 +399,13 @@ Save spans as local JSONL files without sending to any remote backend. Useful fo
 
 ```json
 {
-  "OTEL_EXPORTER_OTLP_ENDPOINT": null,
   "OTEL_SERVICE_NAME": "ide-agent",
   "IDE_OTEL_BATCH_ON_STOP": "true",
   "IDE_OTEL_LOCAL_SPANS": "true"
 }
 ```
 
-Spans are written to `.state/local_spans/<session>.jsonl`. Each line is a JSON object with trace/span IDs, attributes, and timing — see [Local Trace Files](#local-trace-files-agent-friendly) for the format.
+Omit `OTEL_EXPORTER_OTLP_ENDPOINT` to skip remote export. Spans are written to `.state/local_spans/<session>.jsonl`. Each line is a JSON object with trace/span IDs, attributes, and timing — see [Local Trace Files](#local-trace-files-agent-friendly) for the format.
 
 ### Coralogix
 
