@@ -1,8 +1,22 @@
-# IDE Agent OpenTelemetry Hook
+# OpenTelemetry Hook for AI Coding Agents
 
-An OpenTelemetry integration for AI coding agents. Works with **Cursor IDE** and **GitHub Copilot** — captures all agent activity as structured **traces and logs** and exports them to any OTLP-compliant backend using [OpenTelemetry GenAI semantic conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/).
+> Observability for your AI pair-programmer — know what your agent is doing, one trace at a time.
+
+An open-source OpenTelemetry integration that captures all AI coding agent activity as structured **traces and logs** and exports them to any OTLP-compliant backend. Works with **Cursor IDE** and **GitHub Copilot** using [OpenTelemetry GenAI semantic conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/).
+
+Every hook event — prompt submissions, tool calls, shell commands, MCP interactions, file edits, subagent orchestration — becomes an OpenTelemetry span you can query, alert on, and visualize in Jaeger, Grafana, Datadog, Honeycomb, Coralogix, or any OTLP-compatible backend.
 
 > **Note**: Claude Code has [native OpenTelemetry support](https://docs.claude.com/en/docs/claude-code/monitoring-usage) built-in and does not need this hook.
+
+## How It Works
+
+The hook is a lightweight Python script that your IDE invokes on every agent event. The IDE pipes a JSON payload to stdin, the hook processes it, emits OpenTelemetry spans and logs, and returns `{"continue": true}` on stdout so the IDE proceeds normally. No sidecar, no daemon — just a script your IDE calls.
+
+```
+IDE Event → stdin (JSON) → otel_hook.py → OpenTelemetry SDK → OTLP Backend
+                                 ↓
+                          stdout: {"continue": true}
+```
 
 ## Features
 
@@ -20,14 +34,14 @@ ide.session (root)
 ├── ide.generation (gen-2)
 │   ├── ide.hook.UserPromptSubmit
 │   ├── ide.hook.PreToolUse
-│   ├── ide.hook.TaskCompleted
+│   ├── ide.hook.PostToolUse
 │   └── ide.hook.Stop
 └── ide.hook.SessionEnd
 ```
 
 - **GenAI Semantic Conventions**: Emits standard OpenTelemetry GenAI attributes (`gen_ai.system`, `gen_ai.operation.name`, `gen_ai.request.model`, `gen_ai.usage.*`, etc.)
 
-- **All Hook Events**: Captures the full lifecycle — sessions, prompts, tool usage, shell commands, MCP calls, file operations, subagents, permissions, notifications, errors, and more.
+- **All Hook Events**: Captures the full lifecycle — sessions, prompts, tool usage, shell commands, MCP calls, file operations, subagents, errors, and more.
 
 - **Structured OTel Logs**: Emits trace-correlated log records for MCP calls, shell executions, and tool usage — with full I/O payloads, server output, and duration. Logs are exported via OTLP alongside spans.
 
@@ -125,20 +139,16 @@ vim .cursor/hooks/opentelemetry-hook/otel_config.json
 If your project doesn't have the hook yet, copy the entire hook directory and run setup:
 
 ```bash
-# From your target project root
-cp -r /path/to/cursor-custom-agents-rules-generator/.cursor/hooks/opentelemetry-hook \
-      .cursor/hooks/opentelemetry-hook
+# Clone the hook repo and copy the essential files into your project
+git clone https://github.com/o11y-dev/opentelemetry-hooks.git /tmp/otel-hook-source
+mkdir -p .cursor/hooks/opentelemetry-hook
+cp /tmp/otel-hook-source/otel_hook.py .cursor/hooks/opentelemetry-hook/
+cp /tmp/otel-hook-source/setup.sh .cursor/hooks/opentelemetry-hook/
+cp /tmp/otel-hook-source/otel_config.example.json .cursor/hooks/opentelemetry-hook/
+cp /tmp/otel-hook-source/.gitignore .cursor/hooks/opentelemetry-hook/
+cp -r /tmp/otel-hook-source/examples .cursor/hooks/opentelemetry-hook/
 
 # Run setup — creates/merges hooks.json automatically
-bash .cursor/hooks/opentelemetry-hook/setup.sh
-```
-
-Or clone this repo and cherry-pick just the hook:
-
-```bash
-git clone <this-repo> /tmp/otel-hook-source
-mkdir -p .cursor/hooks
-cp -r /tmp/otel-hook-source/.cursor/hooks/opentelemetry-hook .cursor/hooks/
 bash .cursor/hooks/opentelemetry-hook/setup.sh
 rm -rf /tmp/otel-hook-source
 ```
@@ -157,7 +167,7 @@ mkdir -p .github/hooks
 cp .cursor/hooks/opentelemetry-hook/examples/copilot-hooks.example.json .github/hooks/otel-hooks.json
 ```
 
-Replace `{{SCRIPT_PATH}}` with `python3 .cursor/hooks/opentelemetry-hook/otel_hook.py`.
+Replace `{{SCRIPT_PATH}}` with the path to the hook script (e.g. `python3 .cursor/hooks/opentelemetry-hook/otel_hook.py`).
 See [GitHub Copilot hooks docs](https://docs.github.com/en/copilot/concepts/agents/coding-agent/about-hooks).
 
 #### GitHub Copilot — Recommended Repositories
@@ -360,6 +370,42 @@ docker run -d --name jaeger \
 ```
 
 View traces at http://localhost:16686
+
+### Jaeger + Local File Export
+
+Send traces to Jaeger **and** save them as local JSONL files for agent analysis or offline inspection:
+
+```bash
+docker run -d --name jaeger \
+  -p 4317:4317 -p 4318:4318 -p 16686:16686 \
+  jaegertracing/all-in-one:latest
+```
+
+```json
+{
+  "OTEL_EXPORTER_OTLP_ENDPOINT": "http://localhost:4317",
+  "OTEL_EXPORTER_OTLP_PROTOCOL": "grpc",
+  "OTEL_SERVICE_NAME": "ide-agent",
+  "IDE_OTEL_BATCH_ON_STOP": "true",
+  "IDE_OTEL_LOCAL_SPANS": "true"
+}
+```
+
+Traces are exported to Jaeger at http://localhost:16686 and simultaneously written to `.state/local_spans/<session>.jsonl`.
+
+### Local Files Only (No Backend)
+
+Save spans as local JSONL files without sending to any remote backend. Useful for offline debugging, CI environments, or feeding traces back to an agent:
+
+```json
+{
+  "OTEL_SERVICE_NAME": "ide-agent",
+  "IDE_OTEL_BATCH_ON_STOP": "true",
+  "IDE_OTEL_LOCAL_SPANS": "true"
+}
+```
+
+Omit `OTEL_EXPORTER_OTLP_ENDPOINT` to skip remote export. Spans are written to `.state/local_spans/<session>.jsonl`. Each line is a JSON object with trace/span IDs, attributes, and timing — see [Local Trace Files](#local-trace-files-agent-friendly) for the format.
 
 ### Coralogix
 
@@ -603,9 +649,22 @@ echo '{"hook_event_name":"SessionStart","session_id":"test-123"}' | python3 .cur
 | `Missing API key` | Set `OTEL_EXPORTER_OTLP_HEADERS` with your auth token in config |
 | `cx.application.name required` | Coralogix needs this — set automatically, or add to `OTEL_RESOURCE_ATTRIBUTES` |
 | Orphan spans | Enable `IDE_OTEL_BATCH_ON_STOP=true` for session-level traces |
-| No traces appearing | Check endpoint, protocol, and auth headers in config |
+| No traces appearing | Check endpoint, protocol, and auth headers in config. Verify the backend is running and reachable. |
 | Wrong IDE detected | Check that your IDE provides the expected input fields |
-| Traces going to the wrong backend | Check endpoint, protocol, and auth headers in config |
+| Traces going to the wrong backend | Verify `OTEL_EXPORTER_OTLP_ENDPOINT` points to the intended backend |
+
+## Contributing
+
+Contributions are welcome. To get started:
+
+```bash
+git clone https://github.com/o11y-dev/opentelemetry-hooks.git
+cd opentelemetry-hooks
+pip install -r requirements-dev.txt
+python -m pytest tests/ -v
+```
+
+Please open an issue first if you plan a large change.
 
 ## Credits
 
