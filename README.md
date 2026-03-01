@@ -371,6 +371,43 @@ docker run -d --name jaeger \
 
 View traces at http://localhost:16686
 
+### Jaeger + Local File Export
+
+Send traces to Jaeger **and** save them as local JSONL files for agent analysis or offline inspection:
+
+```bash
+docker run -d --name jaeger \
+  -p 4317:4317 -p 4318:4318 -p 16686:16686 \
+  jaegertracing/all-in-one:latest
+```
+
+```json
+{
+  "OTEL_EXPORTER_OTLP_ENDPOINT": "http://localhost:4317",
+  "OTEL_EXPORTER_OTLP_PROTOCOL": "grpc",
+  "OTEL_SERVICE_NAME": "ide-agent",
+  "IDE_OTEL_BATCH_ON_STOP": "true",
+  "IDE_OTEL_LOCAL_SPANS": "true"
+}
+```
+
+Traces are exported to Jaeger at http://localhost:16686 and simultaneously written to `.state/local_spans/<session>.jsonl`.
+
+### Local Files Only (No Backend)
+
+Save spans as local JSONL files without sending to any remote backend. Useful for offline debugging, CI environments, or feeding traces back to an agent:
+
+```json
+{
+  "OTEL_EXPORTER_OTLP_ENDPOINT": null,
+  "OTEL_SERVICE_NAME": "ide-agent",
+  "IDE_OTEL_BATCH_ON_STOP": "true",
+  "IDE_OTEL_LOCAL_SPANS": "true"
+}
+```
+
+Spans are written to `.state/local_spans/<session>.jsonl`. Each line is a JSON object with trace/span IDs, attributes, and timing — see [Local Trace Files](#local-trace-files-agent-friendly) for the format.
+
 ### Coralogix
 
 ```json
