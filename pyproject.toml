@@ -23,3 +23,10 @@ py-modules = ["otel_hook"]
 
 [tool.setuptools_scm]
 fallback_version = "0.1.0"
+
+[tool.semantic_release]
+version_toml = []
+version_variables = []
+major_on_zero = false
+allow_zero_version = true
+tag_format = "v{version}"

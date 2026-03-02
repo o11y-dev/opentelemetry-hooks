@@ -100,9 +100,15 @@ pip install git+https://github.com/o11y-dev/opentelemetry-hooks.git
 
 ### Versioning
 
-This project uses [semantic versioning](https://semver.org/). Versions are derived automatically from git tags using `setuptools-scm`.
+This project uses [semantic versioning](https://semver.org/) with automated version detection via [python-semantic-release](https://python-semantic-release.readthedocs.io/). Versions are derived from git tags using `setuptools-scm` at build time.
 
-To create a new release, go to **Actions → Release → Run workflow**, enter a version number (e.g. `0.2.0`), and click **Run workflow**. The workflow will run tests, create the git tag, build the package, and publish a GitHub Release with the artifacts.
+To create a new release, go to **Actions → Release → Run workflow** and click **Run workflow**. The workflow will:
+
+1. Run the test suite
+2. Analyze commits since the last tag using [Conventional Commits](https://www.conventionalcommits.org/) to determine the version bump (`fix:` → patch, `feat:` → minor, `feat!:` / `BREAKING CHANGE` → major)
+3. Create the git tag, build the package, and publish a GitHub Release with artifacts
+
+The **version** input is optional — leave it empty for automatic detection, or provide an explicit version (e.g. `1.2.0`) to override. The **force** input lets you force a specific bump level (`patch`, `minor`, `major`) when auto-detection finds no conventional commits; it is ignored when an explicit version is provided.
 
 Alternatively, push a tag manually:
 

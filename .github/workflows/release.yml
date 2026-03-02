@@ -4,9 +4,19 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Release version (e.g. 0.1.0 — a 'v' prefix will be added automatically)"
-        required: true
+        description: "Override version (e.g. 1.2.0). Leave empty to auto-detect from conventional commits."
+        required: false
         type: string
+      force:
+        description: "Force bump level when auto-detecting (leave empty for commit-based detection)"
+        required: false
+        type: choice
+        default: ""
+        options:
+          - ""
+          - patch
+          - minor
+          - major
 
 permissions:
   contents: read
@@ -26,7 +36,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: pip install -r requirements-dev.txt
+        run: python -m pip install -r requirements-dev.txt
 
       - name: Run tests
         run: python -m pytest tests/ -v
@@ -47,38 +57,61 @@ jobs:
           python-version: "3.12"
 
       - name: Install build tools
-        run: pip install build setuptools-scm
+        run: python -m pip install build setuptools-scm python-semantic-release
 
-      - name: Validate version format
+      - name: Determine version
+        id: semver
         run: |
-          VERSION="${{ inputs.version }}"
-          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::Version must be in semver format (e.g. 0.1.0), got: $VERSION"
-            exit 1
+          if [ -n "${{ inputs.version }}" ]; then
+            VERSION="${{ inputs.version }}"
+            if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::Version must be in semver format (e.g. 0.2.0), got: $VERSION"
+              exit 1
+            fi
+            echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+            echo "Manually specified version: $VERSION"
+          else
+            FORCE_ARG=""
+            if [ -n "${{ inputs.force }}" ]; then
+              FORCE_ARG="--${{ inputs.force }}"
+            fi
+            SEMREL_OUTPUT=$(semantic-release version --print $FORCE_ARG 2>&1) || true
+            VERSION=$(echo "$SEMREL_OUTPUT" | tail -1 | grep -E '^[0-9]+\.[0-9]+\.[0-9]+' || true)
+            if [ -z "$VERSION" ]; then
+              echo "::notice::No version bump detected from commits. Use 'force' or provide an explicit 'version'."
+              echo "::notice::semantic-release output: $SEMREL_OUTPUT"
+            else
+              echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+              echo "Auto-detected version: $VERSION"
+            fi
           fi
 
       - name: Check tag does not already exist
+        if: steps.semver.outputs.version != ''
         run: |
-          if git rev-parse "v${{ inputs.version }}" >/dev/null 2>&1; then
-            echo "::error::Tag v${{ inputs.version }} already exists"
+          if git rev-parse "v${{ steps.semver.outputs.version }}" >/dev/null 2>&1; then
+            echo "::error::Tag v${{ steps.semver.outputs.version }} already exists"
             exit 1
           fi
 
       - name: Create and push tag
+        if: steps.semver.outputs.version != ''
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a "v${{ inputs.version }}" -m "Release v${{ inputs.version }}"
-          git push origin "v${{ inputs.version }}"
+          git tag -a "v${{ steps.semver.outputs.version }}" -m "Release v${{ steps.semver.outputs.version }}"
+          git push origin "v${{ steps.semver.outputs.version }}"
 
       - name: Build package
+        if: steps.semver.outputs.version != ''
         env:
-          SETUPTOOLS_SCM_PRETEND_VERSION: ${{ inputs.version }}
+          SETUPTOOLS_SCM_PRETEND_VERSION: ${{ steps.semver.outputs.version }}
         run: python -m build
 
       - name: Create GitHub Release
+        if: steps.semver.outputs.version != ''
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ inputs.version }}
+          tag_name: v${{ steps.semver.outputs.version }}
           files: dist/*
           generate_release_notes: true
