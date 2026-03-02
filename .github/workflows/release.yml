@@ -75,9 +75,11 @@ jobs:
             if [ -n "${{ inputs.force }}" ]; then
               FORCE_ARG="--${{ inputs.force }}"
             fi
-            VERSION=$(semantic-release version --print $FORCE_ARG 2>/dev/null || true)
+            SEMREL_OUTPUT=$(semantic-release version --print $FORCE_ARG 2>&1) || true
+            VERSION=$(echo "$SEMREL_OUTPUT" | tail -1 | grep -E '^[0-9]+\.[0-9]+\.[0-9]+' || true)
             if [ -z "$VERSION" ]; then
               echo "::notice::No version bump detected from commits. Use 'force' or provide an explicit 'version'."
+              echo "::notice::semantic-release output: $SEMREL_OUTPUT"
             else
               echo "version=$VERSION" >> "$GITHUB_OUTPUT"
               echo "Auto-detected version: $VERSION"

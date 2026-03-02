@@ -108,7 +108,7 @@ To create a new release, go to **Actions → Release → Run workflow** and clic
 2. Analyze commits since the last tag using [Conventional Commits](https://www.conventionalcommits.org/) to determine the version bump (`fix:` → patch, `feat:` → minor, `feat!:` / `BREAKING CHANGE` → major)
 3. Create the git tag, build the package, and publish a GitHub Release with artifacts
 
-The **version** input is optional — leave it empty for automatic detection, or provide an explicit version (e.g. `1.2.0`) to override. The **force** input lets you force a specific bump level (`patch`, `minor`, `major`) when auto-detection finds no conventional commits.
+The **version** input is optional — leave it empty for automatic detection, or provide an explicit version (e.g. `1.2.0`) to override. The **force** input lets you force a specific bump level (`patch`, `minor`, `major`) when auto-detection finds no conventional commits; it is ignored when an explicit version is provided.
 
 Alternatively, push a tag manually:
 
