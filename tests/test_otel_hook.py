@@ -775,3 +775,42 @@ class TestFmtDuration:
 
     def test_none(self):
         assert otel_hook._fmt_duration(None) == "n/a"
+
+
+# ── File-only TracerProvider mode ────────────────────────────────────────
+
+
+class TestFileOnlyTracerProvider:
+    def test_no_otlp_exporter_when_no_endpoint_and_local_spans(self, monkeypatch):
+        """When no OTLP endpoint is set and local spans are enabled,
+        _init_sdk_tracer_provider should create a bare provider without OTLP."""
+        monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
+        monkeypatch.setenv("IDE_OTEL_LOCAL_SPANS", "true")
+        set_provider_calls = []
+        monkeypatch.setattr(
+            otel_hook.trace, "set_tracer_provider",
+            lambda p: set_provider_calls.append(p),
+        )
+        result = otel_hook._init_sdk_tracer_provider({}, False)
+        assert result is True
+        assert len(set_provider_calls) == 1
+        provider = set_provider_calls[0]
+        # No span processors should have been added (no OTLP exporter)
+        assert len(provider._active_span_processor._span_processors) == 0
+
+    def test_otlp_exporter_created_when_endpoint_set(self, monkeypatch):
+        """When an OTLP endpoint is configured, the normal exporter path runs."""
+        monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318")
+        monkeypatch.setenv("IDE_OTEL_LOCAL_SPANS", "true")
+        monkeypatch.setenv("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf")
+        set_provider_calls = []
+        monkeypatch.setattr(
+            otel_hook.trace, "set_tracer_provider",
+            lambda p: set_provider_calls.append(p),
+        )
+        result = otel_hook._init_sdk_tracer_provider({}, False)
+        assert result is True
+        assert len(set_provider_calls) == 1
+        provider = set_provider_calls[0]
+        # At least one span processor should have been added (OTLP exporter)
+        assert len(provider._active_span_processor._span_processors) >= 1
