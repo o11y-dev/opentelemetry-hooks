@@ -711,7 +711,12 @@ def _parse_otlp_headers(value: str) -> dict:
 # Tracing init — pure OpenTelemetry SDK
 # ---------------------------------------------------------------------------
 def _init_sdk_tracer_provider(resource_attrs: dict, disable_batch: bool) -> bool:
-    """Configure the OTel SDK TracerProvider with OTLP exporter."""
+    """Configure the OTel SDK TracerProvider with OTLP exporter.
+
+    When no OTLP endpoint is configured and local spans are enabled,
+    creates a bare TracerProvider (no OTLP exporter) so the file exporter
+    can be attached later without wasted network calls.
+    """
     try:
         from opentelemetry.sdk.resources import Resource
         from opentelemetry.sdk.trace import TracerProvider as SDKTracerProvider
@@ -723,6 +728,12 @@ def _init_sdk_tracer_provider(resource_attrs: dict, disable_batch: bool) -> bool
     protocol = (os.getenv("OTEL_EXPORTER_OTLP_PROTOCOL") or "grpc").lower()
     endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
     headers = _parse_otlp_headers(os.getenv("OTEL_EXPORTER_OTLP_HEADERS", ""))
+
+    if not endpoint and _local_spans_enabled():
+        sdk_provider = SDKTracerProvider(resource=Resource.create(resource_attrs))
+        trace.set_tracer_provider(sdk_provider)
+        _LOGGER.info("SDK TracerProvider ready (file-only mode, no OTLP endpoint)")
+        return True
 
     exporter = None
     if protocol == "grpc":
