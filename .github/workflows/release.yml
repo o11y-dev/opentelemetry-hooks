@@ -94,6 +94,20 @@ jobs:
             exit 1
           fi
 
+      - name: Update version in README
+        if: steps.semver.outputs.version != ''
+        run: |
+          sed -i 's|opentelemetry-hooks\.git@v[0-9]*\.[0-9]*\.[0-9]*|opentelemetry-hooks.git@v${{ steps.semver.outputs.version }}|g' README.md
+          if git diff --quiet README.md; then
+            echo "README already up to date"
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add README.md
+            git commit -m "docs: update install version to v${{ steps.semver.outputs.version }}"
+            git push origin HEAD
+          fi
+
       - name: Create and push tag
         if: steps.semver.outputs.version != ''
         run: |
@@ -115,3 +129,20 @@ jobs:
           tag_name: v${{ steps.semver.outputs.version }}
           files: dist/*
           generate_release_notes: true
+
+      - name: Delete merged branches
+        if: steps.semver.outputs.version != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          DEFAULT_BRANCH=$(gh repo view --json defaultBranchRef -q '.defaultBranchRef.name')
+          gh api "repos/${{ github.repository }}/branches" --paginate -q '.[].name' | while read -r branch; do
+            if [ "$branch" = "$DEFAULT_BRANCH" ]; then
+              continue
+            fi
+            MERGED=$(gh api "repos/${{ github.repository }}/compare/${DEFAULT_BRANCH}...${branch}" -q '.status' 2>/dev/null || echo "error")
+            if [ "$MERGED" = "behind" ] || [ "$MERGED" = "identical" ]; then
+              echo "Deleting merged branch: $branch"
+              gh api -X DELETE "repos/${{ github.repository }}/git/refs/heads/${branch}" 2>/dev/null || true
+            fi
+          done
