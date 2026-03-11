@@ -165,6 +165,10 @@ _CANONICAL_EVENT = {
     "errorOccurred": "ErrorOccurred",
 }
 
+# Common camelCase -> snake_case aliases used by compatible hook runners.
+# Claude Code's documented hook payloads are already snake_case, but generic
+# runners and workflow adapters that forward Claude- or Antigravity-style
+# events may supply camelCase fields instead.
 _INPUT_ALIASES = {
     "sessionId": "session_id",
     "conversationId": "conversation_id",
@@ -185,18 +189,13 @@ _INPUT_ALIASES = {
     "loopCount": "loop_count",
     "stopHookActive": "stop_hook_active",
     "isInterrupt": "is_interrupt",
-    "hookEventType": "hook_event_name",
+    "hookEventType": "hook_event_type",
 }
 
-_IDE_NAME_ALIASES = {
-    "cursor": "cursor",
-    "github copilot": "copilot",
-    "copilot": "copilot",
-    "claude": "claude",
-    "claude code": "claude",
-    "antigravity": "antigravity",
-    "google antigravity": "antigravity",
-}
+# Canonical ide.name values accepted directly from IDE_OTEL_IDE_NAME or
+# self-reported payload metadata before alias fallback.
+_CANONICAL_IDE_NAMES = {"cursor", "copilot", "claude", "antigravity"}
+_IDE_NAME_ALIASES = {"github copilot": "copilot"}
 
 # Session boundary events
 _SESSION_START_EVENTS = {"SessionStart"}
@@ -307,9 +306,13 @@ def _normalize_input_data(data: dict) -> dict:
 
 
 def _normalize_ide_name(value: Optional[str]) -> Optional[str]:
+    """Normalize IDE names to canonical identifiers using case-insensitive lookup."""
     if not isinstance(value, str):
         return None
-    return _IDE_NAME_ALIASES.get(value.strip().lower())
+    normalized = value.strip().lower()
+    if normalized in _CANONICAL_IDE_NAMES:
+        return normalized
+    return _IDE_NAME_ALIASES.get(normalized)
 
 
 # ---------------------------------------------------------------------------
@@ -1318,6 +1321,8 @@ def _detect_ide(data: dict) -> str:
     IDE_OTEL_IDE_NAME can be used to force the IDE name for hook systems that
     do not expose enough identifying fields.
     """
+    # IDE_OTEL_IDE_NAME wins first, then self-reported IDE/client fields,
+    # before falling back to payload-shape detection.
     override = _normalize_ide_name(
         os.getenv("IDE_OTEL_IDE_NAME")
         or _first_present(data, ("ide_name", "ide", "client", "source_app"))
@@ -1345,7 +1350,8 @@ def _detect_ide(data: dict) -> str:
     except Exception:
         pass
 
-    # Claude Code hook payloads include transcript_path/session_id metadata
+    # Claude Code hook payloads include transcript-specific metadata and
+    # Claude-only hook context such as permission/notification fields.
     if data.get("transcript_path") or data.get("permission_mode") or data.get("notification_type"):
         return "claude"
 

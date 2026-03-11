@@ -183,8 +183,14 @@ mkdir -p .claude
 cp .cursor/hooks/opentelemetry-hook/examples/claude-hooks.example.json .claude/settings.json
 ```
 
-Replace `{{SCRIPT_PATH}}` with the path to the hook script (for example `env IDE_OTEL_IDE_NAME=claude python3 .cursor/hooks/opentelemetry-hook/otel_hook.py`).
-Claude Code already sends `session_id`, `hook_event_name`, `tool_name`, and `tool_input`; this hook also accepts compatible camelCase aliases when needed.
+Replace `{{SCRIPT_PATH}}` with the path to the hook script, for example:
+
+```bash
+python3 .cursor/hooks/opentelemetry-hook/otel_hook.py
+```
+
+If you want to force the IDE label explicitly, you can wrap the command with `env IDE_OTEL_IDE_NAME=claude`.
+Claude Code is auto-detected from hook metadata such as `session_id`, `transcript_path`, `permission_mode`, and `notification_type`. The camelCase alias handling is mainly for compatible third-party hook runners and mixed payload formats.
 
 #### Antigravity
 
