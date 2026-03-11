@@ -2,11 +2,11 @@
 
 > Observability for your AI pair-programmer — know what your agent is doing, one trace at a time.
 
-An open-source OpenTelemetry integration that captures all AI coding agent activity as structured **traces and logs** and exports them to any OTLP-compliant backend. Works with **Cursor IDE** and **GitHub Copilot** using [OpenTelemetry GenAI semantic conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/).
+An open-source OpenTelemetry integration that captures all AI coding agent activity as structured **traces and logs** and exports them to any OTLP-compliant backend. Works with **Cursor IDE**, **GitHub Copilot**, **Claude Code**, and **Antigravity** hook runners using [OpenTelemetry GenAI semantic conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/).
 
 Every hook event — prompt submissions, tool calls, shell commands, MCP interactions, file edits, subagent orchestration — becomes an OpenTelemetry span you can query, alert on, and visualize in Jaeger, Grafana, Datadog, Honeycomb, Coralogix, or any OTLP-compatible backend.
 
-> **Note**: Claude Code has [native OpenTelemetry support](https://docs.claude.com/en/docs/claude-code/monitoring-usage) built-in and does not need this hook.
+> **Note**: Claude Code has [native OpenTelemetry support](https://docs.claude.com/en/docs/claude-code/monitoring-usage), but this repo can also be used as a hook target when you want the same hook-based pipeline across IDEs.
 
 ## How It Works
 
@@ -20,7 +20,7 @@ IDE Event → stdin (JSON) → otel_hook.py → OpenTelemetry SDK → OTLP Backe
 
 ## Features
 
-- **Dual-IDE Support**: One script, two IDEs — auto-detects Cursor or GitHub Copilot from hook input fields.
+- **Multi-IDE Support**: One script, multiple hook providers — auto-detects Cursor, GitHub Copilot, and Claude Code from hook input fields, and supports explicit `IDE_OTEL_IDE_NAME` overrides for Antigravity and other compatible hook runners.
 
 - **Session-level Traces**: Groups all events within a session into a single trace with a 3-tier hierarchy:
 
@@ -53,24 +53,24 @@ ide.session (root)
 
 ## Supported Events
 
-| Canonical Name | Cursor | Copilot |
-|---|---|---|
-| `SessionStart` | `sessionStart` | `sessionStart` |
-| `SessionEnd` | `sessionEnd` | `sessionEnd` |
-| `UserPromptSubmit` | `beforeSubmitPrompt` | `userPromptSubmitted` |
-| `PreToolUse` | `preToolUse` | `preToolUse` |
-| `PostToolUse` | `postToolUse` | `postToolUse` |
-| `PostToolUseFailure` | `postToolUseFailure` | — |
-| `Stop` | `stop` | — |
-| `SubagentStart` | `subagentStart` | — |
-| `SubagentStop` | `subagentStop` | — |
-| `ErrorOccurred` | — | `errorOccurred` |
-| `BeforeShellExecution` | `beforeShellExecution` | — |
-| `AfterShellExecution` | `afterShellExecution` | — |
-| `BeforeMCPExecution` | `beforeMCPExecution` | — |
-| `AfterMCPExecution` | `afterMCPExecution` | — |
-| `BeforeReadFile` | `beforeReadFile` | — |
-| `AfterFileEdit` | `afterFileEdit` | — |
+| Canonical Name | Cursor | Copilot | Claude Code / Antigravity |
+|---|---|---|---|
+| `SessionStart` | `sessionStart` | `sessionStart` | `SessionStart` |
+| `SessionEnd` | `sessionEnd` | `sessionEnd` | `SessionEnd` |
+| `UserPromptSubmit` | `beforeSubmitPrompt` | `userPromptSubmitted` | `UserPromptSubmit` |
+| `PreToolUse` | `preToolUse` | `preToolUse` | `PreToolUse` |
+| `PostToolUse` | `postToolUse` | `postToolUse` | `PostToolUse` |
+| `PostToolUseFailure` | `postToolUseFailure` | — | `PostToolUseFailure` |
+| `Stop` | `stop` | — | `Stop` |
+| `SubagentStart` | `subagentStart` | — | `SubagentStart` |
+| `SubagentStop` | `subagentStop` | — | `SubagentStop` |
+| `ErrorOccurred` | — | `errorOccurred` | — |
+| `BeforeShellExecution` | `beforeShellExecution` | — | — |
+| `AfterShellExecution` | `afterShellExecution` | — | — |
+| `BeforeMCPExecution` | `beforeMCPExecution` | — | — |
+| `AfterMCPExecution` | `afterMCPExecution` | — | — |
+| `BeforeReadFile` | `beforeReadFile` | — | — |
+| `AfterFileEdit` | `afterFileEdit` | — | — |
 
 ## Installation
 
@@ -176,6 +176,26 @@ cp .cursor/hooks/opentelemetry-hook/examples/copilot-hooks.example.json .github/
 Replace `{{SCRIPT_PATH}}` with the path to the hook script (e.g. `python3 .cursor/hooks/opentelemetry-hook/otel_hook.py`).
 See [GitHub Copilot hooks docs](https://docs.github.com/en/copilot/concepts/agents/coding-agent/about-hooks).
 
+#### Claude Code
+
+```bash
+mkdir -p .claude
+cp .cursor/hooks/opentelemetry-hook/examples/claude-hooks.example.json .claude/settings.json
+```
+
+Replace `{{SCRIPT_PATH}}` with the path to the hook script (for example `env IDE_OTEL_IDE_NAME=claude python3 .cursor/hooks/opentelemetry-hook/otel_hook.py`).
+Claude Code already sends `session_id`, `hook_event_name`, `tool_name`, and `tool_input`; this hook also accepts compatible camelCase aliases when needed.
+
+#### Antigravity
+
+Antigravity workflow and hook formats can vary, so the simplest integration is to invoke the hook command directly from your workflow/rule and pin the IDE name explicitly:
+
+```bash
+env IDE_OTEL_IDE_NAME=antigravity python3 .cursor/hooks/opentelemetry-hook/otel_hook.py
+```
+
+When your runner uses camelCase payload keys such as `sessionId`, `toolName`, `toolInput`, or `hookEventType`, the hook normalizes them automatically before exporting spans.
+
 #### GitHub Copilot — Recommended Repositories
 
 To make this hook automatically available to the GitHub Copilot coding agent across your organization's repositories, add it as a [recommended repository](https://docs.github.com/en/copilot/customizing-copilot/adding-repository-instructions-for-github-copilot):
@@ -217,6 +237,7 @@ Then restart your IDE.
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `IDE_OTEL_BATCH_ON_STOP` | Enable session-level batching (recommended) | `false` |
+| `IDE_OTEL_IDE_NAME` | Force the detected IDE name (`cursor`, `copilot`, `claude`, `antigravity`) for generic hook runners | auto-detect |
 | `IDE_OTEL_LOCAL_SPANS` | Save hook spans locally as JSONL files for agent analysis (`.state/local_spans/*.jsonl`) | unset |
 | `IDE_OTEL_CAPTURE_TEXT` | Include prompt/response text in spans | `false` |
 | `IDE_OTEL_MASK_PROMPTS` | Redact emails, tokens, usernames from text | `false` |
@@ -571,12 +592,12 @@ The hook auto-detects which IDE is calling it:
 
 | Signal | IDE |
 |--------|-----|
+| `IDE_OTEL_IDE_NAME` env var | Explicit override (`cursor`, `copilot`, `claude`, `antigravity`) |
 | `conversation_id` or `generation_id` in input | Cursor |
+| `transcript_path`, `permission_mode`, or `notification_type` with `session_id` | Claude Code |
 | `session_id` only (no Cursor-specific fields) | GitHub Copilot |
 
 The detected IDE is stored as the `gen_ai.system` resource attribute and `ide.name` span attribute.
-
-> **Note**: Claude Code has [native OpenTelemetry support](https://docs.claude.com/en/docs/claude-code/monitoring-usage) — use that instead of this hook.
 
 ## File Structure
 
@@ -593,7 +614,8 @@ The detected IDE is stored as the `gen_ai.system` resource attribute and `ide.na
         ├── examples/
         │   ├── hooks.example.json              # Full Cursor hooks template
         │   ├── cursor-hooks.example.json       # Minimal Cursor hooks template
-        │   └── copilot-hooks.example.json      # GitHub Copilot hooks template
+        │   ├── copilot-hooks.example.json      # GitHub Copilot hooks template
+        │   └── claude-hooks.example.json       # Claude Code hooks template
         ├── .gitignore                          # Excludes secrets, venv, state
         ├── .venv/                              # Python venv (auto-provisioned)
         └── .state/                             # Runtime state
@@ -656,7 +678,7 @@ echo '{"hook_event_name":"SessionStart","session_id":"test-123"}' | python3 .cur
 | `cx.application.name required` | Coralogix needs this — set automatically, or add to `OTEL_RESOURCE_ATTRIBUTES` |
 | Orphan spans | Enable `IDE_OTEL_BATCH_ON_STOP=true` for session-level traces |
 | No traces appearing | Check endpoint, protocol, and auth headers in config. Verify the backend is running and reachable. |
-| Wrong IDE detected | Check that your IDE provides the expected input fields |
+| Wrong IDE detected | Set `IDE_OTEL_IDE_NAME` explicitly in the hook command or check that your IDE provides the expected input fields |
 | Traces going to the wrong backend | Verify `OTEL_EXPORTER_OTLP_ENDPOINT` points to the intended backend |
 
 ## Contributing
@@ -676,7 +698,7 @@ Please open an issue first if you plan a large change.
 
 - Built on pure [OpenTelemetry Python SDK](https://opentelemetry.io/docs/languages/python/)
 - Uses [OpenTelemetry GenAI Semantic Conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/)
-- Supports [GitHub Copilot hooks](https://docs.github.com/en/copilot/concepts/agents/coding-agent/about-hooks)
+- Supports [GitHub Copilot hooks](https://docs.github.com/en/copilot/concepts/agents/coding-agent/about-hooks) and Claude Code-compatible hook payloads
 
 ## License
 
