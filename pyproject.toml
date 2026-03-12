@@ -24,6 +24,7 @@ py-modules = ["otel_hook"]
 [tool.setuptools.data-files]
 "share/opentelemetry-hooks" = ["otel_config.example.json"]
 "share/opentelemetry-hooks/examples" = [
+    "examples/antigravity-workflow.example.md",
     "examples/claude-hooks.example.json",
     "examples/copilot-hooks.example.json",
     "examples/cursor-hooks.example.json",

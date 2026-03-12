@@ -202,6 +202,15 @@ Antigravity workflow and hook formats can vary, so the simplest integration is t
 env IDE_OTEL_IDE_NAME=antigravity python3 .cursor/hooks/opentelemetry-hook/otel_hook.py
 ```
 
+An example Antigravity workflow is included in `examples/antigravity-workflow.example.md`:
+
+```bash
+mkdir -p .agent/workflows
+cp .cursor/hooks/opentelemetry-hook/examples/antigravity-workflow.example.md .agent/workflows/opentelemetry-hook.md
+```
+
+Replace `{{SCRIPT_PATH}}` in the copied workflow with the path to the hook script you want Antigravity to invoke.
+
 When your runner uses camelCase payload keys such as `sessionId`, `toolName`, `toolInput`, or `hookEventType`, the hook normalizes them automatically before exporting spans.
 
 #### GitHub Copilot — Recommended Repositories
@@ -623,7 +632,8 @@ The detected IDE is stored as the `gen_ai.system` resource attribute and `ide.na
         │   ├── hooks.example.json              # Full Cursor hooks template
         │   ├── cursor-hooks.example.json       # Minimal Cursor hooks template
         │   ├── copilot-hooks.example.json      # GitHub Copilot hooks template
-        │   └── claude-hooks.example.json       # Claude Code hooks template
+        │   ├── claude-hooks.example.json       # Claude Code hooks template
+        │   └── antigravity-workflow.example.md # Antigravity workflow template
         ├── .gitignore                          # Excludes secrets, venv, state
         ├── .venv/                              # Python venv (auto-provisioned)
         └── .state/                             # Runtime state
