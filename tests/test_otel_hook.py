@@ -109,11 +109,17 @@ class TestNormalizeInputData:
             "sessionId": "sess-1",
             "toolName": "Bash",
             "toolInput": {"command": "pwd"},
+            "providerName": "anthropic",
+            "responseFormat": "json_schema",
+            "agentName": "planner",
             "hookEventType": "PreToolUse",
         })
         assert data["session_id"] == "sess-1"
         assert data["tool_name"] == "Bash"
         assert data["tool_input"] == {"command": "pwd"}
+        assert data["provider_name"] == "anthropic"
+        assert data["response_format"] == "json_schema"
+        assert data["agent_name"] == "planner"
         assert data["hook_event_type"] == "PreToolUse"
 
     def test_returns_original_dict_when_no_aliases_are_needed(self):
@@ -461,6 +467,64 @@ class TestGenAIMessages:
     def test_none_inputs(self):
         inp, out = otel_hook._genai_messages(None, None)
         assert inp is None and out is None
+
+
+class TestGenAISemconv:
+    @staticmethod
+    def _attrs(span):
+        return {
+            args[0]: args[1]
+            for args, _kwargs in (call for call in span.set_attribute.call_args_list)
+        }
+
+    def test_infers_provider_and_sets_v137_attributes(self, monkeypatch):
+        monkeypatch.setenv("IDE_OTEL_CAPTURE_TEXT", "true")
+        span = mock.MagicMock()
+
+        otel_hook._apply_genai_semconv(span, "SubagentStart", {
+            "model": "claude-3-7-sonnet",
+            "response_model": "claude-3-7-sonnet",
+            "response_format": "json_schema",
+            "choice_count": "2",
+            "agent_id": "agent-1",
+            "agent_name": "planner",
+            "agent_version": "2026.03",
+            "agent_description": "Plans coding steps",
+            "system_prompt": "You are a planner.",
+            "usage": {
+                "prompt_tokens": 11,
+                "completion_tokens": 7,
+                "cache_creation_input_tokens": 3,
+                "cached_input_tokens": 2,
+            },
+        }, "claude")
+
+        attrs = self._attrs(span)
+        assert attrs["gen_ai.provider.name"] == "anthropic"
+        assert attrs["gen_ai.system"] == "anthropic"
+        assert attrs["gen_ai.output.type"] == "json"
+        assert attrs["gen_ai.request.choice.count"] == 2
+        assert attrs["gen_ai.agent.id"] == "agent-1"
+        assert attrs["gen_ai.agent.name"] == "planner"
+        assert attrs["gen_ai.agent.version"] == "2026.03"
+        assert attrs["gen_ai.agent.description"] == "Plans coding steps"
+        assert attrs["gen_ai.usage.input_tokens"] == 11
+        assert attrs["gen_ai.usage.output_tokens"] == 7
+        assert attrs["gen_ai.usage.cache_creation.input_tokens"] == 3
+        assert attrs["gen_ai.usage.cache_read.input_tokens"] == 2
+        assert attrs["gen_ai.system_instructions"] == "You are a planner."
+
+    def test_explicit_provider_overrides_model_inference(self):
+        span = mock.MagicMock()
+
+        otel_hook._apply_genai_semconv(span, "UserPromptSubmit", {
+            "provider_name": "openai",
+            "model": "claude-3-7-sonnet",
+        }, "cursor")
+
+        attrs = self._attrs(span)
+        assert attrs["gen_ai.provider.name"] == "openai"
+        assert attrs["gen_ai.system"] == "openai"
 
 
 # ── Log endpoint derivation ───────────────────────────────────────────────

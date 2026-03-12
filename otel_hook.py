@@ -174,14 +174,30 @@ _INPUT_ALIASES = {
     "conversationId": "conversation_id",
     "generationId": "generation_id",
     "transcriptPath": "transcript_path",
+    "providerName": "provider_name",
+    "requestModel": "request_model",
+    "responseModel": "response_model",
+    "modelName": "model_name",
     "toolName": "tool_name",
     "toolInput": "tool_input",
     "toolOutput": "tool_output",
+    "toolType": "tool_type",
+    "toolDefinitions": "tool_definitions",
     "toolUseId": "tool_use_id",
     "toolId": "tool_id",
     "agentId": "agent_id",
+    "agentName": "agent_name",
+    "agentVersion": "agent_version",
+    "agentDescription": "agent_description",
     "agentType": "agent_type",
     "subagentType": "subagent_type",
+    "responseFormat": "response_format",
+    "outputType": "output_type",
+    "choiceCount": "choice_count",
+    "systemInstructions": "system_instructions",
+    "systemPrompt": "system_prompt",
+    "cacheCreationInputTokens": "cache_creation_input_tokens",
+    "cacheReadInputTokens": "cache_read_input_tokens",
     "workspacePath": "workspace_path",
     "filePath": "file_path",
     "exitCode": "exit_code",
@@ -292,6 +308,51 @@ def _float_or_none(value):
         return float(value) if value is not None else None
     except (TypeError, ValueError):
         return None
+
+
+def _lower_or_none(value: Optional[str]) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    lowered = value.strip().lower()
+    return lowered or None
+
+
+def _normalize_genai_output_type(value) -> Optional[str]:
+    normalized = _lower_or_none(value)
+    if normalized in {"json_object", "json_schema"}:
+        return "json"
+    if normalized in {"text", "json", "image", "speech"}:
+        return normalized
+    return None
+
+
+def _infer_genai_provider(data: dict) -> Optional[str]:
+    explicit = _lower_or_none(_first_present(data, ("provider_name", "provider", "model_provider", "vendor")))
+    if explicit is not None:
+        if explicit == "xai":
+            return "x_ai"
+        return explicit
+
+    model = _lower_or_none(_first_present(data, ("response_model", "request_model", "model", "model_name")))
+    if not model:
+        return None
+    if model.startswith("claude"):
+        return "anthropic"
+    if model.startswith(("gpt", "o1", "o3", "o4", "chatgpt", "text-embedding", "dall-e", "whisper")):
+        return "openai"
+    if model.startswith("gemini"):
+        return "gcp.gemini"
+    if model.startswith("mistral"):
+        return "mistral_ai"
+    if model.startswith("deepseek"):
+        return "deepseek"
+    if model.startswith("command") or model.startswith(("embed-", "rerank-")):
+        return "cohere"
+    if model.startswith("grok"):
+        return "x_ai"
+    if model.startswith("groq"):
+        return "groq"
+    return None
 
 
 def _normalize_input_data(data: dict) -> dict:
@@ -1631,23 +1692,59 @@ def _genai_messages(
 
 
 def _apply_genai_semconv(span, event_name: str, data: dict, ide: str) -> None:
-    span.set_attribute("gen_ai.system", ide)
+    provider = _infer_genai_provider(data)
+    if provider is not None:
+        span.set_attribute("gen_ai.provider.name", provider)
+        # Preserve the deprecated attribute for compatibility with existing dashboards.
+        span.set_attribute("gen_ai.system", provider)
+    else:
+        span.set_attribute("gen_ai.system", ide)
     span.set_attribute("gen_ai.operation.name", _genai_operation(event_name))
     _set_if_present(span, "gen_ai.conversation.id", data.get("conversation_id") or data.get("session_id"))
+    _set_if_present(span, "gen_ai.agent.id", _first_present(data, ("agent_id",)))
+    _set_if_present(span, "gen_ai.agent.name", _first_present(data, ("agent_name", "subagent_type", "agent_type")))
+    _set_if_present(span, "gen_ai.agent.version", _first_present(data, ("agent_version",)))
+    _set_if_present(span, "gen_ai.agent.description", _first_present(data, ("agent_description",)))
 
     # Model
     _set_if_present(span, "gen_ai.request.model", _first_present(data, ("request_model", "model", "model_name")))
     _set_if_present(span, "gen_ai.response.model", _first_present(data, ("response_model",)))
+    _set_if_present(span, "gen_ai.request.choice.count", _int_or_none(_first_present(data, ("choice_count",))))
+    _set_if_present(
+        span,
+        "gen_ai.output.type",
+        _normalize_genai_output_type(_first_present(data, ("output_type", "response_format"))),
+    )
 
     # Token usage (top-level)
     _set_if_present(span, "gen_ai.usage.input_tokens", _int_or_none(_first_present(data, ("input_tokens", "prompt_tokens"))))
     _set_if_present(span, "gen_ai.usage.output_tokens", _int_or_none(_first_present(data, ("output_tokens", "completion_tokens"))))
+    _set_if_present(
+        span,
+        "gen_ai.usage.cache_creation.input_tokens",
+        _int_or_none(_first_present(data, ("cache_creation_input_tokens",))),
+    )
+    _set_if_present(
+        span,
+        "gen_ai.usage.cache_read.input_tokens",
+        _int_or_none(_first_present(data, ("cache_read_input_tokens",))),
+    )
 
     # Token usage (nested)
     usage = data.get("usage")
     if isinstance(usage, dict):
         _set_if_present(span, "gen_ai.usage.input_tokens", _int_or_none(_first_present(usage, ("input_tokens", "prompt_tokens"))))
         _set_if_present(span, "gen_ai.usage.output_tokens", _int_or_none(_first_present(usage, ("output_tokens", "completion_tokens"))))
+        _set_if_present(
+            span,
+            "gen_ai.usage.cache_creation.input_tokens",
+            _int_or_none(_first_present(usage, ("cache_creation_input_tokens", "cache_creation_tokens"))),
+        )
+        _set_if_present(
+            span,
+            "gen_ai.usage.cache_read.input_tokens",
+            _int_or_none(_first_present(usage, ("cache_read_input_tokens", "cached_input_tokens"))),
+        )
         _set_if_present(span, "ide.usage.total_tokens", _int_or_none(_first_present(usage, ("total_tokens",))))
 
     # Request params
@@ -1682,6 +1779,9 @@ def _apply_genai_semconv(span, event_name: str, data: dict, ide: str) -> None:
         inp_msg, out_msg = _genai_messages(prompt, response)
         _set_if_present(span, "gen_ai.input.messages", inp_msg)
         _set_if_present(span, "gen_ai.output.messages", out_msg)
+        system_instructions = _first_present(data, ("system_instructions", "system_prompt"))
+        if system_instructions is not None:
+            _set_if_present(span, "gen_ai.system_instructions", _stringify(system_instructions))
 
 
 # ---------------------------------------------------------------------------

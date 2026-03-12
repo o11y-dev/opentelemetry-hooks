@@ -39,7 +39,7 @@ ide.session (root)
 └── ide.hook.SessionEnd
 ```
 
-- **GenAI Semantic Conventions**: Emits standard OpenTelemetry GenAI attributes (`gen_ai.system`, `gen_ai.operation.name`, `gen_ai.request.model`, `gen_ai.usage.*`, etc.)
+- **GenAI Semantic Conventions**: Emits OpenTelemetry GenAI attributes aligned with v1.37+ (`gen_ai.provider.name`, `gen_ai.operation.name`, `gen_ai.request.model`, `gen_ai.usage.*`, etc.) while preserving legacy `gen_ai.system` for backward compatibility.
 
 - **All Hook Events**: Captures the full lifecycle — sessions, prompts, tool usage, shell commands, MCP calls, file operations, subagents, errors, and more.
 
@@ -521,21 +521,28 @@ Requires the [Datadog Agent](https://docs.datadoghq.com/opentelemetry/) with OTL
 | `ide.generation_id` | Generation identifier (Cursor) |
 | `ide.workspace` | Workspace / working directory |
 | `ide.timestamp` | Event timestamp (ISO 8601) |
-| `gen_ai.system` | IDE name (resource attribute) |
+| `gen_ai.system` | Deprecated legacy GenAI system/provider attribute retained for backward compatibility |
 | `gen_ai.operation.name` | `chat`, `execute_tool`, or `invoke_agent` |
 
 ### GenAI (When Available)
 
 | Attribute | Description |
 |-----------|-------------|
+| `gen_ai.provider.name` | Canonical GenAI provider when inferred from payload/model metadata |
 | `gen_ai.request.model` | Requested model name |
 | `gen_ai.response.model` | Response model name |
 | `gen_ai.conversation.id` | Session / conversation ID |
 | `gen_ai.usage.input_tokens` | Input token count |
 | `gen_ai.usage.output_tokens` | Output token count |
+| `gen_ai.usage.cache_creation.input_tokens` | Cache-write input token count when provided |
+| `gen_ai.usage.cache_read.input_tokens` | Cache-read input token count when provided |
 | `gen_ai.request.temperature` | Temperature setting |
 | `gen_ai.request.max_tokens` | Max tokens setting |
+| `gen_ai.request.choice.count` | Requested number of choices/candidates |
+| `gen_ai.output.type` | Requested output modality (`text`, `json`, `image`, `speech`) |
+| `gen_ai.agent.id` / `gen_ai.agent.name` | Agent identity when the hook payload includes agent metadata |
 | `gen_ai.response.finish_reasons` | Finish reasons array |
+| `gen_ai.system_instructions` | System instructions (opt-in text capture) |
 | `gen_ai.input.messages` | Input messages (opt-in) |
 | `gen_ai.output.messages` | Output messages (opt-in) |
 
@@ -614,7 +621,7 @@ The hook auto-detects which IDE is calling it:
 | `transcript_path`, `permission_mode`, or `notification_type` | Claude Code |
 | `session_id` only (no Cursor-specific fields) | GitHub Copilot |
 
-The detected IDE is stored as the `gen_ai.system` resource attribute and `ide.name` span attribute.
+The detected IDE is stored on spans as `ide.name`. The hook also preserves legacy `gen_ai.system` output for backward compatibility, while using `gen_ai.provider.name` as the v1.37+ canonical provider attribute when it can infer one from hook payloads.
 
 ## File Structure
 
