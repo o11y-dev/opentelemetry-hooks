@@ -600,7 +600,7 @@ The hook auto-detects which IDE is calling it:
 |--------|-----|
 | `IDE_OTEL_IDE_NAME` env var | Explicit override (`cursor`, `copilot`, `claude`, `antigravity`) |
 | `conversation_id` or `generation_id` in input | Cursor |
-| `transcript_path`, `permission_mode`, or `notification_type` with `session_id` | Claude Code |
+| `transcript_path`, `permission_mode`, or `notification_type` | Claude Code |
 | `session_id` only (no Cursor-specific fields) | GitHub Copilot |
 
 The detected IDE is stored as the `gen_ai.system` resource attribute and `ide.name` span attribute.
