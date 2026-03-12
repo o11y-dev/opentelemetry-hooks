@@ -1831,7 +1831,10 @@ def main() -> int:
     _configure_logging()
     _cleanup_state()
 
-    data = _normalize_input_data(_load_input())
+    input_data = _load_input()
+    if not isinstance(input_data, dict):
+        input_data = {}
+    data = _normalize_input_data(input_data)
     raw_event = _get_event_name(data)
     event_name = _normalize_event(raw_event)
     ide = _detect_ide(data)
