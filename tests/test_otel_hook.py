@@ -93,6 +93,8 @@ class TestEventNormalization:
         ("stop", "Stop"),
         ("userPromptSubmitted", "UserPromptSubmit"),
         ("errorOccurred", "ErrorOccurred"),
+        ("SessionStart", "SessionStart"),
+        ("PreToolUse", "PreToolUse"),
     ])
     def test_known_events(self, raw, canonical):
         assert otel_hook._normalize_event(raw) == canonical
@@ -101,9 +103,46 @@ class TestEventNormalization:
         assert otel_hook._normalize_event("customEvent") == "customEvent"
 
 
+class TestNormalizeInputData:
+    def test_adds_snake_case_aliases_for_camel_case_payloads(self):
+        data = otel_hook._normalize_input_data({
+            "sessionId": "sess-1",
+            "toolName": "Bash",
+            "toolInput": {"command": "pwd"},
+            "hookEventType": "PreToolUse",
+        })
+        assert data["session_id"] == "sess-1"
+        assert data["tool_name"] == "Bash"
+        assert data["tool_input"] == {"command": "pwd"}
+        assert data["hook_event_type"] == "PreToolUse"
+
+    def test_returns_original_dict_when_no_aliases_are_needed(self):
+        data = {"session_id": "sess-1"}
+        assert otel_hook._normalize_input_data(data) is data
+
+    def test_normalizes_session_id_when_only_camel_case_exists(self):
+        data = otel_hook._normalize_input_data({"sessionId": "camel-session"})
+        assert data["session_id"] == "camel-session"
+        assert data["sessionId"] == "camel-session"
+
+    def test_keeps_existing_snake_case_values(self):
+        data = otel_hook._normalize_input_data({
+            "sessionId": "camel-session",
+            "session_id": "snake-session",
+        })
+        assert data["session_id"] == "snake-session"
+
+
 class TestGetEventName:
     def test_hook_event_name(self):
         assert otel_hook._get_event_name({"hook_event_name": "sessionStart"}) == "sessionStart"
+
+    def test_hook_event_type_after_normalization(self):
+        data = otel_hook._normalize_input_data({"hookEventType": "PreToolUse"})
+        assert otel_hook._get_event_name(data) == "PreToolUse"
+
+    def test_hook_event_type(self):
+        assert otel_hook._get_event_name({"hook_event_type": "PreToolUse"}) == "PreToolUse"
 
     def test_event_field(self):
         assert otel_hook._get_event_name({"event": "preToolUse"}) == "preToolUse"
@@ -119,6 +158,23 @@ class TestGetEventName:
 
 
 class TestDetectIDE:
+    def test_env_override_antigravity(self, monkeypatch):
+        monkeypatch.setenv("IDE_OTEL_IDE_NAME", "antigravity")
+        assert otel_hook._detect_ide({"session_id": "sess-1"}) == "antigravity"
+
+    def test_env_override_is_case_insensitive(self, monkeypatch):
+        monkeypatch.setenv("IDE_OTEL_IDE_NAME", "AntiGravity")
+        assert otel_hook._detect_ide({"session_id": "sess-1"}) == "antigravity"
+
+    def test_claude_via_transcript_path(self):
+        assert otel_hook._detect_ide({"session_id": "sess-1", "transcript_path": "/tmp/transcript.jsonl"}) == "claude"
+
+    def test_claude_via_permission_mode(self):
+        assert otel_hook._detect_ide({"session_id": "sess-1", "permission_mode": "acceptEdits"}) == "claude"
+
+    def test_claude_via_notification_type(self):
+        assert otel_hook._detect_ide({"session_id": "sess-1", "notification_type": "needs_permission"}) == "claude"
+
     def test_cursor_via_conversation_id(self):
         assert otel_hook._detect_ide({"conversation_id": "abc"}) == "cursor"
 
@@ -362,6 +418,10 @@ class TestSessionKey:
 
     def test_none_when_missing(self):
         assert otel_hook._session_key({}) is None
+
+    def test_camel_case_alias_after_normalization(self):
+        data = otel_hook._normalize_input_data({"sessionId": "s1"})
+        assert otel_hook._session_key(data) == "s1"
 
 
 class TestGenerationKey:

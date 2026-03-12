@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
 """IDE Agent OpenTelemetry Hook — pure OpenTelemetry SDK.
 
-Captures hook events from Cursor IDE and GitHub Copilot as OpenTelemetry
-spans and logs using GenAI semantic conventions.
-
-Note: Claude Code has native OpenTelemetry support built-in and does not
-need this hook. See https://docs.claude.com/en/docs/claude-code/monitoring-usage
+Captures hook events from Cursor IDE, GitHub Copilot, Claude Code, and
+compatible hook runners as OpenTelemetry spans and logs using GenAI
+semantic conventions.
 
 Supports:
-- Dual-IDE detection (Cursor, GitHub Copilot)
+- Multi-IDE detection (Cursor, GitHub Copilot, Claude Code, Antigravity)
 - Session-level trace hierarchy (session -> generation -> events)
 - Structured OTel Logs for MCP, shell, and tool events (trace-correlated)
 - Cross-process trace context via file-based state
@@ -167,6 +165,38 @@ _CANONICAL_EVENT = {
     "errorOccurred": "ErrorOccurred",
 }
 
+# Common camelCase -> snake_case aliases used by compatible hook runners.
+# Claude Code's documented hook payloads are already snake_case, but generic
+# runners and workflow adapters that forward Claude- or Antigravity-style
+# events may supply camelCase fields instead.
+_INPUT_ALIASES = {
+    "sessionId": "session_id",
+    "conversationId": "conversation_id",
+    "generationId": "generation_id",
+    "transcriptPath": "transcript_path",
+    "toolName": "tool_name",
+    "toolInput": "tool_input",
+    "toolOutput": "tool_output",
+    "toolUseId": "tool_use_id",
+    "toolId": "tool_id",
+    "agentId": "agent_id",
+    "agentType": "agent_type",
+    "subagentType": "subagent_type",
+    "workspacePath": "workspace_path",
+    "filePath": "file_path",
+    "exitCode": "exit_code",
+    "durationMs": "duration_ms",
+    "loopCount": "loop_count",
+    "stopHookActive": "stop_hook_active",
+    "isInterrupt": "is_interrupt",
+    "hookEventType": "hook_event_type",
+}
+
+# Canonical ide.name values accepted directly from IDE_OTEL_IDE_NAME or
+# self-reported payload metadata before alias fallback.
+_CANONICAL_IDE_NAMES = {"cursor", "copilot", "claude", "antigravity"}
+_IDE_NAME_ALIASES = {"github copilot": "copilot"}
+
 # Session boundary events
 _SESSION_START_EVENTS = {"SessionStart"}
 _SESSION_END_EVENTS = {"SessionEnd"}
@@ -262,6 +292,27 @@ def _float_or_none(value):
         return float(value) if value is not None else None
     except (TypeError, ValueError):
         return None
+
+
+def _normalize_input_data(data: dict) -> dict:
+    """Add snake_case aliases for compatible hook payloads when needed."""
+    normalized = None
+    for source_key, target_key in _INPUT_ALIASES.items():
+        if source_key in data and target_key not in data:
+            if normalized is None:
+                normalized = dict(data)
+            normalized[target_key] = data[source_key]
+    return normalized or data
+
+
+def _normalize_ide_name(value: Optional[str]) -> Optional[str]:
+    """Normalize IDE names to canonical identifiers using case-insensitive lookup."""
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    if normalized in _CANONICAL_IDE_NAMES:
+        return normalized
+    return _IDE_NAME_ALIASES.get(normalized)
 
 
 # ---------------------------------------------------------------------------
@@ -1267,8 +1318,18 @@ def _emit_event_log(event_name: str, data: dict) -> None:
 def _detect_ide(data: dict) -> str:
     """Detect which IDE is calling this hook based on input fields.
 
-    Note: Claude Code has native OTel support and does not need this hook.
+    IDE_OTEL_IDE_NAME can be used to force the IDE name for hook systems that
+    do not expose enough identifying fields.
     """
+    # IDE_OTEL_IDE_NAME wins first, then self-reported IDE/client fields,
+    # before falling back to payload-shape detection.
+    override = _normalize_ide_name(
+        os.getenv("IDE_OTEL_IDE_NAME")
+        or _first_present(data, ("ide_name", "ide", "client", "source_app"))
+    )
+    if override:
+        return override
+
     # Cursor-specific fields (check these first before session_id)
     if data.get("conversation_id") or data.get("generation_id"):
         return "cursor"
@@ -1289,6 +1350,11 @@ def _detect_ide(data: dict) -> str:
     except Exception:
         pass
 
+    # Claude Code hook payloads include transcript-specific metadata and
+    # Claude-only hook context such as permission/notification fields.
+    if data.get("transcript_path") or data.get("permission_mode") or data.get("notification_type"):
+        return "claude"
+
     # Copilot only sends session_id without other indicators
     if data.get("session_id"):
         return "copilot"
@@ -1299,7 +1365,7 @@ def _detect_ide(data: dict) -> str:
 
 def _get_event_name(data: dict) -> str:
     """Extract raw event name from hook input."""
-    for key in ("hook_event_name", "event", "hook"):
+    for key in ("hook_event_name", "hook_event_type", "event", "hook"):
         value = data.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()
@@ -1765,7 +1831,10 @@ def main() -> int:
     _configure_logging()
     _cleanup_state()
 
-    data = _load_input()
+    input_data = _load_input()
+    if not isinstance(input_data, dict):
+        input_data = {}
+    data = _normalize_input_data(input_data)
     raw_event = _get_event_name(data)
     event_name = _normalize_event(raw_event)
     ide = _detect_ide(data)
