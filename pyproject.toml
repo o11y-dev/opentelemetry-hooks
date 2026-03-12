@@ -23,7 +23,12 @@ py-modules = ["otel_hook"]
 
 [tool.setuptools.data-files]
 "share/opentelemetry-hooks" = ["otel_config.example.json"]
-"share/opentelemetry-hooks/examples" = ["examples/*.json"]
+"share/opentelemetry-hooks/examples" = [
+    "examples/claude-hooks.example.json",
+    "examples/copilot-hooks.example.json",
+    "examples/cursor-hooks.example.json",
+    "examples/hooks.example.json",
+]
 
 [tool.setuptools_scm]
 fallback_version = "0.1.0"
