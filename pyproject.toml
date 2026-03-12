@@ -21,6 +21,10 @@ Homepage = "https://github.com/o11y-dev/opentelemetry-hooks"
 [tool.setuptools]
 py-modules = ["otel_hook"]
 
+[tool.setuptools.data-files]
+"share/opentelemetry-hooks" = ["otel_config.example.json"]
+"share/opentelemetry-hooks/examples" = ["examples/*.json"]
+
 [tool.setuptools_scm]
 fallback_version = "0.1.0"
 

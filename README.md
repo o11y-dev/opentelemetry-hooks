@@ -98,6 +98,8 @@ Or install the latest from `main`:
 pip install git+https://github.com/o11y-dev/opentelemetry-hooks.git
 ```
 
+Wheel installs also include `otel_config.example.json` and the example hook JSON files under `share/opentelemetry-hooks/`, so the templates remain available outside the source tree.
+
 ### Versioning
 
 This project uses [semantic versioning](https://semver.org/) with automated version detection via [python-semantic-release](https://python-semantic-release.readthedocs.io/). Versions are derived from git tags using `setuptools-scm` at build time.
