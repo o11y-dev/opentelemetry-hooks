@@ -176,7 +176,7 @@ mkdir -p .github/hooks
 cp .cursor/hooks/opentelemetry-hook/examples/copilot-hooks.example.json .github/hooks/otel-hooks.json
 ```
 
-Replace `{{SCRIPT_PATH}}` with the hook command. Prefer `otel-hook` when installed from a package, or use `python3 .cursor/hooks/opentelemetry-hook/otel_hook.py` when running from a copied source checkout.
+Replace `{{SCRIPT_PATH}}` with the hook command. For a copied-source checkout the default is `python3 .cursor/hooks/opentelemetry-hook/otel_hook.py`; use `otel-hook` only when the package is installed system-wide via pip.
 See [GitHub Copilot hooks docs](https://docs.github.com/en/copilot/concepts/agents/coding-agent/about-hooks).
 
 #### Claude Code
@@ -189,6 +189,9 @@ cp .cursor/hooks/opentelemetry-hook/examples/claude-hooks.example.json .claude/s
 Replace `{{SCRIPT_PATH}}` with the hook command, for example:
 
 ```bash
+# source checkout / copied-source
+python3 .cursor/hooks/opentelemetry-hook/otel_hook.py
+# pip-installed package
 otel-hook
 ```
 
@@ -200,6 +203,9 @@ Claude Code is auto-detected from hook metadata such as `session_id`, `transcrip
 Antigravity workflow and hook formats can vary, so the simplest integration is to invoke the hook command directly from your workflow/rule and pin the IDE name explicitly:
 
 ```bash
+# source checkout / copied-source
+env IDE_OTEL_IDE_NAME=antigravity python3 .cursor/hooks/opentelemetry-hook/otel_hook.py
+# pip-installed package
 env IDE_OTEL_IDE_NAME=antigravity otel-hook
 ```
 
@@ -210,7 +216,7 @@ mkdir -p .agent/workflows
 cp .cursor/hooks/opentelemetry-hook/examples/antigravity-workflow.example.md .agent/workflows/opentelemetry-hook.md
 ```
 
-Replace `{{SCRIPT_PATH}}` in the copied workflow with the hook command you want Antigravity to invoke. Prefer `otel-hook` when installed from a package.
+Replace `{{SCRIPT_PATH}}` in the copied workflow with the hook command you want Antigravity to invoke. For a copied-source checkout use `python3 .cursor/hooks/opentelemetry-hook/otel_hook.py`; use `otel-hook` for a pip-installed package.
 
 When your runner uses camelCase payload keys such as `sessionId`, `toolName`, `toolInput`, or `hookEventType`, the hook normalizes them automatically before exporting spans.
 
