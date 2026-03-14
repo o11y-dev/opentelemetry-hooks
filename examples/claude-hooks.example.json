@@ -1,5 +1,5 @@
 {
-  "_comment": "Template for Claude Code hooks. Replace {{SCRIPT_PATH}} with the hook command.",
+  "_comment": "Template for Claude Code hooks. Replace {{SCRIPT_PATH}} with the hook command (default: otel-hook).",
   "hooks": {
     "SessionStart": [
       {

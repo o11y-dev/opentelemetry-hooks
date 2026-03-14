@@ -19,7 +19,11 @@ REPO_ROOT="$(cd "$HOOK_DIR/../../.." && pwd)"
 HOOKS_JSON="$REPO_ROOT/.cursor/hooks.json"
 OTEL_CONFIG="$HOOK_DIR/otel_config.json"
 OTEL_EXAMPLE="$HOOK_DIR/otel_config.example.json"
-HOOK_CMD="python3 .cursor/hooks/opentelemetry-hook/otel_hook.py"
+if command -v otel-hook &>/dev/null; then
+  HOOK_CMD="otel-hook"
+else
+  HOOK_CMD="python3 .cursor/hooks/opentelemetry-hook/otel_hook.py"
+fi
 
 # All Cursor hook events the OTel hook should register for
 HOOK_EVENTS=(

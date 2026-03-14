@@ -18,6 +18,9 @@ dependencies = [
 [project.urls]
 Homepage = "https://github.com/o11y-dev/opentelemetry-hooks"
 
+[project.scripts]
+otel-hook = "otel_hook:main"
+
 [tool.setuptools]
 py-modules = ["otel_hook"]
 

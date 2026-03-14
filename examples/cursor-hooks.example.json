@@ -1,5 +1,5 @@
 {
-  "_comment": "Template for Cursor hooks. Replace {{SCRIPT_PATH}} with the hook command.",
+  "_comment": "Template for Cursor hooks. Replace {{SCRIPT_PATH}} with the hook command (default: otel-hook).",
   "version": 1,
   "hooks": {
     "sessionStart": [{ "command": "{{SCRIPT_PATH}}" }],
