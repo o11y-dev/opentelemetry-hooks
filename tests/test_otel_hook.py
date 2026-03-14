@@ -874,3 +874,124 @@ class TestFileOnlyTracerProvider:
         provider = set_provider_calls[0]
         # At least one span processor should have been added (OTLP exporter)
         assert len(provider._active_span_processor._span_processors) >= 1
+
+
+# ── Hook home resolution ──────────────────────────────────────────────────
+
+
+class TestResolveHookHome:
+    def test_explicit_env_var_takes_precedence(self, tmp_path, monkeypatch):
+        """IDE_OTEL_HOOK_HOME overrides every other heuristic."""
+        explicit = str(tmp_path / "my-hook-home")
+        monkeypatch.setenv("IDE_OTEL_HOOK_HOME", explicit)
+        result = otel_hook._resolve_hook_home()
+        assert result == os.path.abspath(explicit)
+
+    def test_explicit_env_var_resolves_to_abspath(self, monkeypatch):
+        """Relative IDE_OTEL_HOOK_HOME values are converted to absolute paths."""
+        monkeypatch.setenv("IDE_OTEL_HOOK_HOME", "relative/path")
+        result = otel_hook._resolve_hook_home()
+        assert os.path.isabs(result)
+
+    def test_site_packages_returns_xdg_data_home(self, monkeypatch, tmp_path):
+        """When __file__ lives inside a real site-packages dir, use XDG_DATA_HOME."""
+        monkeypatch.delenv("IDE_OTEL_HOOK_HOME", raising=False)
+        # Create a fake site-packages directory and put the module "inside" it.
+        sp_dir = tmp_path / "lib" / "python3.x" / "site-packages"
+        sp_dir.mkdir(parents=True)
+        fake_file = str(sp_dir / "otel_hook.py")
+        monkeypatch.setattr(otel_hook, "__file__", fake_file)
+        import sysconfig as _sysconfig
+        monkeypatch.setattr(_sysconfig, "get_path", lambda name, *a, **kw: str(sp_dir) if name in ("purelib", "platlib") else None)
+        xdg = str(tmp_path / "xdg-data")
+        monkeypatch.setenv("XDG_DATA_HOME", xdg)
+        result = otel_hook._resolve_hook_home()
+        assert result == os.path.join(xdg, "opentelemetry-hooks")
+
+    def test_site_packages_defaults_to_dotlocal_share(self, monkeypatch, tmp_path):
+        """When XDG_DATA_HOME is unset and running from site-packages, use ~/.local/share."""
+        monkeypatch.delenv("IDE_OTEL_HOOK_HOME", raising=False)
+        monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+        sp_dir = tmp_path / "lib" / "site-packages"
+        sp_dir.mkdir(parents=True)
+        fake_file = str(sp_dir / "otel_hook.py")
+        monkeypatch.setattr(otel_hook, "__file__", fake_file)
+        import sysconfig as _sysconfig
+        monkeypatch.setattr(_sysconfig, "get_path", lambda name, *a, **kw: str(sp_dir) if name in ("purelib", "platlib") else None)
+        expected = os.path.join(os.path.expanduser("~"), ".local", "share", "opentelemetry-hooks")
+        result = otel_hook._resolve_hook_home()
+        assert result == expected
+
+    def test_non_installed_returns_script_directory(self, monkeypatch, tmp_path):
+        """When not in site-packages (source checkout), return __file__'s directory."""
+        monkeypatch.delenv("IDE_OTEL_HOOK_HOME", raising=False)
+        script_dir = tmp_path / "hooks" / "opentelemetry-hook"
+        script_dir.mkdir(parents=True)
+        fake_file = str(script_dir / "otel_hook.py")
+        monkeypatch.setattr(otel_hook, "__file__", fake_file)
+        import sysconfig as _sysconfig
+        # Report a completely different directory as site-packages.
+        other_sp = str(tmp_path / "other" / "site-packages")
+        monkeypatch.setattr(_sysconfig, "get_path", lambda name, *a, **kw: other_sp if name in ("purelib", "platlib") else None)
+        result = otel_hook._resolve_hook_home()
+        assert result == str(script_dir)
+
+
+class TestFindExampleConfig:
+    def test_finds_file_next_to_module(self, monkeypatch, tmp_path):
+        """When otel_config.example.json is next to __file__, it is returned."""
+        example = tmp_path / "otel_config.example.json"
+        example.write_text("{}")
+        monkeypatch.setattr(otel_hook, "__file__", str(tmp_path / "otel_hook.py"))
+        result = otel_hook._find_example_config()
+        assert result == str(example)
+
+    def test_finds_file_in_sys_prefix_share(self, monkeypatch, tmp_path):
+        """Falls back to {sys.prefix}/share/opentelemetry-hooks/ when not beside __file__."""
+        # Point __file__ to a directory that has NO example config beside it.
+        monkeypatch.setattr(otel_hook, "__file__", str(tmp_path / "no_example" / "otel_hook.py"))
+        share_dir = tmp_path / "share" / "opentelemetry-hooks"
+        share_dir.mkdir(parents=True)
+        example = share_dir / "otel_config.example.json"
+        example.write_text("{}")
+        monkeypatch.setattr(sys, "prefix", str(tmp_path))
+        monkeypatch.setattr(sys, "exec_prefix", str(tmp_path))
+        result = otel_hook._find_example_config()
+        assert result == str(example)
+
+    def test_returns_empty_when_not_found(self, monkeypatch, tmp_path):
+        """Returns '' when the example config cannot be located anywhere."""
+        monkeypatch.setattr(otel_hook, "__file__", str(tmp_path / "no_example" / "otel_hook.py"))
+        monkeypatch.setattr(sys, "prefix", str(tmp_path / "fake_prefix"))
+        monkeypatch.setattr(sys, "exec_prefix", str(tmp_path / "fake_exec_prefix"))
+        result = otel_hook._find_example_config()
+        assert result == ""
+
+
+class TestLoadConfigWithFindExampleConfig:
+    def test_copies_example_and_creates_dirs_when_missing(self, monkeypatch, tmp_path):
+        """_load_config copies example config when the target config is absent."""
+        example = tmp_path / "otel_config.example.json"
+        example.write_text(json.dumps({"OTEL_SERVICE_NAME": "example-svc"}))
+        config_path = tmp_path / "subdir" / "otel_config.json"
+
+        monkeypatch.setattr(otel_hook, "_CONFIG_DEFAULT", str(config_path))
+        monkeypatch.setattr(otel_hook, "_find_example_config", lambda: str(example))
+        monkeypatch.setattr(otel_hook, "_load_mdm_config", lambda: {})
+        monkeypatch.delenv("IDE_OTEL_CONFIG", raising=False)
+
+        result = otel_hook._load_config()
+        assert result.get("OTEL_SERVICE_NAME") == "example-svc"
+        assert config_path.exists()
+
+    def test_missing_example_returns_empty_config(self, monkeypatch, tmp_path):
+        """When no example config can be found, _load_config returns {}."""
+        config_path = tmp_path / "otel_config.json"
+
+        monkeypatch.setattr(otel_hook, "_CONFIG_DEFAULT", str(config_path))
+        monkeypatch.setattr(otel_hook, "_find_example_config", lambda: "")
+        monkeypatch.setattr(otel_hook, "_load_mdm_config", lambda: {})
+        monkeypatch.delenv("IDE_OTEL_CONFIG", raising=False)
+
+        result = otel_hook._load_config()
+        assert result == {}
