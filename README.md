@@ -10,10 +10,10 @@ Every hook event — prompt submissions, tool calls, shell commands, MCP interac
 
 ## How It Works
 
-The hook is a lightweight Python script that your IDE invokes on every agent event. The IDE pipes a JSON payload to stdin, the hook processes it, emits OpenTelemetry spans and logs, and returns `{"continue": true}` on stdout so the IDE proceeds normally. No sidecar, no daemon — just a script your IDE calls.
+The hook is a lightweight Python command that your IDE invokes on every agent event. The IDE pipes a JSON payload to stdin, the hook processes it, emits OpenTelemetry spans and logs, and returns `{"continue": true}` on stdout so the IDE proceeds normally. No sidecar, no daemon — just a command your IDE calls.
 
 ```
-IDE Event → stdin (JSON) → otel_hook.py → OpenTelemetry SDK → OTLP Backend
+IDE Event → stdin (JSON) → otel-hook → OpenTelemetry SDK → OTLP Backend
                                  ↓
                           stdout: {"continue": true}
 ```
@@ -99,6 +99,7 @@ pip install git+https://github.com/o11y-dev/opentelemetry-hooks.git
 ```
 
 Wheel installs also include `otel_config.example.json` and the example hook JSON files under `share/opentelemetry-hooks/`, so the templates remain available outside the source tree.
+They also install an `otel-hook` console command, which is the recommended hook target in your IDE config.
 
 ### Versioning
 
@@ -175,7 +176,7 @@ mkdir -p .github/hooks
 cp .cursor/hooks/opentelemetry-hook/examples/copilot-hooks.example.json .github/hooks/otel-hooks.json
 ```
 
-Replace `{{SCRIPT_PATH}}` with the path to the hook script (e.g. `python3 .cursor/hooks/opentelemetry-hook/otel_hook.py`).
+Replace `{{SCRIPT_PATH}}` with the hook command. Prefer `otel-hook` when installed from a package, or use `python3 .cursor/hooks/opentelemetry-hook/otel_hook.py` when running from a copied source checkout.
 See [GitHub Copilot hooks docs](https://docs.github.com/en/copilot/concepts/agents/coding-agent/about-hooks).
 
 #### Claude Code
@@ -185,10 +186,10 @@ mkdir -p .claude
 cp .cursor/hooks/opentelemetry-hook/examples/claude-hooks.example.json .claude/settings.json
 ```
 
-Replace `{{SCRIPT_PATH}}` with the path to the hook script, for example:
+Replace `{{SCRIPT_PATH}}` with the hook command, for example:
 
 ```bash
-python3 .cursor/hooks/opentelemetry-hook/otel_hook.py
+otel-hook
 ```
 
 If you want to force the IDE label explicitly, you can wrap the command with `env IDE_OTEL_IDE_NAME=claude`.
@@ -199,7 +200,7 @@ Claude Code is auto-detected from hook metadata such as `session_id`, `transcrip
 Antigravity workflow and hook formats can vary, so the simplest integration is to invoke the hook command directly from your workflow/rule and pin the IDE name explicitly:
 
 ```bash
-env IDE_OTEL_IDE_NAME=antigravity python3 .cursor/hooks/opentelemetry-hook/otel_hook.py
+env IDE_OTEL_IDE_NAME=antigravity otel-hook
 ```
 
 An example Antigravity workflow is included in `examples/antigravity-workflow.example.md`:
@@ -209,7 +210,7 @@ mkdir -p .agent/workflows
 cp .cursor/hooks/opentelemetry-hook/examples/antigravity-workflow.example.md .agent/workflows/opentelemetry-hook.md
 ```
 
-Replace `{{SCRIPT_PATH}}` in the copied workflow with the path to the hook script you want Antigravity to invoke.
+Replace `{{SCRIPT_PATH}}` in the copied workflow with the hook command you want Antigravity to invoke. Prefer `otel-hook` when installed from a package.
 
 When your runner uses camelCase payload keys such as `sessionId`, `toolName`, `toolInput`, or `hookEventType`, the hook normalizes them automatically before exporting spans.
 
@@ -624,7 +625,7 @@ The detected IDE is stored as the `gen_ai.system` resource attribute and `ide.na
 └── hooks/
     └── opentelemetry-hook/
         ├── setup.sh                            # One-command setup (creates/merges hooks.json)
-        ├── otel_hook.py                        # Main hook script (self-bootstraps venv)
+        ├── otel_hook.py                        # Main hook implementation (exposed as `otel-hook` when installed)
         ├── otel_config.json                    # Your config (gitignored, auto-created)
         ├── otel_config.example.json            # Config template
         ├── README.md                           # This file
@@ -684,7 +685,7 @@ tail -f .cursor/hooks/opentelemetry-hook/otel_hook.log
 ### Test manually
 
 ```bash
-echo '{"hook_event_name":"SessionStart","session_id":"test-123"}' | python3 .cursor/hooks/opentelemetry-hook/otel_hook.py
+echo '{"hook_event_name":"SessionStart","session_id":"test-123"}' | otel-hook
 ```
 
 ### Common issues

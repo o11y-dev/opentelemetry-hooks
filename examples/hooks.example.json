@@ -1,5 +1,5 @@
 {
-  "_comment": "Cursor hooks template. Replace {{SCRIPT_PATH}} (default: python3 .cursor/hooks/opentelemetry-hook/otel_hook.py). Copy to .cursor/hooks.json to enable.",
+  "_comment": "Cursor hooks template. Replace {{SCRIPT_PATH}} (default: otel-hook). Copy to .cursor/hooks.json to enable.",
   "_comment_merge": "If you already have .cursor/hooks.json, merge the hooks section instead of overwriting it.",
   "version": 1,
   "hooks": {

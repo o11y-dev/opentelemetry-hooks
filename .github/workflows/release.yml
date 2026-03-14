@@ -97,7 +97,7 @@ jobs:
       - name: Update version in README
         if: steps.semver.outputs.version != ''
         run: |
-          sed -i 's|opentelemetry-hooks\.git@v[0-9]*\.[0-9]*\.[0-9]*|opentelemetry-hooks.git@v${{ steps.semver.outputs.version }}|g' README.md
+          python scripts/update_readme_release_refs.py README.md "${{ steps.semver.outputs.version }}"
           if git diff --quiet README.md; then
             echo "README already up to date"
           else

@@ -1,5 +1,5 @@
 {
-  "_comment": "Template for GitHub Copilot. Replace {{SCRIPT_PATH}} and adjust timeoutSec if needed.",
+  "_comment": "Template for GitHub Copilot. Replace {{SCRIPT_PATH}} (default: otel-hook) and adjust timeoutSec if needed.",
   "_comment_timeout": "timeoutSec is in seconds. Default is 30.",
   "version": 1,
   "hooks": {
