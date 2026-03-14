@@ -285,7 +285,7 @@ Then restart your IDE.
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `IDE_OTEL_LOG_LEVEL` | Log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`) | `WARNING` |
-| `IDE_OTEL_LOG_FILE` | Log file path | `.cursor/hooks/opentelemetry-hook/otel_hook.log` |
+| `IDE_OTEL_LOG_FILE` | Log file path | `<hook-home>/otel_hook.log` |
 | `IDE_OTEL_LOG_EVENTS` | Log each hook event to file | `false` |
 | `IDE_OTEL_DEBUG_CONSOLE` | Print spans to stdout (for debugging) | `false` |
 
@@ -300,6 +300,9 @@ These settings have sensible defaults and typically don't need to be changed:
 | `IDE_OTEL_STATE_TTL_SECONDS` | TTL for state files before cleanup | `86400` |
 | `IDE_OTEL_STATE_CLEANUP_INTERVAL_SECONDS` | Minimum interval between cleanup runs | `3600` |
 | `IDE_OTEL_STATE_LOCK_TIMEOUT_SECONDS` | Max time to wait for state file locks | `2` |
+| `IDE_OTEL_HOOK_HOME` | Override the hook's writable home directory (config, state, venv, log) | See below |
+
+> **`IDE_OTEL_HOOK_HOME`**: When `otel-hook` runs from an installed package (i.e. the module lives inside *site-packages*), the hook automatically uses `$XDG_DATA_HOME/opentelemetry-hooks` (defaulting to `~/.local/share/opentelemetry-hooks`) instead of the package directory, so all writable files are placed in a user-owned location. Set `IDE_OTEL_HOOK_HOME` to an absolute path to override this location explicitly (useful for project-local or shared deployments). When running from a source checkout or a directly-copied script, the directory that contains `otel_hook.py` is used as before.
 
 ## Hook Stdout Response
 

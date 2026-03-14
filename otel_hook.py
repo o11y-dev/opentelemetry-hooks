@@ -38,7 +38,58 @@ from typing import Optional, Tuple
 # First run: venv + pip install happens in background; tracing activates next
 # invocation.
 # ---------------------------------------------------------------------------
-_HOOK_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _resolve_hook_home() -> str:
+    """Return the writable directory used for hook state, config, and the bootstrap venv.
+
+    Resolution order:
+    1. ``IDE_OTEL_HOOK_HOME`` environment variable (explicit override).
+    2. ``$XDG_DATA_HOME/opentelemetry-hooks`` (defaults to
+       ``~/.local/share/opentelemetry-hooks`` when ``XDG_DATA_HOME`` is unset)
+       when the hook is running from an installed package — i.e. ``__file__``
+       lives inside a *site-packages* directory.
+    3. The directory that contains ``__file__`` — legacy behaviour for a
+       source-checkout or a directly-copied script.
+    """
+    explicit = os.environ.get("IDE_OTEL_HOOK_HOME", "").strip()
+    if explicit:
+        return os.path.abspath(explicit)
+
+    # Detect installed-package mode by comparing __file__ against the known
+    # site-packages directories reported by sysconfig / site.
+    this_file = os.path.abspath(__file__)
+    in_site_packages = False
+    try:
+        import sysconfig
+        purelib = sysconfig.get_path("purelib") or ""
+        platlib = sysconfig.get_path("platlib") or ""
+        for sp in (purelib, platlib):
+            if sp and this_file.startswith(os.path.abspath(sp) + os.sep):
+                in_site_packages = True
+                break
+    except Exception:
+        pass
+    if not in_site_packages:
+        try:
+            import site
+            for sp in (site.getsitepackages() if hasattr(site, "getsitepackages") else []):
+                if sp and this_file.startswith(os.path.abspath(sp) + os.sep):
+                    in_site_packages = True
+                    break
+        except Exception:
+            pass
+
+    if in_site_packages:
+        xdg_data = os.environ.get("XDG_DATA_HOME", "").strip()
+        if not xdg_data:
+            xdg_data = os.path.join(os.path.expanduser("~"), ".local", "share")
+        return os.path.join(xdg_data, "opentelemetry-hooks")
+
+    return os.path.dirname(this_file)
+
+
+_HOOK_DIR = _resolve_hook_home()
 _VENV_DIR = os.path.join(_HOOK_DIR, ".venv")
 _SETUP_LOCK = os.path.join(_HOOK_DIR, ".state", "setup.lock")
 
@@ -677,15 +728,41 @@ def _load_mdm_config_windows() -> dict:
     return {}
 
 
+def _find_example_config() -> str:
+    """Return the path to ``otel_config.example.json``, or ``''`` if not found.
+
+    Search order:
+    1. Next to ``__file__`` (source checkout / directly-copied script).
+    2. ``{sys.prefix}/share/opentelemetry-hooks/`` (pip-installed package).
+    """
+    # Source-checkout or script-copy layout.
+    candidate = os.path.join(os.path.dirname(os.path.abspath(__file__)), "otel_config.example.json")
+    if os.path.exists(candidate):
+        return candidate
+
+    # pip-installed layout: data-files land under {prefix}/share/opentelemetry-hooks/
+    seen: set = set()
+    for prefix in [sys.prefix, sys.exec_prefix]:
+        if prefix in seen:
+            continue
+        seen.add(prefix)
+        p = os.path.join(prefix, "share", "opentelemetry-hooks", "otel_config.example.json")
+        if os.path.exists(p):
+            return p
+
+    return ""
+
+
 def _load_config() -> dict:
     path = os.getenv("IDE_OTEL_CONFIG", _CONFIG_DEFAULT)
     if not os.path.isabs(path):
         path = os.path.join(_HOOK_DIR, path)
     if not os.path.exists(path):
-        example = os.path.join(_HOOK_DIR, "otel_config.example.json")
-        if os.path.exists(example):
+        example = _find_example_config()
+        if example:
             try:
                 import shutil
+                os.makedirs(os.path.dirname(path), exist_ok=True)
                 shutil.copy2(example, path)
             except OSError:
                 pass
