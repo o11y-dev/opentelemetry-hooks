@@ -264,10 +264,15 @@ _INPUT_ALIASES = {
 _CANONICAL_IDE_NAMES = {"cursor", "copilot", "claude", "antigravity", "opencode"}
 _IDE_NAME_ALIASES = {
     "github copilot": "copilot",
+    "github copilot chat": "copilot",
+    "copilot chat": "copilot",
     "claude code": "claude",
     "claude-code": "claude",
+    "anthropic claude code": "claude",
+    "cursor ide": "cursor",
     "cursor cli": "cursor",
     "cursor-cli": "cursor",
+    "anti gravity": "antigravity",
     "open code": "opencode",
     "open-code": "opencode",
 }

@@ -196,11 +196,17 @@ class TestDetectIDE:
     def test_claude_code_self_reported_name(self):
         assert otel_hook._detect_ide({"ide_name": "Claude Code"}) == "claude"
 
+    def test_anthropic_claude_code_self_reported_name(self):
+        assert otel_hook._detect_ide({"client": "Anthropic Claude Code"}) == "claude"
+
     def test_cursor_via_conversation_id(self):
         assert otel_hook._detect_ide({"conversation_id": "abc"}) == "cursor"
 
     def test_cursor_via_generation_id(self):
         assert otel_hook._detect_ide({"generation_id": "gen-1"}) == "cursor"
+
+    def test_cursor_ide_self_reported_name(self):
+        assert otel_hook._detect_ide({"client": "Cursor IDE"}) == "cursor"
 
     def test_cursor_cli_self_reported_name(self):
         assert otel_hook._detect_ide({"client": "Cursor CLI"}) == "cursor"
@@ -212,12 +218,22 @@ class TestDetectIDE:
         # No cursor-specific fields → copilot
         assert otel_hook._detect_ide({"session_id": "sess-1"}) == "copilot"
 
+    def test_github_copilot_chat_env_override(self, monkeypatch):
+        monkeypatch.setenv("IDE_OTEL_IDE_NAME", "GitHub Copilot Chat")
+        assert otel_hook._detect_ide({"session_id": "sess-1"}) == "copilot"
+
+    def test_github_copilot_self_reported_name(self):
+        assert otel_hook._detect_ide({"ide_name": "GitHub Copilot"}) == "copilot"
+
     def test_opencode_env_override(self, monkeypatch):
         monkeypatch.setenv("IDE_OTEL_IDE_NAME", "OpenCode")
         assert otel_hook._detect_ide({"session_id": "sess-1"}) == "opencode"
 
     def test_opencode_self_reported_name(self):
         assert otel_hook._detect_ide({"source_app": "OpenCode"}) == "opencode"
+
+    def test_antigravity_spaced_self_reported_name(self):
+        assert otel_hook._detect_ide({"source_app": "Anti Gravity"}) == "antigravity"
 
     def test_empty_defaults_cursor(self):
         # Default when no IDE signals present

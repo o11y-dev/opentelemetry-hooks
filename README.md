@@ -20,7 +20,7 @@ IDE Event → stdin (JSON) → otel-hook → OpenTelemetry SDK → OTLP Backend
 
 ## Features
 
-- **Multi-IDE Support**: One script, multiple hook providers — auto-detects Cursor, GitHub Copilot, and Claude Code from hook input fields, treats Cursor CLI as Cursor's hook format, and supports explicit `IDE_OTEL_IDE_NAME` / self-reported client-name overrides for Antigravity, OpenCode, and other compatible hook runners.
+- **Multi-IDE Support**: One script, multiple hook providers — auto-detects Cursor, GitHub Copilot, and Claude Code from hook input fields, treats Cursor IDE / CLI as the same Cursor hook format, and supports explicit `IDE_OTEL_IDE_NAME` / self-reported client-name overrides for labels such as GitHub Copilot Chat, Anthropic Claude Code, Anti Gravity, OpenCode, and other compatible hook runners.
 
 - **Session-level Traces**: Groups all events within a session into a single trace with a 3-tier hierarchy:
 
@@ -296,7 +296,7 @@ Then restart your IDE.
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `IDE_OTEL_BATCH_ON_STOP` | Enable session-level batching (recommended) | `false` |
-| `IDE_OTEL_IDE_NAME` | Force the detected IDE name (`cursor`, `copilot`, `claude`, `antigravity`, `opencode`) for generic hook runners; common labels like `Claude Code` and `Cursor CLI` normalize automatically | auto-detect |
+| `IDE_OTEL_IDE_NAME` | Force the detected IDE name (`cursor`, `copilot`, `claude`, `antigravity`, `opencode`) for generic hook runners; common labels like `GitHub Copilot`, `Claude Code`, `Cursor IDE` / `Cursor CLI`, `Anti Gravity`, and `OpenCode` normalize automatically | auto-detect |
 | `IDE_OTEL_LOCAL_SPANS` | Save hook spans locally as JSONL files for agent analysis (`.state/local_spans/*.jsonl`) | unset |
 | `IDE_OTEL_CAPTURE_TEXT` | Include prompt/response text in spans | `false` |
 | `IDE_OTEL_MASK_PROMPTS` | Redact emails, tokens, usernames from text | `false` |
@@ -662,7 +662,7 @@ The hook auto-detects which IDE is calling it:
 | Signal | IDE |
 |--------|-----|
 | `IDE_OTEL_IDE_NAME` env var | Explicit override (`cursor`, `copilot`, `claude`, `antigravity`, `opencode`) |
-| Self-reported `ide_name`, `client`, or `source_app` values such as `Claude Code`, `Cursor CLI`, or `OpenCode` (case-insensitive) | Normalized to the canonical `ide.name` |
+| Self-reported `ide_name`, `client`, or `source_app` values such as `GitHub Copilot`, `GitHub Copilot Chat`, `Claude Code`, `Anthropic Claude Code`, `Cursor IDE`, `Cursor CLI`, `Anti Gravity`, or `OpenCode` (case-insensitive) | Normalized to the canonical `ide.name` |
 | `conversation_id` or `generation_id` in input | Cursor |
 | `transcript_path`, `permission_mode`, or `notification_type` | Claude Code |
 | `session_id` only (no Cursor-specific fields) | GitHub Copilot |
