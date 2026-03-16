@@ -267,14 +267,11 @@ _IDE_NAME_ALIASES = {
     "github copilot chat": "copilot",
     "copilot chat": "copilot",
     "claude code": "claude",
-    "claude-code": "claude",
     "anthropic claude code": "claude",
     "cursor ide": "cursor",
     "cursor cli": "cursor",
-    "cursor-cli": "cursor",
     "anti gravity": "antigravity",
     "open code": "opencode",
-    "open-code": "opencode",
 }
 
 # Session boundary events
@@ -434,10 +431,20 @@ def _normalize_ide_name(value: Optional[str]) -> Optional[str]:
     """Normalize IDE names to canonical identifiers using case-insensitive lookup."""
     if not isinstance(value, str):
         return None
-    normalized = value.strip().lower()
-    if normalized in _CANONICAL_IDE_NAMES:
-        return normalized
-    return _IDE_NAME_ALIASES.get(normalized)
+    normalized = re.sub(r"\s+", " ", re.sub(r"[-_]+", " ", value.strip().lower()))
+
+    candidate = normalized
+    for _ in range(2):
+        if candidate in _CANONICAL_IDE_NAMES:
+            return candidate
+        alias = _IDE_NAME_ALIASES.get(candidate)
+        if alias:
+            return alias
+        if candidate.endswith((" cli", " ide")):
+            candidate = candidate.rsplit(" ", 1)[0]
+            continue
+        break
+    return None
 
 
 # ---------------------------------------------------------------------------
