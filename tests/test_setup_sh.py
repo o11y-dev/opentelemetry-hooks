@@ -27,7 +27,7 @@ def _make_hook_dir(tmp_root: str) -> str:
     return hook_dir
 
 
-def _run_setup(hook_dir: str, env: dict | None = None) -> subprocess.CompletedProcess:
+def _run_setup(hook_dir: str, env=None) -> subprocess.CompletedProcess:
     """Run setup.sh from *hook_dir*, capturing stdout/stderr."""
     full_env = os.environ.copy()
     # Remove any real otel-hook from the effective PATH so tests are
