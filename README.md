@@ -87,7 +87,7 @@ brew install pipx          # macOS
 # or: python3 -m pip install --user pipx
 
 # Install the hook — otel-hook lands at ~/.local/bin/otel-hook (already on PATH)
-pipx install git+https://github.com/o11y-dev/opentelemetry-hooks.git@v0.1.0
+pipx install git+https://github.com/o11y-dev/opentelemetry-hooks.git@v0.5.0
 ```
 
 Or from a downloaded wheel:
@@ -101,7 +101,7 @@ pipx install opentelemetry_hooks-*.whl
 If you prefer `pip` and are confident the script directory is on your `PATH`, you can install directly:
 
 ```bash
-pip install git+https://github.com/o11y-dev/opentelemetry-hooks.git@v0.1.0
+pip install git+https://github.com/o11y-dev/opentelemetry-hooks.git@v0.5.0
 ```
 
 Or the latest from `main`:
