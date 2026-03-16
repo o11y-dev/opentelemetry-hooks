@@ -1695,10 +1695,8 @@ def _apply_genai_semconv(span, event_name: str, data: dict, ide: str) -> None:
     provider = _infer_genai_provider(data)
     if provider is not None:
         span.set_attribute("gen_ai.provider.name", provider)
-        # Preserve the deprecated attribute for compatibility with existing dashboards.
-        span.set_attribute("gen_ai.system", provider)
-    else:
-        span.set_attribute("gen_ai.system", ide)
+    # Keep gen_ai.system aligned with the IDE identifier; provider identity is in gen_ai.provider.name.
+    span.set_attribute("gen_ai.system", ide)
     span.set_attribute("gen_ai.operation.name", _genai_operation(event_name))
     _set_if_present(span, "gen_ai.conversation.id", data.get("conversation_id") or data.get("session_id"))
     _set_if_present(span, "gen_ai.agent.id", _first_present(data, ("agent_id",)))
