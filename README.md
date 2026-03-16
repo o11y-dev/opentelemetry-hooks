@@ -621,7 +621,7 @@ The hook auto-detects which IDE is calling it:
 | `transcript_path`, `permission_mode`, or `notification_type` | Claude Code |
 | `session_id` only (no Cursor-specific fields) | GitHub Copilot |
 
-The detected IDE is stored on spans as `ide.name`. The hook also preserves legacy `gen_ai.system` output for backward compatibility, while using `gen_ai.provider.name` as the v1.37+ canonical provider attribute when it can infer one from hook payloads.
+The detected IDE is recorded on spans as the `ide.name` attribute and is also exported as the `gen_ai.system` resource attribute via `OTEL_RESOURCE_ATTRIBUTES` for backward compatibility. When the hook can infer a provider from the payload, it additionally sets `gen_ai.provider.name` as the canonical provider attribute (v1.37+).
 
 ## File Structure
 
