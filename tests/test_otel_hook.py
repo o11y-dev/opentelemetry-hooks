@@ -193,11 +193,17 @@ class TestDetectIDE:
     def test_claude_via_notification_type(self):
         assert otel_hook._detect_ide({"session_id": "sess-1", "notification_type": "needs_permission"}) == "claude"
 
+    def test_claude_code_self_reported_name(self):
+        assert otel_hook._detect_ide({"ide_name": "Claude Code"}) == "claude"
+
     def test_cursor_via_conversation_id(self):
         assert otel_hook._detect_ide({"conversation_id": "abc"}) == "cursor"
 
     def test_cursor_via_generation_id(self):
         assert otel_hook._detect_ide({"generation_id": "gen-1"}) == "cursor"
+
+    def test_cursor_cli_self_reported_name(self):
+        assert otel_hook._detect_ide({"client": "Cursor CLI"}) == "cursor"
 
     def test_cursor_via_indicators(self):
         assert otel_hook._detect_ide({"composer_mode": "agent"}) == "cursor"
@@ -205,6 +211,13 @@ class TestDetectIDE:
     def test_copilot_via_session_id_only(self):
         # No cursor-specific fields → copilot
         assert otel_hook._detect_ide({"session_id": "sess-1"}) == "copilot"
+
+    def test_opencode_env_override(self, monkeypatch):
+        monkeypatch.setenv("IDE_OTEL_IDE_NAME", "OpenCode")
+        assert otel_hook._detect_ide({"session_id": "sess-1"}) == "opencode"
+
+    def test_opencode_self_reported_name(self):
+        assert otel_hook._detect_ide({"source_app": "OpenCode"}) == "opencode"
 
     def test_empty_defaults_cursor(self):
         # Default when no IDE signals present

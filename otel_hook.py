@@ -261,8 +261,16 @@ _INPUT_ALIASES = {
 
 # Canonical ide.name values accepted directly from IDE_OTEL_IDE_NAME or
 # self-reported payload metadata before alias fallback.
-_CANONICAL_IDE_NAMES = {"cursor", "copilot", "claude", "antigravity"}
-_IDE_NAME_ALIASES = {"github copilot": "copilot"}
+_CANONICAL_IDE_NAMES = {"cursor", "copilot", "claude", "antigravity", "opencode"}
+_IDE_NAME_ALIASES = {
+    "github copilot": "copilot",
+    "claude code": "claude",
+    "claude-code": "claude",
+    "cursor cli": "cursor",
+    "cursor-cli": "cursor",
+    "open code": "opencode",
+    "open-code": "opencode",
+}
 
 # Session boundary events
 _SESSION_START_EVENTS = {"SessionStart"}
