@@ -273,6 +273,7 @@ _IDE_NAME_ALIASES = {
     "anti gravity": "antigravity",
     "open code": "opencode",
 }
+_IDE_NAME_NORM_PATTERN = re.compile(r"[-_\s]+")
 
 # Session boundary events
 _SESSION_START_EVENTS = {"SessionStart"}
@@ -431,19 +432,19 @@ def _normalize_ide_name(value: Optional[str]) -> Optional[str]:
     """Normalize IDE names to canonical identifiers using case-insensitive lookup."""
     if not isinstance(value, str):
         return None
+    normalized = _IDE_NAME_NORM_PATTERN.sub(" ", value.strip().lower())
+    if normalized in _CANONICAL_IDE_NAMES:
+        return normalized
 
-    def _resolve_candidate(candidate: str) -> Optional[str]:
-        if candidate in _CANONICAL_IDE_NAMES:
-            return candidate
-        return _IDE_NAME_ALIASES.get(candidate)
-
-    normalized = re.sub(r"[-_\s]+", " ", value.strip().lower())
-    resolved = _resolve_candidate(normalized)
-    if resolved:
-        return resolved
+    alias = _IDE_NAME_ALIASES.get(normalized)
+    if alias:
+        return alias
 
     if normalized.endswith((" cli", " ide")):
-        return _resolve_candidate(normalized.rsplit(" ", 1)[0])
+        normalized = normalized.rsplit(" ", 1)[0]
+        if normalized in _CANONICAL_IDE_NAMES:
+            return normalized
+        return _IDE_NAME_ALIASES.get(normalized)
 
     return None
 
