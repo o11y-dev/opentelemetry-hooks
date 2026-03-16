@@ -231,7 +231,7 @@ class TestDetectIDE:
     def test_github_copilot_cli_self_reported_name(self):
         assert otel_hook._detect_ide({"source_app": "GitHub Copilot CLI"}) == "copilot"
 
-    def test_github_copilot_cli_hyphenated_env_override(self, monkeypatch):
+    def test_github_copilot_hyphenated_cli_env_override(self, monkeypatch):
         monkeypatch.setenv("IDE_OTEL_IDE_NAME", "github-copilot-cli")
         assert otel_hook._detect_ide({"session_id": "sess-1"}) == "copilot"
 
