@@ -119,7 +119,15 @@ class TestNormalizeInputData:
             "cacheReadInputTokens": 2,
             "agentName": "planner",
             "hookEventType": "PreToolUse",
+            # GenAI-related camelCase fields that should be aliased
+            "requestModel": "claude-3-7-sonnet",
+            "responseModel": "claude-3-7-sonnet",
+            "choiceCount": 2,
+            "systemInstructions": "You are a planner.",
+            "cacheCreationInputTokens": 3,
+            "cachedInputTokens": 2,
         })
+        # Existing aliases
         assert data["session_id"] == "sess-1"
         assert data["request_model"] == "claude-3-7-sonnet"
         assert data["response_model"] == "claude-3-7-sonnet"
@@ -133,6 +141,13 @@ class TestNormalizeInputData:
         assert data["cache_read_input_tokens"] == 2
         assert data["agent_name"] == "planner"
         assert data["hook_event_type"] == "PreToolUse"
+        # Newly added GenAI-related aliases
+        assert data["request_model"] == "claude-3-7-sonnet"
+        assert data["response_model"] == "claude-3-7-sonnet"
+        assert data["choice_count"] == 2
+        assert data["system_instructions"] == "You are a planner."
+        assert data["cache_creation_input_tokens"] == 3
+        assert data["cached_input_tokens"] == 2
 
     def test_returns_original_dict_when_no_aliases_are_needed(self):
         data = {"session_id": "sess-1"}
