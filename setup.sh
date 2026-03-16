@@ -19,7 +19,12 @@ REPO_ROOT="$(cd "$HOOK_DIR/../../.." && pwd)"
 HOOKS_JSON="$REPO_ROOT/.cursor/hooks.json"
 OTEL_CONFIG="$HOOK_DIR/otel_config.json"
 OTEL_EXAMPLE="$HOOK_DIR/otel_config.example.json"
-if command -v otel-hook &>/dev/null; then
+# Default to the local script so that copied-source checkouts always use
+# the repo-local otel_hook.py and otel_config.json, regardless of any
+# globally installed otel-hook on PATH.
+# To explicitly opt into the system-installed otel-hook console command
+# (e.g. for a pip-installed package deployment), set OTEL_HOOK_USE_GLOBAL=1.
+if [ "${OTEL_HOOK_USE_GLOBAL:-}" = "1" ] && command -v otel-hook &>/dev/null; then
   HOOK_CMD="otel-hook"
 else
   HOOK_CMD="python3 .cursor/hooks/opentelemetry-hook/otel_hook.py"

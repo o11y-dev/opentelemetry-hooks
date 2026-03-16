@@ -1,5 +1,5 @@
 {
-  "_comment": "Template for Cursor hooks. Replace {{SCRIPT_PATH}} with the hook command (default: otel-hook).",
+  "_comment": "Template for Cursor hooks. Replace {{SCRIPT_PATH}} with the hook command. For a copied-source checkout use 'python3 .cursor/hooks/opentelemetry-hook/otel_hook.py' (the default set by setup.sh); use 'otel-hook' only for a pip-installed package.",
   "version": 1,
   "hooks": {
     "sessionStart": [{ "command": "{{SCRIPT_PATH}}" }],

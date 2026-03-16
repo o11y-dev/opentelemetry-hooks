@@ -74,32 +74,59 @@ ide.session (root)
 
 ## Installation
 
+### Recommended: pipx (avoids PATH and environment issues)
+
+[`pipx`](https://pipx.pypa.io) installs the package into an isolated virtual environment and automatically places the `otel-hook` console script on your `PATH`. This is the recommended approach because it avoids two common `pip` pitfalls on macOS and Linux:
+
+- **macOS PATH gap** — `pip install --user` on the system Python (e.g. Python 3.9 from CommandLineTools) places the script in `~/Library/Python/3.9/bin/`, which is typically **not** in your shell `PATH`.
+- **PEP 668 / externally-managed-environment** — Homebrew Python 3.13+ (and many Linux distros) block direct `pip install` to protect the managed interpreter. `pipx` sidesteps this by using its own isolated venv.
+
+```bash
+# Install pipx if you don't have it yet
+brew install pipx          # macOS
+# or: python3 -m pip install --user pipx
+
+# Install the hook — otel-hook lands at ~/.local/bin/otel-hook (already on PATH)
+pipx install git+https://github.com/o11y-dev/opentelemetry-hooks.git@v0.1.0
+```
+
+Or from a downloaded wheel:
+
+```bash
+pipx install opentelemetry_hooks-*.whl
+```
+
+### Install with pip (alternative)
+
+If you prefer `pip` and are confident the script directory is on your `PATH`, you can install directly:
+
+```bash
+pip install git+https://github.com/o11y-dev/opentelemetry-hooks.git@v0.1.0
+```
+
+Or the latest from `main`:
+
+```bash
+pip install git+https://github.com/o11y-dev/opentelemetry-hooks.git
+```
+
+> **Note** — If `otel-hook` is not found after a `pip install`, the script was placed in a bin directory that is not on your `PATH`. Run `pip show -f opentelemetry-hooks | grep otel-hook` to find the script path, then either add that directory to `PATH` or switch to `pipx`.
+
 ### Download from GitHub Releases
 
 Each tagged version (`v*`) produces a GitHub Release with pre-built packages:
 
 1. Go to [Releases](https://github.com/o11y-dev/opentelemetry-hooks/releases)
 2. Download the `.whl` or `.tar.gz` from the latest release
-3. Install with pip:
+3. Install with `pipx` (recommended) or `pip`:
 
 ```bash
-pip install opentelemetry_hooks-*.whl
-```
-
-### Install directly from GitHub
-
-```bash
-pip install git+https://github.com/o11y-dev/opentelemetry-hooks.git@v0.1.0
-```
-
-Or install the latest from `main`:
-
-```bash
-pip install git+https://github.com/o11y-dev/opentelemetry-hooks.git
+pipx install opentelemetry_hooks-*.whl
+# or: pip install opentelemetry_hooks-*.whl
 ```
 
 Wheel installs also include `otel_config.example.json` and the example hook JSON files under `share/opentelemetry-hooks/`, so the templates remain available outside the source tree.
-They also install an `otel-hook` console command, which is the recommended hook target in your IDE config.
+They also install an `otel-hook` console command, which is the recommended hook target in your IDE config when using a pipx or pip installation.
 
 ### Versioning
 
@@ -176,7 +203,7 @@ mkdir -p .github/hooks
 cp .cursor/hooks/opentelemetry-hook/examples/copilot-hooks.example.json .github/hooks/otel-hooks.json
 ```
 
-Replace `{{SCRIPT_PATH}}` with the hook command. Prefer `otel-hook` when installed from a package, or use `python3 .cursor/hooks/opentelemetry-hook/otel_hook.py` when running from a copied source checkout.
+Replace `{{SCRIPT_PATH}}` with the hook command. For a copied-source checkout the default is `python3 .cursor/hooks/opentelemetry-hook/otel_hook.py`; use `otel-hook` only when the package is installed via pipx or pip.
 See [GitHub Copilot hooks docs](https://docs.github.com/en/copilot/concepts/agents/coding-agent/about-hooks).
 
 #### Claude Code
@@ -189,6 +216,9 @@ cp .cursor/hooks/opentelemetry-hook/examples/claude-hooks.example.json .claude/s
 Replace `{{SCRIPT_PATH}}` with the hook command, for example:
 
 ```bash
+# source checkout / copied-source
+python3 .cursor/hooks/opentelemetry-hook/otel_hook.py
+# pip-installed package
 otel-hook
 ```
 
@@ -200,6 +230,9 @@ Claude Code is auto-detected from hook metadata such as `session_id`, `transcrip
 Antigravity workflow and hook formats can vary, so the simplest integration is to invoke the hook command directly from your workflow/rule and pin the IDE name explicitly:
 
 ```bash
+# source checkout / copied-source
+env IDE_OTEL_IDE_NAME=antigravity python3 .cursor/hooks/opentelemetry-hook/otel_hook.py
+# pip-installed package
 env IDE_OTEL_IDE_NAME=antigravity otel-hook
 ```
 
@@ -210,7 +243,7 @@ mkdir -p .agent/workflows
 cp .cursor/hooks/opentelemetry-hook/examples/antigravity-workflow.example.md .agent/workflows/opentelemetry-hook.md
 ```
 
-Replace `{{SCRIPT_PATH}}` in the copied workflow with the hook command you want Antigravity to invoke. Prefer `otel-hook` when installed from a package.
+Replace `{{SCRIPT_PATH}}` in the copied workflow with the hook command you want Antigravity to invoke. For a copied-source checkout use `python3 .cursor/hooks/opentelemetry-hook/otel_hook.py`; use `otel-hook` for a pip-installed package.
 
 When your runner uses camelCase payload keys such as `sessionId`, `toolName`, `toolInput`, or `hookEventType`, the hook normalizes them automatically before exporting spans.
 
