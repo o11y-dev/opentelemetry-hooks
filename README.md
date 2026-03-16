@@ -1,5 +1,9 @@
 # OpenTelemetry Hook for AI Coding Agents
 
+[![Release](https://img.shields.io/github/v/release/o11y-dev/opentelemetry-hooks?display_name=tag)](https://github.com/o11y-dev/opentelemetry-hooks/releases)
+[![Tests](https://img.shields.io/github/actions/workflow/status/o11y-dev/opentelemetry-hooks/ci.yml?branch=main&label=tests)](https://github.com/o11y-dev/opentelemetry-hooks/actions/workflows/ci.yml)
+[![OpenTelemetry GenAI SemConv](https://img.shields.io/badge/OpenTelemetry-GenAI%20SemConv-425CC7?logo=opentelemetry)](https://opentelemetry.io/docs/specs/semconv/gen-ai/)
+
 > Observability for your AI pair-programmer — know what your agent is doing, one trace at a time.
 
 An open-source OpenTelemetry integration that captures all AI coding agent activity as structured **traces and logs** and exports them to any OTLP-compliant backend. Works with **Cursor IDE / Cursor CLI**, **GitHub Copilot**, **Claude Code**, **Antigravity**, and compatible hook runners such as **OpenCode** using [OpenTelemetry GenAI semantic conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/).
