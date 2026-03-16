@@ -9,8 +9,6 @@ import os
 import shutil
 import subprocess
 
-import pytest
-
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SETUP_SH = os.path.join(REPO_ROOT, "setup.sh")
 OTEL_HOOK_PY = os.path.join(REPO_ROOT, "otel_hook.py")
