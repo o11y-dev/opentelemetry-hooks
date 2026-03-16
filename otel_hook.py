@@ -261,8 +261,19 @@ _INPUT_ALIASES = {
 
 # Canonical ide.name values accepted directly from IDE_OTEL_IDE_NAME or
 # self-reported payload metadata before alias fallback.
-_CANONICAL_IDE_NAMES = {"cursor", "copilot", "claude", "antigravity"}
-_IDE_NAME_ALIASES = {"github copilot": "copilot"}
+_CANONICAL_IDE_NAMES = {"cursor", "copilot", "claude", "antigravity", "opencode"}
+_IDE_NAME_ALIASES = {
+    "github copilot": "copilot",
+    "github copilot chat": "copilot",
+    "copilot chat": "copilot",
+    "claude code": "claude",
+    "anthropic claude code": "claude",
+    "cursor ide": "cursor",
+    "cursor cli": "cursor",
+    "anti gravity": "antigravity",
+    "open code": "opencode",
+}
+_IDE_NAME_NORM_PATTERN = re.compile(r"[-_\s]+")
 
 # Session boundary events
 _SESSION_START_EVENTS = {"SessionStart"}
@@ -421,10 +432,21 @@ def _normalize_ide_name(value: Optional[str]) -> Optional[str]:
     """Normalize IDE names to canonical identifiers using case-insensitive lookup."""
     if not isinstance(value, str):
         return None
-    normalized = value.strip().lower()
+    normalized = _IDE_NAME_NORM_PATTERN.sub(" ", value.strip().lower())
     if normalized in _CANONICAL_IDE_NAMES:
         return normalized
-    return _IDE_NAME_ALIASES.get(normalized)
+
+    alias = _IDE_NAME_ALIASES.get(normalized)
+    if alias:
+        return alias
+
+    if normalized.endswith((" cli", " ide")):
+        normalized = normalized.rsplit(" ", 1)[0]
+        if normalized in _CANONICAL_IDE_NAMES:
+            return normalized
+        return _IDE_NAME_ALIASES.get(normalized)
+
+    return None
 
 
 # ---------------------------------------------------------------------------

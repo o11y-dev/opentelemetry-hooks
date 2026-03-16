@@ -2,7 +2,7 @@
 
 > Observability for your AI pair-programmer — know what your agent is doing, one trace at a time.
 
-An open-source OpenTelemetry integration that captures all AI coding agent activity as structured **traces and logs** and exports them to any OTLP-compliant backend. Works with **Cursor IDE**, **GitHub Copilot**, **Claude Code**, and **Antigravity** hook runners using [OpenTelemetry GenAI semantic conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/).
+An open-source OpenTelemetry integration that captures all AI coding agent activity as structured **traces and logs** and exports them to any OTLP-compliant backend. Works with **Cursor IDE / Cursor CLI**, **GitHub Copilot**, **Claude Code**, **Antigravity**, and compatible hook runners such as **OpenCode** using [OpenTelemetry GenAI semantic conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/).
 
 Every hook event — prompt submissions, tool calls, shell commands, MCP interactions, file edits, subagent orchestration — becomes an OpenTelemetry span you can query, alert on, and visualize in Jaeger, Grafana, Datadog, Honeycomb, Coralogix, or any OTLP-compatible backend.
 
@@ -20,7 +20,7 @@ IDE Event → stdin (JSON) → otel-hook → OpenTelemetry SDK → OTLP Backend
 
 ## Features
 
-- **Multi-IDE Support**: One script, multiple hook providers — auto-detects Cursor, GitHub Copilot, and Claude Code from hook input fields, and supports explicit `IDE_OTEL_IDE_NAME` overrides for Antigravity and other compatible hook runners.
+- **Multi-IDE Support**: One script, multiple hook providers — auto-detects Cursor, GitHub Copilot, and Claude Code from hook input fields, treats Cursor IDE / CLI as the same Cursor hook format, and supports explicit `IDE_OTEL_IDE_NAME` / self-reported client-name overrides for labels such as GitHub Copilot Chat, Anthropic Claude Code, and CLI / IDE suffix variants of supported names (for example `GitHub Copilot CLI`, `Claude Code CLI`, `OpenCode CLI`, `Cursor IDE`).
 
 - **Session-level Traces**: Groups all events within a session into a single trace with a 3-tier hierarchy:
 
@@ -53,7 +53,7 @@ ide.session (root)
 
 ## Supported Events
 
-| Canonical Name | Cursor | Copilot | Claude Code / Antigravity |
+| Canonical Name | Cursor IDE / CLI | Copilot | Claude Code / Antigravity / compatible runners |
 |---|---|---|---|
 | `SessionStart` | `sessionStart` | `sessionStart` | `SessionStart` |
 | `SessionEnd` | `sessionEnd` | `sessionEnd` | `SessionEnd` |
@@ -196,6 +196,10 @@ rm -rf /tmp/otel-hook-source
 
 ### Other IDEs
 
+#### Cursor CLI
+
+Cursor CLI uses the same `.cursor/hooks.json` configuration and hook payload shape as Cursor IDE, so the Cursor IDE setup above in [Quick Start](#quick-start) also covers Cursor CLI. Its spans are recorded with the canonical `ide.name=cursor`.
+
 #### GitHub Copilot
 
 ```bash
@@ -247,6 +251,10 @@ Replace `{{SCRIPT_PATH}}` in the copied workflow with the hook command you want 
 
 When your runner uses camelCase payload keys such as `sessionId`, `toolName`, `toolInput`, or `hookEventType`, the hook normalizes them automatically before exporting spans.
 
+#### OpenCode and other compatible runners
+
+OpenCode can be integrated through a wrapper/plugin that invokes `otel-hook` (or `python3 .../otel_hook.py`) and forwards compatible hook JSON. Set `IDE_OTEL_IDE_NAME=opencode`, or pass a self-reported client field such as `ide_name`, `client`, or `source_app` with the value `OpenCode`. Unlike Cursor or Claude Code, OpenCode does not currently have distinct structural payload markers that the hook can auto-detect on its own, so explicit name fields are the reliable detection path.
+
 #### GitHub Copilot — Recommended Repositories
 
 To make this hook automatically available to the GitHub Copilot coding agent across your organization's repositories, add it as a [recommended repository](https://docs.github.com/en/copilot/customizing-copilot/adding-repository-instructions-for-github-copilot):
@@ -288,7 +296,7 @@ Then restart your IDE.
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `IDE_OTEL_BATCH_ON_STOP` | Enable session-level batching (recommended) | `false` |
-| `IDE_OTEL_IDE_NAME` | Force the detected IDE name (`cursor`, `copilot`, `claude`, `antigravity`) for generic hook runners | auto-detect |
+| `IDE_OTEL_IDE_NAME` | Force the detected IDE name (`cursor`, `copilot`, `claude`, `antigravity`, `opencode`) for generic hook runners; common labels like `GitHub Copilot`, `Claude Code`, `Cursor IDE` / `Cursor CLI`, `Anti Gravity`, `OpenCode`, and their `... CLI` / `... IDE` variants normalize automatically | auto-detect |
 | `IDE_OTEL_LOCAL_SPANS` | Save hook spans locally as JSONL files for agent analysis (`.state/local_spans/*.jsonl`) | unset |
 | `IDE_OTEL_CAPTURE_TEXT` | Include prompt/response text in spans | `false` |
 | `IDE_OTEL_MASK_PROMPTS` | Redact emails, tokens, usernames from text | `false` |
@@ -653,7 +661,8 @@ The hook auto-detects which IDE is calling it:
 
 | Signal | IDE |
 |--------|-----|
-| `IDE_OTEL_IDE_NAME` env var | Explicit override (`cursor`, `copilot`, `claude`, `antigravity`) |
+| `IDE_OTEL_IDE_NAME` env var | Explicit override (`cursor`, `copilot`, `claude`, `antigravity`, `opencode`) |
+| Self-reported `ide_name`, `client`, or `source_app` values such as `GitHub Copilot`, `GitHub Copilot CLI`, `GitHub Copilot Chat`, `Claude Code`, `Claude Code CLI`, `Anthropic Claude Code`, `Cursor IDE`, `Cursor CLI`, `Anti Gravity`, `Anti Gravity CLI`, or `OpenCode` / `OpenCode CLI` (case-insensitive, hyphen/space-insensitive) | Normalized to the canonical `ide.name` |
 | `conversation_id` or `generation_id` in input | Cursor |
 | `transcript_path`, `permission_mode`, or `notification_type` | Claude Code |
 | `session_id` only (no Cursor-specific fields) | GitHub Copilot |
@@ -760,7 +769,7 @@ Please open an issue first if you plan a large change.
 
 - Built on pure [OpenTelemetry Python SDK](https://opentelemetry.io/docs/languages/python/)
 - Uses [OpenTelemetry GenAI Semantic Conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/)
-- Supports [GitHub Copilot hooks](https://docs.github.com/en/copilot/concepts/agents/coding-agent/about-hooks) and Claude Code-compatible hook payloads
+- Supports [GitHub Copilot hooks](https://docs.github.com/en/copilot/concepts/agents/coding-agent/about-hooks), Cursor IDE / CLI hook payloads, Claude Code hook payloads, and compatible runners such as OpenCode
 
 ## License
 
