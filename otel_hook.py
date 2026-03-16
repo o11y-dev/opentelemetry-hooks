@@ -431,16 +431,13 @@ def _normalize_ide_name(value: Optional[str]) -> Optional[str]:
     """Normalize IDE names to canonical identifiers using case-insensitive lookup."""
     if not isinstance(value, str):
         return None
+
     def _resolve_candidate(candidate: str) -> Optional[str]:
         if candidate in _CANONICAL_IDE_NAMES:
             return candidate
-        alias = _IDE_NAME_ALIASES.get(candidate)
-        if alias:
-            return alias
+        return _IDE_NAME_ALIASES.get(candidate)
 
-        return None
-
-    normalized = re.sub(r"\s+", " ", re.sub(r"[-_]+", " ", value.strip().lower()))
+    normalized = re.sub(r"[-_\s]+", " ", value.strip().lower())
     resolved = _resolve_candidate(normalized)
     if resolved:
         return resolved

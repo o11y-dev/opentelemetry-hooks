@@ -253,7 +253,7 @@ When your runner uses camelCase payload keys such as `sessionId`, `toolName`, `t
 
 #### OpenCode and other compatible runners
 
-OpenCode can be integrated through a wrapper/plugin that invokes `otel-hook` (or `python3 .../otel_hook.py`) and forwards compatible hook JSON. Set `IDE_OTEL_IDE_NAME=opencode`, or pass a self-reported client field such as `ide_name`, `client`, or `source_app` with the value `OpenCode`; unlike Cursor or Claude Code, OpenCode does not currently have distinct payload markers that the hook can auto-detect on its own.
+OpenCode can be integrated through a wrapper/plugin that invokes `otel-hook` (or `python3 .../otel_hook.py`) and forwards compatible hook JSON. Set `IDE_OTEL_IDE_NAME=opencode`, or pass a self-reported client field such as `ide_name`, `client`, or `source_app` with the value `OpenCode`. Unlike Cursor or Claude Code, OpenCode does not currently have distinct payload markers that the hook can auto-detect on its own.
 
 #### GitHub Copilot — Recommended Repositories
 
