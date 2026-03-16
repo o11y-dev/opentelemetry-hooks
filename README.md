@@ -198,7 +198,7 @@ rm -rf /tmp/otel-hook-source
 
 #### Cursor CLI
 
-Cursor CLI uses the same `.cursor/hooks.json` configuration and hook payload shape as Cursor IDE, so the standard Cursor setup above also covers Cursor CLI. Its spans are recorded with the canonical `ide.name=cursor`.
+Cursor CLI uses the same `.cursor/hooks.json` configuration and hook payload shape as Cursor IDE, so the Cursor IDE setup above in [Quick Start](#quick-start) also covers Cursor CLI. Its spans are recorded with the canonical `ide.name=cursor`.
 
 #### GitHub Copilot
 
@@ -253,7 +253,7 @@ When your runner uses camelCase payload keys such as `sessionId`, `toolName`, `t
 
 #### OpenCode and other compatible runners
 
-OpenCode can be integrated through a wrapper/plugin that invokes `otel-hook` (or `python3 .../otel_hook.py`) and forwards compatible hook JSON. Set `IDE_OTEL_IDE_NAME=opencode`, or pass a self-reported client field such as `ide_name`, `client`, or `source_app` with the value `OpenCode`, because OpenCode payloads are not auto-detected today.
+OpenCode can be integrated through a wrapper/plugin that invokes `otel-hook` (or `python3 .../otel_hook.py`) and forwards compatible hook JSON. Set `IDE_OTEL_IDE_NAME=opencode`, or pass a self-reported client field such as `ide_name`, `client`, or `source_app` with the value `OpenCode`; unlike Cursor or Claude Code, OpenCode does not currently have distinct payload markers that the hook can auto-detect on its own.
 
 #### GitHub Copilot — Recommended Repositories
 
@@ -662,7 +662,7 @@ The hook auto-detects which IDE is calling it:
 | Signal | IDE |
 |--------|-----|
 | `IDE_OTEL_IDE_NAME` env var | Explicit override (`cursor`, `copilot`, `claude`, `antigravity`, `opencode`) |
-| Self-reported `ide_name`, `client`, or `source_app` values such as `Claude Code`, `Cursor CLI`, or `OpenCode` | Normalized to the canonical `ide.name` |
+| Self-reported `ide_name`, `client`, or `source_app` values such as `Claude Code`, `Cursor CLI`, or `OpenCode` (case-insensitive) | Normalized to the canonical `ide.name` |
 | `conversation_id` or `generation_id` in input | Cursor |
 | `transcript_path`, `permission_mode`, or `notification_type` | Claude Code |
 | `session_id` only (no Cursor-specific fields) | GitHub Copilot |
@@ -769,7 +769,7 @@ Please open an issue first if you plan a large change.
 
 - Built on pure [OpenTelemetry Python SDK](https://opentelemetry.io/docs/languages/python/)
 - Uses [OpenTelemetry GenAI Semantic Conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/)
-- Supports [GitHub Copilot hooks](https://docs.github.com/en/copilot/concepts/agents/coding-agent/about-hooks) and Claude Code-compatible hook payloads
+- Supports [GitHub Copilot hooks](https://docs.github.com/en/copilot/concepts/agents/coding-agent/about-hooks), Cursor IDE / CLI hook payloads, Claude Code hook payloads, and compatible runners such as OpenCode
 
 ## License
 
