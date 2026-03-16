@@ -107,18 +107,30 @@ class TestNormalizeInputData:
     def test_adds_snake_case_aliases_for_camel_case_payloads(self):
         data = otel_hook._normalize_input_data({
             "sessionId": "sess-1",
+            "requestModel": "claude-3-7-sonnet",
+            "responseModel": "claude-3-7-sonnet",
             "toolName": "Bash",
             "toolInput": {"command": "pwd"},
             "providerName": "anthropic",
             "responseFormat": "json_schema",
+            "choiceCount": 2,
+            "systemInstructions": [{"type": "text", "content": "You are a planner."}],
+            "cacheCreationInputTokens": 3,
+            "cacheReadInputTokens": 2,
             "agentName": "planner",
             "hookEventType": "PreToolUse",
         })
         assert data["session_id"] == "sess-1"
+        assert data["request_model"] == "claude-3-7-sonnet"
+        assert data["response_model"] == "claude-3-7-sonnet"
         assert data["tool_name"] == "Bash"
         assert data["tool_input"] == {"command": "pwd"}
         assert data["provider_name"] == "anthropic"
         assert data["response_format"] == "json_schema"
+        assert data["choice_count"] == 2
+        assert data["system_instructions"] == [{"type": "text", "content": "You are a planner."}]
+        assert data["cache_creation_input_tokens"] == 3
+        assert data["cache_read_input_tokens"] == 2
         assert data["agent_name"] == "planner"
         assert data["hook_event_type"] == "PreToolUse"
 
@@ -501,7 +513,7 @@ class TestGenAISemconv:
 
         attrs = self._attrs(span)
         assert attrs["gen_ai.provider.name"] == "anthropic"
-        assert attrs["gen_ai.system"] == "anthropic"
+        assert attrs["gen_ai.system"] == "claude"
         assert attrs["gen_ai.output.type"] == "json"
         assert attrs["gen_ai.request.choice.count"] == 2
         assert attrs["gen_ai.agent.id"] == "agent-1"
@@ -524,7 +536,7 @@ class TestGenAISemconv:
 
         attrs = self._attrs(span)
         assert attrs["gen_ai.provider.name"] == "openai"
-        assert attrs["gen_ai.system"] == "openai"
+        assert attrs["gen_ai.system"] == "cursor"
 
 
 # ── Log endpoint derivation ───────────────────────────────────────────────
