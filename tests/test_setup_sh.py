@@ -1,7 +1,7 @@
 """Tests for setup.sh command-selection logic.
 
-Verifies that setup.sh defaults to the local script and only uses the
-system-installed otel-hook command when OTEL_HOOK_USE_GLOBAL=1 is set.
+Verifies that setup.sh prefers the system-installed otel-hook command when it
+is available on PATH, and falls back to the local script otherwise.
 """
 
 import json
@@ -28,11 +28,15 @@ def _make_hook_dir(tmp_root: str) -> str:
 
 
 def _run_setup(hook_dir: str, env=None) -> subprocess.CompletedProcess:
-    """Run setup.sh from *hook_dir*, capturing stdout/stderr."""
+    """Run setup.sh from *hook_dir*, capturing stdout/stderr.
+
+    Individual tests control PATH via *env* to determine whether otel-hook
+    is visible.  Tests that check the global-preferred behavior inject a fake
+    otel-hook on the PATH; tests that check the fallback use a minimal PATH
+    built from the real python3 location so that no accidental otel-hook
+    leaks in from the developer's environment.
+    """
     full_env = os.environ.copy()
-    # Remove any real otel-hook from the effective PATH so tests are
-    # reproducible on machines that happen to have it installed.
-    full_env.pop("OTEL_HOOK_USE_GLOBAL", None)
     if env:
         full_env.update(env)
 
@@ -59,30 +63,12 @@ def _hooks_json_commands(tmp_root: str) -> list[str]:
 
 
 class TestSetupShCommandSelection:
-    """setup.sh must default to the local script path."""
+    """setup.sh must prefer the global otel-hook command when available."""
 
-    def test_default_uses_local_script(self, tmp_path):
-        """Without OTEL_HOOK_USE_GLOBAL, setup.sh writes the local script command."""
-        hook_dir = _make_hook_dir(str(tmp_path))
-        result = _run_setup(hook_dir)
-        assert result.returncode == 0, result.stderr
-
-        cmds = _hooks_json_commands(str(tmp_path))
-        assert len(cmds) == 1
-        cmd = cmds[0]
-        assert "otel_hook.py" in cmd, (
-            f"Expected local otel_hook.py script in command, got: {cmd!r}"
-        )
-        assert cmd != "otel-hook", (
-            "setup.sh should NOT use the global otel-hook by default"
-        )
-
-    def test_global_flag_not_set_ignores_path_otel_hook(self, tmp_path):
-        """Even if a fake otel-hook is on PATH, the local script is used when
-        OTEL_HOOK_USE_GLOBAL is unset."""
+    def test_default_uses_global_when_otel_hook_available(self, tmp_path):
+        """When otel-hook is on PATH, setup.sh writes 'otel-hook' as the command."""
         hook_dir = _make_hook_dir(str(tmp_path))
 
-        # Create a fake otel-hook on a temp PATH
         fake_bin = str(tmp_path / "fakebin")
         os.makedirs(fake_bin)
         fake_otel = os.path.join(fake_bin, "otel-hook")
@@ -92,36 +78,6 @@ class TestSetupShCommandSelection:
 
         old_path = os.environ.get("PATH", "")
         env_override = {"PATH": f"{fake_bin}:{old_path}"}
-        # Explicitly unset the opt-in flag
-        env_override["OTEL_HOOK_USE_GLOBAL"] = ""
-
-        result = _run_setup(hook_dir, env=env_override)
-        assert result.returncode == 0, result.stderr
-
-        cmds = _hooks_json_commands(str(tmp_path))
-        assert len(cmds) == 1
-        cmd = cmds[0]
-        assert "otel_hook.py" in cmd, (
-            f"Expected local script, got: {cmd!r} (fake otel-hook was on PATH)"
-        )
-
-    def test_use_global_flag_selects_otel_hook(self, tmp_path):
-        """With OTEL_HOOK_USE_GLOBAL=1 and a fake otel-hook on PATH, setup.sh
-        writes 'otel-hook' as the command."""
-        hook_dir = _make_hook_dir(str(tmp_path))
-
-        fake_bin = str(tmp_path / "fakebin")
-        os.makedirs(fake_bin)
-        fake_otel = os.path.join(fake_bin, "otel-hook")
-        with open(fake_otel, "w") as f:
-            f.write("#!/bin/sh\necho fake\n")
-        os.chmod(fake_otel, 0o755)
-
-        old_path = os.environ.get("PATH", "")
-        env_override = {
-            "PATH": f"{fake_bin}:{old_path}",
-            "OTEL_HOOK_USE_GLOBAL": "1",
-        }
 
         result = _run_setup(hook_dir, env=env_override)
         assert result.returncode == 0, result.stderr
@@ -130,19 +86,18 @@ class TestSetupShCommandSelection:
         assert len(cmds) == 1
         cmd = cmds[0]
         assert cmd == "otel-hook", (
-            f"Expected 'otel-hook' with OTEL_HOOK_USE_GLOBAL=1, got: {cmd!r}"
+            f"Expected 'otel-hook' when it is on PATH, got: {cmd!r}"
         )
 
-    def test_use_global_flag_without_otel_hook_falls_back_to_local(self, tmp_path):
-        """With OTEL_HOOK_USE_GLOBAL=1 but no otel-hook on PATH, setup.sh
-        falls back to the local script."""
+    def test_falls_back_to_local_when_no_otel_hook(self, tmp_path):
+        """When otel-hook is not on PATH, setup.sh falls back to the local script."""
         hook_dir = _make_hook_dir(str(tmp_path))
 
-        # Use a PATH that definitely doesn't have otel-hook
-        env_override = {
-            "PATH": "/usr/bin:/bin",
-            "OTEL_HOOK_USE_GLOBAL": "1",
-        }
+        # Build a minimal PATH containing python3 but definitely no otel-hook,
+        # so the test is portable across macOS (/opt/homebrew/bin) and Linux.
+        python3_bin = shutil.which("python3") or "/usr/bin/python3"
+        python3_dir = os.path.dirname(python3_bin)
+        env_override = {"PATH": f"{python3_dir}:/usr/bin:/bin"}
 
         result = _run_setup(hook_dir, env=env_override)
         assert result.returncode == 0, result.stderr
