@@ -78,80 +78,21 @@ ide.session (root)
 
 ## Installation
 
-### Recommended: pipx (avoids PATH and environment issues)
-
-[`pipx`](https://pipx.pypa.io) installs the package into an isolated virtual environment and automatically places the `otel-hook` console script on your `PATH`. This is the recommended approach because it avoids two common `pip` pitfalls on macOS and Linux:
-
-- **macOS PATH gap** — `pip install --user` on the system Python (e.g. Python 3.9 from CommandLineTools) places the script in `~/Library/Python/3.9/bin/`, which is typically **not** in your shell `PATH`.
-- **PEP 668 / externally-managed-environment** — Homebrew Python 3.13+ (and many Linux distros) block direct `pip install` to protect the managed interpreter. `pipx` sidesteps this by using its own isolated venv.
-
 ```bash
-# Install pipx if you don't have it yet
-brew install pipx          # macOS
-# or: python3 -m pip install --user pipx
-
-# Install the hook — otel-hook lands at ~/.local/bin/otel-hook (already on PATH)
+# Recommended: pipx keeps otel-hook on PATH in an isolated venv
 pipx install git+https://github.com/o11y-dev/opentelemetry-hooks.git@v0.6.0
-```
 
-Or from a downloaded wheel:
-
-```bash
-pipx install opentelemetry_hooks-*.whl
-```
-
-### Install with pip (alternative)
-
-If you prefer `pip` and are confident the script directory is on your `PATH`, you can install directly:
-
-```bash
+# Or with pip
 pip install git+https://github.com/o11y-dev/opentelemetry-hooks.git@v0.6.0
 ```
 
-Or the latest from `main`:
-
-```bash
-pip install git+https://github.com/o11y-dev/opentelemetry-hooks.git
-```
-
-> **Note** — If `otel-hook` is not found after a `pip install`, the script was placed in a bin directory that is not on your `PATH`. Run `pip show -f opentelemetry-hooks | grep otel-hook` to find the script path, then either add that directory to `PATH` or switch to `pipx`.
-
-### Download from GitHub Releases
-
-Each tagged version (`v*`) produces a GitHub Release with pre-built packages:
-
-1. Go to [Releases](https://github.com/o11y-dev/opentelemetry-hooks/releases)
-2. Download the `.whl` or `.tar.gz` from the latest release
-3. Install with `pipx` (recommended) or `pip`:
+Or install from a pre-built wheel from the [Releases](https://github.com/o11y-dev/opentelemetry-hooks/releases) page:
 
 ```bash
 pipx install opentelemetry_hooks-*.whl
-# or: pip install opentelemetry_hooks-*.whl
 ```
 
-Wheel installs also include `otel_config.example.json` and the example hook JSON files under `share/opentelemetry-hooks/`, so the templates remain available outside the source tree.
-They also install an `otel-hook` console command, which is the recommended hook target in your IDE config when using a pipx or pip installation.
-
-### Versioning
-
-This project uses [semantic versioning](https://semver.org/) with automated version detection via [python-semantic-release](https://python-semantic-release.readthedocs.io/). Versions are derived from git tags using `setuptools-scm` at build time.
-
-To create a new release, go to **Actions → Release → Run workflow** and click **Run workflow**. The workflow will:
-
-1. Run the test suite
-2. Analyze commits since the last tag using [Conventional Commits](https://www.conventionalcommits.org/) to determine the version bump (`fix:` → patch, `feat:` → minor, `feat!:` / `BREAKING CHANGE` → major)
-3. Create the git tag, build the package, and publish a GitHub Release with artifacts and auto-generated release notes (the project changelog for each release)
-
-The **version** input is optional — leave it empty for automatic detection, or provide an explicit version (e.g. `1.2.0`) to override. The **force** input lets you force a specific bump level (`patch`, `minor`, `major`) when auto-detection finds no conventional commits; it is ignored when an explicit version is provided.
-
-Alternatively, push a tag manually:
-
-```bash
-git tag v0.2.0
-git push origin v0.2.0
-```
-
-The CI pipeline will then build the package and create a GitHub Release automatically.
+Once installed, `setup.sh` will automatically use the global `otel-hook` command.
 
 ## Quick Start
 
