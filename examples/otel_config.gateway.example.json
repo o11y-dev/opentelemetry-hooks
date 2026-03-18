@@ -1,0 +1,13 @@
+{
+  "_comment": "Hook config for sending traces to a Reflect Gateway collector.",
+  "_comment_setup": "Start the gateway: cd gateway && docker compose up -d",
+
+  "OTEL_EXPORTER_OTLP_ENDPOINT": "http://localhost:4317",
+  "OTEL_EXPORTER_OTLP_PROTOCOL": "grpc",
+  "OTEL_SERVICE_NAME": "ide-agent",
+
+  "IDE_OTEL_BATCH_ON_STOP": "true",
+  "IDE_OTEL_LOCAL_SPANS": null,
+  "IDE_OTEL_CAPTURE_TEXT": "false",
+  "IDE_OTEL_LOG_LEVEL": "WARNING"
+}
