@@ -638,7 +638,7 @@ class TestBatchBuffer:
 
 
 class TestLocalTracePersistence:
-    def _make_mock_span(self, name="ide.generation", session_key="sess-1", trace_id=0xABCD, span_id=0x1234):
+    def _make_mock_span(self, name="gen_ai.client.generation", session_key="sess-1", trace_id=0xABCD, span_id=0x1234):
         span = mock.MagicMock()
         span.name = name
         ctx = mock.MagicMock()
@@ -648,7 +648,7 @@ class TestLocalTracePersistence:
         span.parent = None
         span.start_time = 1_000_000_000
         span.end_time = 2_000_000_000
-        span.attributes = {"ide.session.key": session_key}
+        span.attributes = {"gen_ai.client.session.key": session_key}
         span.status = mock.MagicMock()
         span.status.status_code.name = "OK"
         return span
@@ -662,8 +662,8 @@ class TestLocalTracePersistence:
         assert os.path.exists(out_file)
         with open(out_file) as f:
             rec = json.loads(f.read().strip())
-        assert rec["name"] == "ide.generation"
-        assert rec["attributes"]["ide.session.key"] == "sess-1"
+        assert rec["name"] == "gen_ai.client.generation"
+        assert rec["attributes"]["gen_ai.client.session.key"] == "sess-1"
         assert rec["status"] == "OK"
 
     def test_file_span_exporter_appends_multiple_spans(self, tmp_path):
@@ -767,7 +767,7 @@ class TestFlushStaleSessions:
 
         # Session span should have been emitted
         tracer.start_span.assert_called_once()
-        assert tracer.start_span.call_args[0][0] == "ide.session"
+        assert tracer.start_span.call_args[0][0] == "gen_ai.client.session"
         # File should be removed
         assert not sess_file.exists()
 
@@ -839,9 +839,9 @@ class TestFlushStaleSessions:
 class TestFlatten:
     def test_flat(self):
         out = {}
-        otel_hook._flatten(out, "ide.metadata", {"key": "val", "nested": {"a": 1}})
-        assert out["ide.metadata.key"] == "val"
-        assert out["ide.metadata.nested.a"] == 1
+        otel_hook._flatten(out, "gen_ai.client.metadata", {"key": "val", "nested": {"a": 1}})
+        assert out["gen_ai.client.metadata.key"] == "val"
+        assert out["gen_ai.client.metadata.nested.a"] == 1
 
     def test_skips_none(self):
         out = {}
@@ -1116,3 +1116,90 @@ class TestLoadConfigWithFindExampleConfig:
 
         result = otel_hook._load_config()
         assert result == {}
+
+
+# ── OS / host detection ──────────────────────────────────────────────────
+
+
+class TestGetOsInfo:
+    def test_returns_all_keys(self):
+        otel_hook._OS_INFO = None  # reset cache
+        info = otel_hook._get_os_info()
+        assert "os.type" in info
+        assert "os.name" in info
+        assert "os.version" in info
+        assert "host.arch" in info
+
+    def test_os_type_is_lowercase(self):
+        otel_hook._OS_INFO = None
+        info = otel_hook._get_os_info()
+        assert info["os.type"] == info["os.type"].lower()
+
+    def test_cached_after_first_call(self):
+        otel_hook._OS_INFO = None
+        first = otel_hook._get_os_info()
+        second = otel_hook._get_os_info()
+        assert first is second
+
+    def test_darwin_shows_macos(self):
+        otel_hook._OS_INFO = None
+        with mock.patch("otel_hook.platform") as mp:
+            mp.system.return_value = "Darwin"
+            mp.release.return_value = "25.3.0"
+            mp.machine.return_value = "arm64"
+            info = otel_hook._get_os_info()
+            assert info["os.type"] == "darwin"
+            assert info["os.name"] == "macOS"
+        otel_hook._OS_INFO = None  # reset
+
+
+# ── Client version detection ─────────────────────────────────────────────
+
+
+class TestDetectClientVersion:
+    def test_from_payload(self):
+        assert otel_hook._detect_client_version({"client_version": "1.2.3"}, "claude") == "1.2.3"
+
+    def test_from_ide_version_alias(self):
+        assert otel_hook._detect_client_version({"ide_version": "0.9.0"}, "cursor") == "0.9.0"
+
+    def test_from_claude_env(self, monkeypatch):
+        monkeypatch.setenv("CLAUDE_CODE_VERSION", "1.0.42")
+        assert otel_hook._detect_client_version({}, "claude") == "1.0.42"
+
+    def test_from_cursor_env(self, monkeypatch):
+        monkeypatch.setenv("CURSOR_VERSION", "0.45.0")
+        assert otel_hook._detect_client_version({}, "cursor") == "0.45.0"
+
+    def test_from_generic_env(self, monkeypatch):
+        monkeypatch.setenv("IDE_OTEL_CLIENT_VERSION", "2.0.0")
+        assert otel_hook._detect_client_version({}, "opencode") == "2.0.0"
+
+    def test_payload_takes_precedence_over_env(self, monkeypatch):
+        monkeypatch.setenv("CLAUDE_CODE_VERSION", "1.0.42")
+        assert otel_hook._detect_client_version({"client_version": "2.0.0"}, "claude") == "2.0.0"
+
+    def test_returns_none_when_unavailable(self, monkeypatch):
+        monkeypatch.delenv("CLAUDE_CODE_VERSION", raising=False)
+        monkeypatch.delenv("IDE_OTEL_CLIENT_VERSION", raising=False)
+        assert otel_hook._detect_client_version({}, "claude") is None
+
+
+# ── New IDE name aliases ─────────────────────────────────────────────────
+
+
+class TestNewIdeAliases:
+    def test_windsurf(self):
+        assert otel_hook._normalize_ide_name("windsurf") == "windsurf"
+        assert otel_hook._normalize_ide_name("Windsurf IDE") == "windsurf"
+
+    def test_vscode(self):
+        assert otel_hook._normalize_ide_name("vscode") == "vscode"
+        assert otel_hook._normalize_ide_name("Visual Studio Code") == "vscode"
+
+    def test_zed(self):
+        assert otel_hook._normalize_ide_name("zed") == "zed"
+        assert otel_hook._normalize_ide_name("Zed Editor") == "zed"
+
+    def test_claude_cli_alias(self):
+        assert otel_hook._normalize_ide_name("Claude CLI") == "claude"

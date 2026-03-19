@@ -23,6 +23,7 @@ import hashlib
 import json
 import logging
 import os
+import platform
 import random
 import re
 import subprocess
@@ -31,6 +32,10 @@ import time
 import urllib.parse
 from datetime import datetime, timezone
 from typing import Optional, Tuple
+
+# Whether to attach OS/host attributes to every span in addition to resource attributes.
+# Defaults to False to avoid duplicate data and hot-path overhead.
+_ATTACH_OS_ATTRIBUTES_PER_SPAN = os.getenv("IDE_HOOK_ATTACH_OS_PER_SPAN") == "1"
 
 # ---------------------------------------------------------------------------
 # Bootstrap: auto-provision .venv and add its site-packages to sys.path.
@@ -257,20 +262,31 @@ _INPUT_ALIASES = {
     "stopHookActive": "stop_hook_active",
     "isInterrupt": "is_interrupt",
     "hookEventType": "hook_event_type",
+    "clientVersion": "client_version",
+    "ideVersion": "ide_version",
+    "appVersion": "app_version",
+    "ideName": "ide_name",
+    "sourceApp": "source_app",
 }
 
-# Canonical ide.name values accepted directly from IDE_OTEL_IDE_NAME or
+# Canonical gen_ai.client.name values accepted directly from IDE_OTEL_IDE_NAME or
 # self-reported payload metadata before alias fallback.
-_CANONICAL_IDE_NAMES = {"cursor", "copilot", "claude", "antigravity", "opencode"}
+_CANONICAL_IDE_NAMES = {"cursor", "copilot", "claude", "antigravity", "opencode", "windsurf", "zed", "vscode"}
 _IDE_NAME_ALIASES = {
     "github copilot": "copilot",
     "github copilot chat": "copilot",
     "copilot chat": "copilot",
     "claude code": "claude",
     "anthropic claude code": "claude",
+    "claude cli": "claude",
     "cursor ide": "cursor",
     "cursor cli": "cursor",
     "anti gravity": "antigravity",
+    "windsurf ide": "windsurf",
+    "codeium windsurf": "windsurf",
+    "visual studio code": "vscode",
+    "vs code": "vscode",
+    "zed editor": "zed",
     "open code": "opencode",
 }
 _IDE_NAME_NORM_PATTERN = re.compile(r"[-_\s]+")
@@ -297,29 +313,29 @@ _OP_AGENT_EVENTS = {
 _EVENT_ATTR_MAP = {
     # Common
     "UserPromptSubmit": {
-        "prompt": "ide.prompt", "composer_mode": "ide.composer_mode",
+        "prompt": "gen_ai.client.prompt", "composer_mode": "gen_ai.client.composer_mode",
         "model": "gen_ai.request.model",
     },
     "SessionStart": {
-        "source": "ide.session_source", "composer_mode": "ide.composer_mode",
-        "model": "gen_ai.request.model", "agent_type": "ide.agent_type",
+        "source": "gen_ai.client.session_source", "composer_mode": "gen_ai.client.composer_mode",
+        "model": "gen_ai.request.model", "agent_type": "gen_ai.client.agent_type",
     },
-    "SessionEnd": {"status": "ide.status", "reason": "ide.session_end_reason"},
-    "PreToolUse": {"tool_name": "ide.tool_name", "tool_id": "ide.tool_id", "tool_use_id": "ide.tool_use_id"},
-    "PostToolUse": {"tool_name": "ide.tool_name", "tool_id": "ide.tool_id", "tool_use_id": "ide.tool_use_id", "duration_ms": "ide.duration_ms"},
-    "PostToolUseFailure": {"tool_name": "ide.tool_name", "tool_id": "ide.tool_id", "tool_use_id": "ide.tool_use_id", "error": "ide.error", "is_interrupt": "ide.is_interrupt"},
-    "SubagentStart": {"subagent_type": "ide.subagent_type", "subagent_task": "ide.subagent_task", "agent_id": "ide.agent_id", "agent_type": "ide.agent_type"},
-    "SubagentStop": {"subagent_type": "ide.subagent_type", "subagent_task": "ide.subagent_task", "status": "ide.status", "agent_id": "ide.agent_id", "agent_type": "ide.agent_type"},
-    "Stop": {"status": "ide.status", "loop_count": "ide.loop_count", "stop_hook_active": "ide.stop_hook_active"},
+    "SessionEnd": {"status": "gen_ai.client.status", "reason": "gen_ai.client.session_end_reason"},
+    "PreToolUse": {"tool_name": "gen_ai.client.tool_name", "tool_id": "gen_ai.client.tool_id", "tool_use_id": "gen_ai.client.tool_use_id"},
+    "PostToolUse": {"tool_name": "gen_ai.client.tool_name", "tool_id": "gen_ai.client.tool_id", "tool_use_id": "gen_ai.client.tool_use_id", "duration_ms": "gen_ai.client.duration_ms"},
+    "PostToolUseFailure": {"tool_name": "gen_ai.client.tool_name", "tool_id": "gen_ai.client.tool_id", "tool_use_id": "gen_ai.client.tool_use_id", "error": "gen_ai.client.error", "is_interrupt": "gen_ai.client.is_interrupt"},
+    "SubagentStart": {"subagent_type": "gen_ai.client.subagent_type", "subagent_task": "gen_ai.client.subagent_task", "agent_id": "gen_ai.client.agent_id", "agent_type": "gen_ai.client.agent_type"},
+    "SubagentStop": {"subagent_type": "gen_ai.client.subagent_type", "subagent_task": "gen_ai.client.subagent_task", "status": "gen_ai.client.status", "agent_id": "gen_ai.client.agent_id", "agent_type": "gen_ai.client.agent_type"},
+    "Stop": {"status": "gen_ai.client.status", "loop_count": "gen_ai.client.loop_count", "stop_hook_active": "gen_ai.client.stop_hook_active"},
     # Cursor-specific
-    "BeforeShellExecution": {"command": "ide.command", "cwd": "ide.cwd"},
-    "AfterShellExecution": {"command": "ide.command", "cwd": "ide.cwd", "exit_code": "ide.exit_code", "duration_ms": "ide.duration_ms"},
-    "BeforeMCPExecution": {"mcp_server": "ide.mcp_server", "command": "ide.mcp_server", "mcp_tool": "ide.mcp_tool", "tool_name": "ide.mcp_tool"},
-    "AfterMCPExecution": {"mcp_server": "ide.mcp_server", "command": "ide.mcp_server", "mcp_tool": "ide.mcp_tool", "tool_name": "ide.mcp_tool", "duration_ms": "ide.duration_ms", "duration": "ide.duration_ms"},
-    "BeforeReadFile": {"file_path": "ide.file_path"},
-    "AfterFileEdit": {"file_path": "ide.file_path", "edits": "ide.edits"},
+    "BeforeShellExecution": {"command": "gen_ai.client.command", "cwd": "gen_ai.client.cwd"},
+    "AfterShellExecution": {"command": "gen_ai.client.command", "cwd": "gen_ai.client.cwd", "exit_code": "gen_ai.client.exit_code", "duration_ms": "gen_ai.client.duration_ms"},
+    "BeforeMCPExecution": {"mcp_server": "gen_ai.client.mcp_server", "command": "gen_ai.client.mcp_server", "mcp_tool": "gen_ai.client.mcp_tool", "tool_name": "gen_ai.client.mcp_tool"},
+    "AfterMCPExecution": {"mcp_server": "gen_ai.client.mcp_server", "command": "gen_ai.client.mcp_server", "mcp_tool": "gen_ai.client.mcp_tool", "tool_name": "gen_ai.client.mcp_tool", "duration_ms": "gen_ai.client.duration_ms", "duration": "gen_ai.client.duration_ms"},
+    "BeforeReadFile": {"file_path": "gen_ai.client.file_path"},
+    "AfterFileEdit": {"file_path": "gen_ai.client.file_path", "edits": "gen_ai.client.edits"},
     # Copilot-specific
-    "ErrorOccurred": {"error": "ide.error", "is_interrupt": "ide.is_interrupt"},
+    "ErrorOccurred": {"error": "gen_ai.client.error", "is_interrupt": "gen_ai.client.is_interrupt"},
 }
 
 
@@ -414,6 +430,62 @@ def _infer_genai_provider(data: dict) -> Optional[str]:
         return "x_ai"
     if model.startswith("groq"):
         return "groq"
+    return None
+
+
+# ---------------------------------------------------------------------------
+# OS / host detection (cached)
+# ---------------------------------------------------------------------------
+_OS_INFO: Optional[dict] = None
+
+
+def _get_os_info() -> dict:
+    """Detect operating system, version, and architecture. Cached after first call."""
+    global _OS_INFO
+    if _OS_INFO is not None:
+        return _OS_INFO
+    sys_name = platform.system().lower()  # darwin, linux, windows
+    os_type = {"darwin": "darwin", "linux": "linux", "windows": "windows"}.get(sys_name, sys_name)
+    os_name = platform.system()  # Darwin, Linux, Windows
+    if os_type == "darwin":
+        os_name = "macOS"
+    os_version = platform.release()  # e.g. "25.3.0", "6.5.0-44-generic"
+    arch = platform.machine()  # arm64, x86_64, aarch64
+    _OS_INFO = {
+        "os.type": os_type,
+        "os.name": os_name,
+        "os.version": os_version,
+        "host.arch": arch,
+    }
+    return _OS_INFO
+
+
+# ---------------------------------------------------------------------------
+# Client (IDE) version detection
+# ---------------------------------------------------------------------------
+def _detect_client_version(data: dict, ide: str) -> Optional[str]:
+    """Extract client/IDE version from environment variables or input payload."""
+    # Check input payload first
+    version = _first_present(data, ("client_version", "ide_version", "app_version"))
+    if version:
+        return str(version)
+    # IDE-specific env vars
+    if ide == "claude":
+        v = os.getenv("CLAUDE_CODE_VERSION")
+        if v:
+            return v
+    if ide == "cursor":
+        v = os.getenv("CURSOR_VERSION")
+        if v:
+            return v
+    if ide == "copilot":
+        v = os.getenv("COPILOT_VERSION")
+        if v:
+            return v
+    # Generic fallback
+    v = os.getenv("IDE_OTEL_CLIENT_VERSION")
+    if v:
+        return v
     return None
 
 
@@ -547,7 +619,7 @@ def _cleanup_state() -> None:
 
 
 def _flush_stale_sessions(tracer) -> None:
-    """Emit ``ide.session`` root spans for stale sessions that were never closed.
+    """Emit ``gen_ai.client.session`` root spans for stale sessions that were never closed.
 
     When an IDE crashes or fails to send ``SessionEnd``, the session context
     file lingers on disk.  This function finds sessions older than the
@@ -608,9 +680,9 @@ class _JsonFormatter(logging.Formatter):
           "trace_id": "795f9117681e7f5c010a851ada5c300a",
           "span_id": "5b718186951f167f",
           "attributes": {              // all extra= fields
-            "ide.mcp_server": "gitlab-mcp",
-            "ide.mcp_tool": "search_gitlab",
-            "ide.mcp.input": "{...}",
+            "gen_ai.client.mcp_server": "gitlab-mcp",
+            "gen_ai.client.mcp_tool": "search_gitlab",
+            "gen_ai.client.mcp.input": "{...}",
             ...
           }
         }
@@ -1171,6 +1243,11 @@ def _init_tracing(ide: str = "cursor") -> bool:
     resource_attrs.setdefault("service.name", app_name)
     resource_attrs.setdefault("gen_ai.system", ide)
 
+    # OS / host resource attributes (OTel semantic conventions)
+    os_info = _get_os_info()
+    for attr_key, attr_val in os_info.items():
+        resource_attrs.setdefault(attr_key, attr_val)
+
     resource_attrs_str = ",".join(f"{k}={v}" for k, v in resource_attrs.items())
     os.environ["OTEL_RESOURCE_ATTRIBUTES"] = resource_attrs_str
     _LOGGER.debug("Set OTEL_RESOURCE_ATTRIBUTES: %s", resource_attrs_str)
@@ -1222,14 +1299,14 @@ def _mask_text(text: str) -> str:
 def _maybe_attach_text(span, label: str, text: str) -> None:
     if not text:
         return
-    span.set_attribute(f"ide.{label}.length", len(text))
-    span.set_attribute(f"ide.{label}.sha256", _hash_text(text))
+    span.set_attribute(f"gen_ai.client.{label}.length", len(text))
+    span.set_attribute(f"gen_ai.client.{label}.sha256", _hash_text(text))
     if not _safe_bool(os.getenv("IDE_OTEL_CAPTURE_TEXT", "")):
         return
     max_chars = int(os.getenv("IDE_OTEL_TEXT_MAX_CHARS", "4000"))
     if _safe_bool(os.getenv("IDE_OTEL_MASK_PROMPTS", "")):
         text = _mask_text(text)
-    span.set_attribute(f"ide.{label}.text", text[:max_chars])
+    span.set_attribute(f"gen_ai.client.{label}.text", text[:max_chars])
 
 
 # ---------------------------------------------------------------------------
@@ -1301,9 +1378,9 @@ def _emit_mcp_log(event_name: str, data: dict) -> None:
     tool = _first_present(data, ("mcp_tool", "tool_name")) or "unknown"
 
     attrs = {
-        "ide.mcp_server": server,
-        "ide.mcp_tool": tool,
-        "ide.hook.event": event_name,
+        "gen_ai.client.mcp_server": server,
+        "gen_ai.client.mcp_tool": tool,
+        "gen_ai.client.hook.event": event_name,
     }
     _tid, _sid = _inject_trace_context(attrs)
 
@@ -1316,12 +1393,12 @@ def _emit_mcp_log(event_name: str, data: dict) -> None:
         value = data.get(key)
         if value is not None:
             text = _stringify(value)
-            attrs["ide.mcp.input.length"] = len(text)
-            attrs["ide.mcp.input.sha256"] = _hash_text(text)
+            attrs["gen_ai.client.mcp.input.length"] = len(text)
+            attrs["gen_ai.client.mcp.input.sha256"] = _hash_text(text)
             if capture_payload:
                 if mask:
                     text = _mask_text(text)
-                attrs["ide.mcp.input"] = text[:max_chars]
+                attrs["gen_ai.client.mcp.input"] = text[:max_chars]
             break
 
     # Capture output payload — Cursor uses "result_json" (JSON string)
@@ -1329,18 +1406,18 @@ def _emit_mcp_log(event_name: str, data: dict) -> None:
         value = data.get(key)
         if value is not None:
             text = _stringify(value)
-            attrs["ide.mcp.output.length"] = len(text)
-            attrs["ide.mcp.output.sha256"] = _hash_text(text)
+            attrs["gen_ai.client.mcp.output.length"] = len(text)
+            attrs["gen_ai.client.mcp.output.sha256"] = _hash_text(text)
             if capture_payload:
                 if mask:
                     text = _mask_text(text)
-                attrs["ide.mcp.output"] = text[:max_chars]
+                attrs["gen_ai.client.mcp.output"] = text[:max_chars]
             break
 
     # Duration — Cursor uses "duration" (float ms), fallback to "duration_ms"
     duration = _first_present(data, ("duration_ms", "duration"))
     if duration is not None:
-        attrs["ide.mcp.duration_ms"] = duration
+        attrs["gen_ai.client.mcp.duration_ms"] = duration
 
     # Server stdout/stderr (if the IDE provides it)
     for stream in ("stdout", "stderr", "mcp_stdout", "mcp_stderr"):
@@ -1348,11 +1425,11 @@ def _emit_mcp_log(event_name: str, data: dict) -> None:
         if value:
             stream_name = stream.replace("mcp_", "")
             text = str(value)
-            attrs[f"ide.mcp.{stream_name}.length"] = len(text)
+            attrs[f"gen_ai.client.mcp.{stream_name}.length"] = len(text)
             if capture_payload:
                 if mask:
                     text = _mask_text(text)
-                attrs[f"ide.mcp.{stream_name}"] = text[:max_chars]
+                attrs[f"gen_ai.client.mcp.{stream_name}"] = text[:max_chars]
 
     # Emit the log record — span_id in body for backend visibility
     if event_name == "BeforeMCPExecution":
@@ -1371,18 +1448,18 @@ def _emit_shell_log(event_name: str, data: dict) -> None:
     cwd = data.get("cwd") or ""
 
     attrs = {
-        "ide.hook.event": event_name,
-        "ide.command": command,
-        "ide.cwd": cwd,
+        "gen_ai.client.hook.event": event_name,
+        "gen_ai.client.command": command,
+        "gen_ai.client.cwd": cwd,
     }
     _tid, _sid = _inject_trace_context(attrs)
 
     exit_code = data.get("exit_code")
     if exit_code is not None:
-        attrs["ide.exit_code"] = exit_code
+        attrs["gen_ai.client.exit_code"] = exit_code
     duration = data.get("duration_ms")
     if duration is not None:
-        attrs["ide.duration_ms"] = duration
+        attrs["gen_ai.client.duration_ms"] = duration
 
     # Capture stdout/stderr
     capture_payload = _safe_bool(os.getenv("IDE_OTEL_MCP_LOG_PAYLOAD", "true"))
@@ -1393,11 +1470,11 @@ def _emit_shell_log(event_name: str, data: dict) -> None:
         if value:
             text = str(value)
             stream_name = "stdout" if stream == "output" else stream
-            attrs[f"ide.shell.{stream_name}.length"] = len(text)
+            attrs[f"gen_ai.client.shell.{stream_name}.length"] = len(text)
             if capture_payload:
                 if mask:
                     text = _mask_text(text)
-                attrs[f"ide.shell.{stream_name}"] = text[:max_chars]
+                attrs[f"gen_ai.client.shell.{stream_name}"] = text[:max_chars]
 
     if event_name == "BeforeShellExecution":
         logger.info("[%s] Shell exec: %s", _sid, command, extra=attrs)
@@ -1414,23 +1491,23 @@ def _emit_tool_log(event_name: str, data: dict) -> None:
     tool_name = data.get("tool_name") or "unknown"
 
     attrs = {
-        "ide.hook.event": event_name,
-        "ide.tool_name": tool_name,
+        "gen_ai.client.hook.event": event_name,
+        "gen_ai.client.tool_name": tool_name,
     }
     _tid, _sid = _inject_trace_context(attrs)
 
     for key in ("tool_id", "tool_use_id"):
         value = data.get(key)
         if value is not None:
-            attrs[f"ide.{key}"] = value
+            attrs[f"gen_ai.client.{key}"] = value
 
     duration = data.get("duration_ms")
     if duration is not None:
-        attrs["ide.duration_ms"] = duration
+        attrs["gen_ai.client.duration_ms"] = duration
 
     error = data.get("error")
     if error is not None:
-        attrs["ide.error"] = str(error)
+        attrs["gen_ai.client.error"] = str(error)
 
     # Capture tool input/output (subject to privacy controls)
     capture_payload = _safe_bool(os.getenv("IDE_OTEL_MCP_LOG_PAYLOAD", "true"))
@@ -1440,11 +1517,11 @@ def _emit_tool_log(event_name: str, data: dict) -> None:
         value = data.get(key)
         if value is not None:
             text = _stringify(value)
-            attrs["ide.tool.input.length"] = len(text)
+            attrs["gen_ai.client.tool.input.length"] = len(text)
             if capture_payload and _safe_bool(os.getenv("IDE_OTEL_CAPTURE_TOOL_INPUT_CONTENT", "")):
                 if mask:
                     text = _mask_text(text)
-                attrs["ide.tool.input"] = text[:max_chars]
+                attrs["gen_ai.client.tool.input"] = text[:max_chars]
             break
 
     if event_name == "PostToolUseFailure":
@@ -1467,7 +1544,7 @@ def _emit_event_log(event_name: str, data: dict) -> None:
         _emit_tool_log(event_name, data)
     elif _safe_bool(os.getenv("IDE_OTEL_LOG_ALL_EVENTS", "")):
         logger = _get_otel_logger("events")
-        all_attrs = {"ide.hook.event": event_name}
+        all_attrs = {"gen_ai.client.hook.event": event_name}
         _tid, _sid = _inject_trace_context(all_attrs)
         logger.info("[%s] Hook event: %s", _sid, event_name, extra=all_attrs)
 
@@ -1480,9 +1557,18 @@ def _detect_ide(data: dict) -> str:
 
     IDE_OTEL_IDE_NAME can be used to force the IDE name for hook systems that
     do not expose enough identifying fields.
+
+    Detection order (highest to lowest confidence):
+    1. Explicit override via env var or self-reported field
+    2. Claude Code env var (CLAUDE_CODE_ENTRYPOINT set by Claude Code)
+    3. Claude-specific payload fields (transcript_path, permission_mode, etc.)
+    4. PascalCase hook_event_name (Claude always uses PascalCase; Cursor uses camelCase)
+    5. Cursor-specific fields (conversation_id, generation_id, composer_mode, etc.)
+    6. Workspace .cursor directory presence
+    7. Copilot (session_id without other indicators)
+    8. Default: cursor
     """
-    # IDE_OTEL_IDE_NAME wins first, then self-reported IDE/client fields,
-    # before falling back to payload-shape detection.
+    # Level 1: Explicit override (env var or self-reported field)
     override = _normalize_ide_name(
         os.getenv("IDE_OTEL_IDE_NAME")
         or _first_present(data, ("ide_name", "ide", "client", "source_app"))
@@ -1490,19 +1576,33 @@ def _detect_ide(data: dict) -> str:
     if override:
         return override
 
-    # Cursor-specific fields (check these first before session_id)
+    # Level 2: CLAUDE_CODE_ENTRYPOINT is set by Claude Code when running hooks
+    if os.getenv("CLAUDE_CODE_ENTRYPOINT"):
+        return "claude"
+
+    # Level 3: Claude-specific payload fields — check BEFORE .cursor directory
+    # so Claude Code running inside a Cursor workspace is detected correctly.
+    if data.get("transcript_path") or data.get("permission_mode") or data.get("notification_type"):
+        return "claude"
+
+    # Level 4: PascalCase hook_event_name is a strong Claude Code signal.
+    # Claude Code always emits PascalCase names (PreToolUse, SessionStart);
+    # Cursor always emits camelCase (preToolUse, sessionStart).
+    raw_event = _first_present(data, ("hook_event_name", "hook_event_type", "event"))
+    if isinstance(raw_event, str) and raw_event and raw_event[0].isupper():
+        return "claude"
+
+    # Level 5: Cursor-specific fields (check before session_id).
+    # Note: subagent_type is intentionally excluded — Claude Code also sends it
+    # in SubagentStart events with snake_case field names.
     if data.get("conversation_id") or data.get("generation_id"):
         return "cursor"
 
-    # Cursor also sends these fields that Copilot doesn't
-    cursor_indicators = (
-        "composer_mode", "agent_type", "subagent_type",
-        "cwd", "workspace", "workspace_path"
-    )
+    cursor_indicators = ("composer_mode", "agent_type", "cwd", "workspace", "workspace_path")
     if any(data.get(key) for key in cursor_indicators):
         return "cursor"
 
-    # Check workspace context — if .cursor/ directory exists, likely Cursor
+    # Level 6: Workspace .cursor directory presence
     try:
         cwd = data.get("cwd") or os.getcwd()
         if ".cursor" in cwd or os.path.exists(os.path.join(cwd, ".cursor")):
@@ -1510,12 +1610,7 @@ def _detect_ide(data: dict) -> str:
     except Exception:
         pass
 
-    # Claude Code hook payloads include transcript-specific metadata and
-    # Claude-only hook context such as permission/notification fields.
-    if data.get("transcript_path") or data.get("permission_mode") or data.get("notification_type"):
-        return "claude"
-
-    # Copilot only sends session_id without other indicators
+    # Level 7: Copilot only sends session_id without other indicators
     if data.get("session_id"):
         return "copilot"
 
@@ -1842,7 +1937,7 @@ def _apply_genai_semconv(span, event_name: str, data: dict, ide: str) -> None:
             "gen_ai.usage.cache_read.input_tokens",
             _int_or_none(_first_present(usage, ("cache_read_input_tokens", "cached_input_tokens"))),
         )
-        _set_if_present(span, "ide.usage.total_tokens", _int_or_none(_first_present(usage, ("total_tokens",))))
+        _set_if_present(span, "gen_ai.usage.total_tokens", _int_or_none(_first_present(usage, ("total_tokens",))))
 
     # Request params
     for source in (data, data.get("metadata") or {}):
@@ -1886,15 +1981,27 @@ def _apply_genai_semconv(span, event_name: str, data: dict, ide: str) -> None:
 # ---------------------------------------------------------------------------
 def _populate_span(span, event_name: str, data: dict, ide: str) -> None:
     """Attach all attributes to a span and emit OTel log records."""
-    span.set_attribute("ide.hook.event", event_name)
-    span.set_attribute("ide.name", ide)
+    span.set_attribute("gen_ai.client.hook.event", event_name)
+    span.set_attribute("gen_ai.client.name", ide)
+
+    # Optionally attach OS / host attributes on every span.
+    # These are already present as resource attributes via OTEL_RESOURCE_ATTRIBUTES,
+    # so we gate per-span duplication behind a flag to avoid hot-path overhead.
+    if _ATTACH_OS_ATTRIBUTES_PER_SPAN:
+        os_info = _get_os_info()
+        for attr_key, attr_val in os_info.items():
+            span.set_attribute(attr_key, attr_val)
+
+    # Client version
+    client_version = _detect_client_version(data, ide)
+    _set_if_present(span, "gen_ai.client.version", client_version)
 
     # Emit structured OTel log record (MCP, shell, tool — correlated with this span)
     _emit_event_log(event_name, data)
-    _set_if_present(span, "ide.session_id", data.get("session_id") or data.get("conversation_id"))
-    _set_if_present(span, "ide.generation_id", data.get("generation_id"))
-    span.set_attribute("ide.timestamp", datetime.now(timezone.utc).isoformat())
-    span.set_attribute("ide.workspace", data.get("cwd") or os.getcwd())
+    _set_if_present(span, "gen_ai.client.session_id", data.get("session_id") or data.get("conversation_id"))
+    _set_if_present(span, "gen_ai.client.generation_id", data.get("generation_id"))
+    span.set_attribute("gen_ai.client.timestamp", datetime.now(timezone.utc).isoformat())
+    span.set_attribute("gen_ai.client.workspace", data.get("cwd") or os.getcwd())
 
     # GenAI semantic conventions
     _apply_genai_semconv(span, event_name, data, ide)
@@ -1903,7 +2010,7 @@ def _populate_span(span, event_name: str, data: dict, ide: str) -> None:
     metadata = data.get("metadata")
     if isinstance(metadata, dict):
         flat = {}  # type: dict
-        _flatten(flat, "ide.metadata", metadata)
+        _flatten(flat, "gen_ai.client.metadata", metadata)
         for k, v in flat.items():
             _set_if_present(span, k, v)
 
@@ -1962,14 +2069,14 @@ def _flush_generation(tracer, gen_key: str, session_ctx: Optional[dict], ide: st
         )
 
     gen_span = tracer.start_span(
-        "ide.generation", kind=SpanKind.INTERNAL,
+        "gen_ai.client.generation", kind=SpanKind.INTERNAL,
         context=parent_ctx, start_time=first_ts,
     )
     gen_ctx = trace.set_span_in_context(gen_span)
     with _span_context(gen_span):
-        gen_span.set_attribute("ide.generation_id", gen_key)
-        gen_span.set_attribute("ide.event.count", len(batch))
-        gen_span.set_attribute("ide.name", ide)
+        gen_span.set_attribute("gen_ai.client.generation_id", gen_key)
+        gen_span.set_attribute("gen_ai.client.event.count", len(batch))
+        gen_span.set_attribute("gen_ai.client.name", ide)
         _log_with_span(_LOGGER, logging.INFO, gen_span, "Generation span: gen_key=%s events=%d", gen_key, len(batch))
 
         for idx, entry in enumerate(batch):
@@ -1979,7 +2086,7 @@ def _flush_generation(tracer, gen_key: str, session_ctx: Optional[dict], ide: st
             next_ts = batch[idx + 1].get("timestamp_ns") if idx + 1 < len(batch) else ts + 1_000_000
 
             span = tracer.start_span(
-                f"ide.hook.{evt}", kind=SpanKind.INTERNAL,
+                f"gen_ai.client.hook.{evt}", kind=SpanKind.INTERNAL,
                 context=gen_ctx, start_time=ts,
             )
             with _span_context(span):
@@ -2004,14 +2111,14 @@ def _flush_session(tracer, session_key: str, session_ctx: dict, ide: str) -> Non
     )
 
     session_span = tracer.start_span(
-        "ide.session", kind=SpanKind.INTERNAL,
+        "gen_ai.client.session", kind=SpanKind.INTERNAL,
         context=parent_ctx, start_time=start_ns,
     )
     with _span_context(session_span):
-        session_span.set_attribute("ide.session_id", session_key)
-        session_span.set_attribute("ide.name", ide)
-        session_span.set_attribute("ide.generation_count", session_ctx.get("generation_count", 0))
-        session_span.set_attribute("ide.session.duration_ms", (end_ns - start_ns) // 1_000_000)
+        session_span.set_attribute("gen_ai.client.session_id", session_key)
+        session_span.set_attribute("gen_ai.client.name", ide)
+        session_span.set_attribute("gen_ai.client.generation_count", session_ctx.get("generation_count", 0))
+        session_span.set_attribute("gen_ai.client.session.duration_ms", (end_ns - start_ns) // 1_000_000)
         _log_with_span(_LOGGER, logging.INFO, session_span, "Session span: session=%s", session_key)
         session_span.end(end_time=end_ns)
 
@@ -2112,7 +2219,7 @@ def main() -> int:
                         session_ctx.get("phantom_parent_id", "0"),
                     )
                 with tracer.start_as_current_span(
-                    f"ide.hook.{event_name}", kind=SpanKind.INTERNAL,
+                    f"gen_ai.client.hook.{event_name}", kind=SpanKind.INTERNAL,
                     context=parent_ctx,
                 ) as span:
                     _populate_span(span, event_name, data, ide)
@@ -2137,7 +2244,7 @@ def main() -> int:
             )
 
         with tracer.start_as_current_span(
-            f"ide.hook.{event_name}", kind=SpanKind.INTERNAL,
+            f"gen_ai.client.hook.{event_name}", kind=SpanKind.INTERNAL,
             context=parent_ctx,
         ) as span:
             _populate_span(span, event_name, data, ide)

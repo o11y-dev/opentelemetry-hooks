@@ -29,18 +29,18 @@ IDE Event → stdin (JSON) → otel-hook → OpenTelemetry SDK → OTLP Backend
 - **Session-level Traces**: Groups all events within a session into a single trace with a 3-tier hierarchy:
 
 ```
-ide.session (root)
-├── ide.generation (gen-1)
-│   ├── ide.hook.UserPromptSubmit
-│   ├── ide.hook.PreToolUse
-│   ├── ide.hook.PostToolUse
-│   └── ide.hook.Stop
-├── ide.generation (gen-2)
-│   ├── ide.hook.UserPromptSubmit
-│   ├── ide.hook.PreToolUse
-│   ├── ide.hook.PostToolUse
-│   └── ide.hook.Stop
-└── ide.hook.SessionEnd
+gen_ai.client.session (root)
+├── gen_ai.client.generation (gen-1)
+│   ├── gen_ai.client.hook.UserPromptSubmit
+│   ├── gen_ai.client.hook.PreToolUse
+│   ├── gen_ai.client.hook.PostToolUse
+│   └── gen_ai.client.hook.Stop
+├── gen_ai.client.generation (gen-2)
+│   ├── gen_ai.client.hook.UserPromptSubmit
+│   ├── gen_ai.client.hook.PreToolUse
+│   ├── gen_ai.client.hook.PostToolUse
+│   └── gen_ai.client.hook.Stop
+└── gen_ai.client.hook.SessionEnd
 ```
 
 - **GenAI Semantic Conventions**: Emits OpenTelemetry GenAI attributes aligned with v1.37+ (`gen_ai.provider.name`, `gen_ai.operation.name`, `gen_ai.request.model`, `gen_ai.usage.*`, etc.) while preserving legacy `gen_ai.system` for backward compatibility.
@@ -143,7 +143,7 @@ rm -rf /tmp/otel-hook-source
 
 #### Cursor CLI
 
-Cursor CLI uses the same `.cursor/hooks.json` configuration and hook payload shape as Cursor IDE, so the Cursor IDE setup above in [Quick Start](#quick-start) also covers Cursor CLI. Its spans are recorded with the canonical `ide.name=cursor`.
+Cursor CLI uses the same `.cursor/hooks.json` configuration and hook payload shape as Cursor IDE, so the Cursor IDE setup above in [Quick Start](#quick-start) also covers Cursor CLI. Its spans are recorded with the canonical `gen_ai.client.name=cursor`.
 
 #### GitHub Copilot
 
@@ -505,12 +505,12 @@ Requires the [Datadog Agent](https://docs.datadoghq.com/opentelemetry/) with OTL
 
 | Attribute | Description |
 |-----------|-------------|
-| `ide.hook.event` | Canonical event name (PascalCase) |
-| `ide.name` | Detected IDE (`cursor`, `copilot`) |
-| `ide.session_id` | Session identifier |
-| `ide.generation_id` | Generation identifier (Cursor) |
-| `ide.workspace` | Workspace / working directory |
-| `ide.timestamp` | Event timestamp (ISO 8601) |
+| `gen_ai.client.hook.event` | Canonical event name (PascalCase) |
+| `gen_ai.client.name` | Detected IDE (`cursor`, `copilot`) |
+| `gen_ai.client.session_id` | Session identifier |
+| `gen_ai.client.generation_id` | Generation identifier (Cursor) |
+| `gen_ai.client.workspace` | Workspace / working directory |
+| `gen_ai.client.timestamp` | Event timestamp (ISO 8601) |
 | `gen_ai.system` | Deprecated legacy GenAI system/provider attribute retained for backward compatibility |
 | `gen_ai.operation.name` | `chat`, `execute_tool`, or `invoke_agent` |
 
@@ -540,15 +540,15 @@ Requires the [Datadog Agent](https://docs.datadoghq.com/opentelemetry/) with OTL
 
 | Event | Key Attributes |
 |-------|---------------|
-| `UserPromptSubmit` | `ide.composer_mode`, `gen_ai.request.model` |
-| `PreToolUse` / `PostToolUse` | `ide.tool_name`, `ide.tool_id`, `ide.duration_ms` |
-| `PostToolUseFailure` | `ide.tool_name`, `ide.error` |
-| `BeforeShellExecution` / `AfterShellExecution` | `ide.command`, `ide.cwd`, `ide.exit_code` |
-| `BeforeMCPExecution` / `AfterMCPExecution` | `ide.mcp_server`, `ide.mcp_tool` |
-| `BeforeReadFile` / `AfterFileEdit` | `ide.file_path`, `ide.edits` |
-| `SubagentStart` / `SubagentStop` | `ide.subagent_type`, `ide.agent_id` |
-| `Stop` | `ide.status`, `ide.loop_count` |
-| `ErrorOccurred` | `ide.error`, `ide.is_interrupt` |
+| `UserPromptSubmit` | `gen_ai.client.composer_mode`, `gen_ai.request.model` |
+| `PreToolUse` / `PostToolUse` | `gen_ai.client.tool_name`, `gen_ai.client.tool_id`, `gen_ai.client.duration_ms` |
+| `PostToolUseFailure` | `gen_ai.client.tool_name`, `gen_ai.client.error` |
+| `BeforeShellExecution` / `AfterShellExecution` | `gen_ai.client.command`, `gen_ai.client.cwd`, `gen_ai.client.exit_code` |
+| `BeforeMCPExecution` / `AfterMCPExecution` | `gen_ai.client.mcp_server`, `gen_ai.client.mcp_tool` |
+| `BeforeReadFile` / `AfterFileEdit` | `gen_ai.client.file_path`, `gen_ai.client.edits` |
+| `SubagentStart` / `SubagentStop` | `gen_ai.client.subagent_type`, `gen_ai.client.agent_id` |
+| `Stop` | `gen_ai.client.status`, `gen_ai.client.loop_count` |
+| `ErrorOccurred` | `gen_ai.client.error`, `gen_ai.client.is_interrupt` |
 
 ## OTel Logs (MCP, Shell, Tool Events)
 
@@ -567,17 +567,17 @@ When `IDE_OTEL_ENABLE_LOGS=true` (default), the hook emits structured OpenTeleme
 
 | Attribute | Description |
 |-----------|-------------|
-| `ide.mcp_server` | MCP server name |
-| `ide.mcp_tool` | MCP tool name |
-| `ide.mcp.input` | Full input payload (opt-in) |
-| `ide.mcp.input.length` | Input payload size |
-| `ide.mcp.input.sha256` | Input payload hash |
-| `ide.mcp.output` | Full output payload (opt-in) |
-| `ide.mcp.output.length` | Output payload size |
-| `ide.mcp.output.sha256` | Output payload hash |
-| `ide.mcp.duration_ms` | MCP call duration |
-| `ide.mcp.stdout` | Server stdout (if available) |
-| `ide.mcp.stderr` | Server stderr (if available) |
+| `gen_ai.client.mcp_server` | MCP server name |
+| `gen_ai.client.mcp_tool` | MCP tool name |
+| `gen_ai.client.mcp.input` | Full input payload (opt-in) |
+| `gen_ai.client.mcp.input.length` | Input payload size |
+| `gen_ai.client.mcp.input.sha256` | Input payload hash |
+| `gen_ai.client.mcp.output` | Full output payload (opt-in) |
+| `gen_ai.client.mcp.output.length` | Output payload size |
+| `gen_ai.client.mcp.output.sha256` | Output payload hash |
+| `gen_ai.client.mcp.duration_ms` | MCP call duration |
+| `gen_ai.client.mcp.stdout` | Server stdout (if available) |
+| `gen_ai.client.mcp.stderr` | Server stderr (if available) |
 
 ### Endpoint Derivation
 
@@ -595,8 +595,8 @@ When `IDE_OTEL_BATCH_ON_STOP=true` (recommended):
 
 1. **SessionStart**: Pre-generates a `trace_id` shared by all spans in the session. Stored in `.state/sessions/`.
 2. **Generation events**: Buffered to `.state/batches/<generation_id>.jsonl`.
-3. **Stop**: Flushes the generation's events as an `ide.generation` span with child event spans. All share the session's `trace_id`. Exported immediately to avoid data loss.
-4. **SessionEnd**: Emits the root `ide.session` span covering the full session duration. Cleans up state files.
+3. **Stop**: Flushes the generation's events as a `gen_ai.client.generation` span with child event spans. All share the session's `trace_id`. Exported immediately to avoid data loss.
+4. **SessionEnd**: Emits the root `gen_ai.client.session` span covering the full session duration. Cleans up state files.
 
 For IDEs without a `generation_id` (Copilot), the hook auto-derives generation boundaries from `UserPromptSubmit` → `Stop` cycles using an internal counter.
 
@@ -607,12 +607,12 @@ The hook auto-detects which IDE is calling it:
 | Signal | IDE |
 |--------|-----|
 | `IDE_OTEL_IDE_NAME` env var | Explicit override (`cursor`, `copilot`, `claude`, `antigravity`, `opencode`) |
-| Self-reported `ide_name`, `client`, or `source_app` values such as `GitHub Copilot`, `GitHub Copilot CLI`, `GitHub Copilot Chat`, `Claude Code`, `Claude Code CLI`, `Anthropic Claude Code`, `Cursor IDE`, `Cursor CLI`, `Anti Gravity`, `Anti Gravity CLI`, or `OpenCode` / `OpenCode CLI` (case-insensitive, hyphen/space-insensitive) | Normalized to the canonical `ide.name` |
+| Self-reported `ide_name`, `client`, or `source_app` values such as `GitHub Copilot`, `GitHub Copilot CLI`, `GitHub Copilot Chat`, `Claude Code`, `Claude Code CLI`, `Anthropic Claude Code`, `Cursor IDE`, `Cursor CLI`, `Anti Gravity`, `Anti Gravity CLI`, or `OpenCode` / `OpenCode CLI` (case-insensitive, hyphen/space-insensitive) | Normalized to the canonical `gen_ai.client.name` |
 | `conversation_id` or `generation_id` in input | Cursor |
 | `transcript_path`, `permission_mode`, or `notification_type` | Claude Code |
 | `session_id` only (no Cursor-specific fields) | GitHub Copilot |
 
-The detected IDE is recorded on spans as the `ide.name` attribute and is also exported as the `gen_ai.system` resource attribute via `OTEL_RESOURCE_ATTRIBUTES` for backward compatibility. When the hook can infer a provider from the payload, it additionally sets `gen_ai.provider.name` as the canonical provider attribute (v1.37+).
+The detected IDE is recorded on spans as the `gen_ai.client.name` attribute and is also exported as the `gen_ai.system` resource attribute via `OTEL_RESOURCE_ATTRIBUTES` for backward compatibility. When the hook can infer a provider from the payload, it additionally sets `gen_ai.provider.name` as the canonical provider attribute (v1.37+).
 
 ## File Structure
 
