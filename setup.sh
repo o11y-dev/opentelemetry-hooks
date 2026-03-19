@@ -14,6 +14,7 @@
 set -euo pipefail
 
 HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$HOOK_DIR/../../.." 2>/dev/null && pwd || echo "$HOOK_DIR")"
 
 # Prefer the system-installed otel-hook command (pip/pipx deployment) when it is
 # on PATH; fall back to the local script for source-checkout / copied-source use.
@@ -60,12 +61,12 @@ done
 
 # Auto-detect if no flags given
 if [[ -z "$DO_CURSOR" && -z "$DO_CLAUDE" ]]; then
-  # Check if .cursor exists in any parent or if cursor is installed
-  if command -v cursor &>/dev/null || [ -d "$HOME/.cursor" ]; then
+  # Check for a project-local Cursor config or a global Cursor install.
+  if command -v cursor &>/dev/null || [ -d "$HOME/.cursor" ] || [ -d "$REPO_ROOT/.cursor" ]; then
     DO_CURSOR=1
   fi
-  # Check if claude is installed
-  if command -v claude &>/dev/null || [ -d "$HOME/.claude" ]; then
+  # Check for a project-local Claude config or a global Claude install.
+  if command -v claude &>/dev/null || [ -d "$HOME/.claude" ] || [ -d "$REPO_ROOT/.claude" ]; then
     DO_CLAUDE=1
     CLAUDE_GLOBAL=1
   fi
@@ -89,9 +90,7 @@ echo ""
 
 # ─── Cursor IDE setup ───────────────────────────────────────────────────────
 setup_cursor() {
-  local repo_root
-  repo_root="$(cd "$HOOK_DIR/../../.." 2>/dev/null && pwd || echo "$HOOK_DIR")"
-  local hooks_json="$repo_root/.cursor/hooks.json"
+  local hooks_json="$REPO_ROOT/.cursor/hooks.json"
 
   echo "📦 Cursor IDE"
 
@@ -163,9 +162,7 @@ setup_claude() {
     echo "📦 Claude Code (global: $settings_json)"
   else
     # Project-level: .claude/settings.json in the repo root
-    local repo_root
-    repo_root="$(cd "$HOOK_DIR/../../.." 2>/dev/null && pwd || echo "$HOOK_DIR")"
-    settings_json="$repo_root/.claude/settings.json"
+    settings_json="$REPO_ROOT/.claude/settings.json"
     echo "📦 Claude Code (project: $settings_json)"
   fi
 
