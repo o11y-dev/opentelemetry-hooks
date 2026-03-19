@@ -260,5 +260,15 @@ fi
 if [[ -n "$DO_CLAUDE" ]]; then
   echo "  2. Restart Claude Code to activate hooks"
 fi
-echo "  3. Check logs:  tail -f ~/.local/share/opentelemetry-hooks/otel_hook.log"
+# Determine the hook home used for logging: prefer IDE_OTEL_HOOK_HOME, then
+# fall back to the system default for otel-hook, or the local script dir.
+LOG_HOME="${IDE_OTEL_HOOK_HOME:-}"
+if [[ -z "$LOG_HOME" ]]; then
+  if [[ "$HOOK_CMD" == "otel-hook" ]]; then
+    LOG_HOME="$HOME/.local/share/opentelemetry-hooks"
+  else
+    LOG_HOME="$HOOK_DIR"
+  fi
+fi
+echo "  3. Check logs:  tail -f \"$LOG_HOME/otel_hook.log\""
 echo ""
