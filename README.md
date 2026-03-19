@@ -595,7 +595,7 @@ When `IDE_OTEL_BATCH_ON_STOP=true` (recommended):
 
 1. **SessionStart**: Pre-generates a `trace_id` shared by all spans in the session. Stored in `.state/sessions/`.
 2. **Generation events**: Buffered to `.state/batches/<generation_id>.jsonl`.
-3. **Stop**: Flushes the generation's events as an `gen_ai.client.generation` span with child event spans. All share the session's `trace_id`. Exported immediately to avoid data loss.
+3. **Stop**: Flushes the generation's events as a `gen_ai.client.generation` span with child event spans. All share the session's `trace_id`. Exported immediately to avoid data loss.
 4. **SessionEnd**: Emits the root `gen_ai.client.session` span covering the full session duration. Cleans up state files.
 
 For IDEs without a `generation_id` (Copilot), the hook auto-derives generation boundaries from `UserPromptSubmit` → `Stop` cycles using an internal counter.
