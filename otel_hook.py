@@ -1933,7 +1933,7 @@ def _apply_genai_semconv(span, event_name: str, data: dict, ide: str) -> None:
             "gen_ai.usage.cache_read.input_tokens",
             _int_or_none(_first_present(usage, ("cache_read_input_tokens", "cached_input_tokens"))),
         )
-        _set_if_present(span, "gen_ai.client.usage.total_tokens", _int_or_none(_first_present(usage, ("total_tokens",))))
+        _set_if_present(span, "gen_ai.usage.total_tokens", _int_or_none(_first_present(usage, ("total_tokens",))))
 
     # Request params
     for source in (data, data.get("metadata") or {}):
