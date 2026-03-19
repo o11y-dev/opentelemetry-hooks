@@ -33,6 +33,10 @@ import urllib.parse
 from datetime import datetime, timezone
 from typing import Optional, Tuple
 
+# Whether to attach OS/host attributes to every span in addition to resource attributes.
+# Defaults to False to avoid duplicate data and hot-path overhead.
+_ATTACH_OS_ATTRIBUTES_PER_SPAN = os.getenv("IDE_HOOK_ATTACH_OS_PER_SPAN") == "1"
+
 # ---------------------------------------------------------------------------
 # Bootstrap: auto-provision .venv and add its site-packages to sys.path.
 # Works with any python3 — Cursor's system Python, Homebrew, pyenv, etc.
@@ -1980,10 +1984,13 @@ def _populate_span(span, event_name: str, data: dict, ide: str) -> None:
     span.set_attribute("gen_ai.client.hook.event", event_name)
     span.set_attribute("gen_ai.client.name", ide)
 
-    # OS / host attributes on every span
-    os_info = _get_os_info()
-    for attr_key, attr_val in os_info.items():
-        span.set_attribute(attr_key, attr_val)
+    # Optionally attach OS / host attributes on every span.
+    # These are already present as resource attributes via OTEL_RESOURCE_ATTRIBUTES,
+    # so we gate per-span duplication behind a flag to avoid hot-path overhead.
+    if _ATTACH_OS_ATTRIBUTES_PER_SPAN:
+        os_info = _get_os_info()
+        for attr_key, attr_val in os_info.items():
+            span.set_attribute(attr_key, attr_val)
 
     # Client version
     client_version = _detect_client_version(data, ide)
