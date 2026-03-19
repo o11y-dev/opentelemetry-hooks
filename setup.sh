@@ -104,10 +104,6 @@ import json, sys
 events = sys.argv[1:]
 hooks = {}
 for event in events:
-    hooks[event] = [{'command': sys.argv[0]}]
-# reuse HOOK_CMD from first positional
-hooks = {}
-for event in events:
     hooks[event] = [{'command': '$HOOK_CMD'}]
 doc = {'version': 1, 'hooks': hooks}
 print(json.dumps(doc, indent=2))
