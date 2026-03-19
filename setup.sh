@@ -60,8 +60,27 @@ done
 
 # Auto-detect if no flags given
 if [[ -z "$DO_CURSOR" && -z "$DO_CLAUDE" ]]; then
-  # Check if .cursor exists in any parent or if cursor is installed
-  if command -v cursor &>/dev/null || [ -d "$HOME/.cursor" ]; then
+  # Check for a .cursor workspace directory in the current or parent directories,
+  # or fallback to cursor being installed on PATH or in $HOME.
+  CURSOR_DIR_FOUND=""
+  SEARCH_DIR="$PWD"
+  while :; do
+    if [ -d "$SEARCH_DIR/.cursor" ]; then
+      CURSOR_DIR_FOUND=1
+      break
+    fi
+    # Stop if we've reached the filesystem root or cannot ascend further
+    if [ "$SEARCH_DIR" = "/" ]; then
+      break
+    fi
+    PARENT_DIR="$(dirname "$SEARCH_DIR")"
+    if [ "$PARENT_DIR" = "$SEARCH_DIR" ]; then
+      break
+    fi
+    SEARCH_DIR="$PARENT_DIR"
+  done
+
+  if command -v cursor &>/dev/null || [ -d "$HOME/.cursor" ] || [ -n "$CURSOR_DIR_FOUND" ]; then
     DO_CURSOR=1
   fi
   # Check if claude is installed
