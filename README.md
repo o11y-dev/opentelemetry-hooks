@@ -62,19 +62,22 @@ gen_ai.client.session (root)
 | `SessionStart` | `sessionStart` | `sessionStart` | `SessionStart` | `session.created` |
 | `SessionEnd` | `sessionEnd` | `sessionEnd` | `SessionEnd` | `session.deleted`, `session.error` |
 | `UserPromptSubmit` | `beforeSubmitPrompt` | `userPromptSubmitted` | `UserPromptSubmit` | `message.updated` (role=user) |
-| `PreToolUse` | `preToolUse` | `preToolUse` | `PreToolUse` | `tool.execute.before` |
-| `PostToolUse` | `postToolUse` | `postToolUse` | `PostToolUse` | `tool.execute.after` |
-| `PostToolUseFailure` | `postToolUseFailure` | — | `PostToolUseFailure` | — |
+| `PreToolUse` | `preToolUse` | `preToolUse` | `PreToolUse` | `tool.execute.before` ¹ |
+| `PostToolUse` | `postToolUse` | `postToolUse` | `PostToolUse` | `tool.execute.after` (exit=0) |
+| `PostToolUseFailure` | `postToolUseFailure` | — | `PostToolUseFailure` | `tool.execute.after` (exit≠0) |
 | `Stop` | `stop` | — | `Stop` | `session.idle` |
-| `SubagentStart` | `subagentStart` | — | `SubagentStart` | — |
-| `SubagentStop` | `subagentStop` | — | `SubagentStop` | — |
+| `SubagentStart` | `subagentStart` | — | `SubagentStart` | — ² |
+| `SubagentStop` | `subagentStop` | — | `SubagentStop` | — ² |
 | `ErrorOccurred` | — | `errorOccurred` | — | — |
-| `BeforeShellExecution` | `beforeShellExecution` | — | — | — |
-| `AfterShellExecution` | `afterShellExecution` | — | — | — |
-| `BeforeMCPExecution` | `beforeMCPExecution` | — | — | — |
-| `AfterMCPExecution` | `afterMCPExecution` | — | — | — |
-| `BeforeReadFile` | `beforeReadFile` | — | — | — |
-| `AfterFileEdit` | `afterFileEdit` | — | — | — |
+| `BeforeShellExecution` | `beforeShellExecution` | — | — | — ¹ |
+| `AfterShellExecution` | `afterShellExecution` | — | — | — ¹ |
+| `BeforeMCPExecution` | `beforeMCPExecution` | — | — | — ¹ |
+| `AfterMCPExecution` | `afterMCPExecution` | — | — | — ¹ |
+| `BeforeReadFile` | `beforeReadFile` | — | — | — ¹ |
+| `AfterFileEdit` | `afterFileEdit` | — | — | `file.edited` |
+
+¹ OpenCode routes bash, read, write, MCP, and all other tools through the universal `tool.execute.before/after` hooks, so these events are observable as `PreToolUse`/`PostToolUse` with the appropriate `tool_name`.<br>
+² Subagent invocations surface as `PreToolUse`/`PostToolUse` with `tool_name=task` — there are no dedicated subagent hook events in OpenCode.
 
 ## Installation
 
@@ -226,7 +229,7 @@ cp plugin/opencode.ts .opencode/plugins/otel-hook.ts
 
 Restart OpenCode after installing. The plugin is auto-detected via the `source_app: "OpenCode"` field it includes in every payload — no extra environment variables required. `OPENCODE_CONFIG_DIR` is respected if set.
 
-**Events captured:** `SessionStart`, `SessionEnd`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`. Note: MCP tool calls do not trigger `tool.execute.before/after` (upstream OpenCode limitation).
+**Events captured:** `SessionStart`, `SessionEnd`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure` (detected via `metadata.exit`), `Stop`, `AfterFileEdit`. Bash, read, write, MCP, and subagent (`task`) tool calls all flow through the universal `tool.execute.before/after` hooks and appear as `PreToolUse`/`PostToolUse` with the appropriate `tool_name`.
 
 #### Other compatible runners
 

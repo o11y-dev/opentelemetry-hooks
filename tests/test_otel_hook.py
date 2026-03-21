@@ -300,6 +300,16 @@ class TestOpenCodePluginPayloads:
         payload = {"hook_event_name": "SessionEnd", "source_app": "OpenCode", "session_id": "abc123", "status": "error"}
         assert otel_hook._detect_ide(payload) == "opencode"
 
+    def test_after_file_edit_detected_as_opencode(self):
+        # file.edited carries no session_id — only file_path and source_app.
+        payload = {"hook_event_name": "AfterFileEdit", "source_app": "OpenCode", "file_path": "/home/user/project/main.py"}
+        assert otel_hook._detect_ide(payload) == "opencode"
+
+    def test_post_tool_use_failure_detected_as_opencode(self):
+        payload = {"hook_event_name": "PostToolUseFailure", "source_app": "OpenCode", "session_id": "abc123",
+                   "tool_name": "bash", "tool_id": "call-1", "exit_code": 1, "error": "exit 1"}
+        assert otel_hook._detect_ide(payload) == "opencode"
+
     # ── Event name normalisation ──────────────────────────────────────────
 
     @pytest.mark.parametrize("event_name", [
@@ -307,8 +317,10 @@ class TestOpenCodePluginPayloads:
         "SessionEnd",
         "PreToolUse",
         "PostToolUse",
+        "PostToolUseFailure",
         "Stop",
         "UserPromptSubmit",
+        "AfterFileEdit",
     ])
     def test_plugin_events_already_canonical(self, event_name):
         # Plugin emits PascalCase names that are already canonical — no mapping needed.
@@ -329,6 +341,15 @@ class TestOpenCodePluginPayloads:
     def test_get_event_name_session_end_error(self):
         payload = {"hook_event_name": "SessionEnd", "source_app": "OpenCode", "session_id": "s1", "status": "error"}
         assert otel_hook._get_event_name(payload) == "SessionEnd"
+
+    def test_get_event_name_after_file_edit(self):
+        payload = {"hook_event_name": "AfterFileEdit", "source_app": "OpenCode", "file_path": "/src/main.py"}
+        assert otel_hook._get_event_name(payload) == "AfterFileEdit"
+
+    def test_get_event_name_post_tool_use_failure(self):
+        payload = {"hook_event_name": "PostToolUseFailure", "source_app": "OpenCode",
+                   "session_id": "s1", "tool_name": "bash", "exit_code": 1, "error": "exit 1"}
+        assert otel_hook._get_event_name(payload) == "PostToolUseFailure"
 
     # ── source_app takes priority over PascalCase auto-detection ─────────
 

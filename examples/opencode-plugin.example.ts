@@ -83,6 +83,15 @@ export const OtelHookPlugin: Plugin = async ({ $, directory }) => {
             prompt: textPart?.text,
           })
         }
+      } else if (event.type === "file.edited") {
+        // Published by write / edit / apply_patch tools after every file modification.
+        // properties contains exactly: { file: string } — no session_id available.
+        const filePath = (event.properties as { file?: string } | undefined)?.file
+        await invoke({
+          hook_event_name: "AfterFileEdit",
+          source_app: "OpenCode",
+          file_path: filePath,
+        })
       }
     },
 
@@ -99,14 +108,22 @@ export const OtelHookPlugin: Plugin = async ({ $, directory }) => {
     },
 
     "tool.execute.after": async (input, output) => {
+      const outObj = output as Record<string, unknown> | undefined
+      // For the bash tool, metadata.exit carries the numeric exit code.
+      // Non-zero exit → PostToolUseFailure; zero / absent → PostToolUse.
+      const meta = outObj?.metadata as Record<string, unknown> | undefined
+      const exitCode = typeof meta?.exit === "number" ? (meta.exit as number) : undefined
+      const failed = exitCode !== undefined && exitCode !== 0
+
       await invoke({
-        hook_event_name: "PostToolUse",
+        hook_event_name: failed ? "PostToolUseFailure" : "PostToolUse",
         source_app: "OpenCode",
         session_id: input?.sessionID,
         tool_name: input?.tool,
         tool_id: input?.callID,
         tool_input: (input as Record<string, unknown> | undefined)?.args,
-        tool_output: (output as Record<string, unknown> | undefined)?.output,
+        tool_output: outObj?.output,
+        ...(failed ? { exit_code: exitCode, error: `exit ${exitCode}` } : {}),
       })
     },
   }
