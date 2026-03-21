@@ -39,21 +39,50 @@ export const OtelHookPlugin: Plugin = async ({ $, directory }) => {
   return {
     // ── Session lifecycle ──────────────────────────────────────────────────
     event: async ({ event }) => {
+      type Props = { info?: { id?: string }; message?: { role?: string; sessionID?: string; parts?: Array<{ type: string; text?: string }> } }
+      const props = event.properties as Props | undefined
+
       if (event.type === "session.created") {
-        const info = (event.properties as { info?: { id?: string } } | undefined)?.info
         await invoke({
           hook_event_name: "SessionStart",
           source_app: "OpenCode",
-          session_id: info?.id,
+          session_id: props?.info?.id,
           cwd: directory,
         })
       } else if (event.type === "session.deleted") {
-        const info = (event.properties as { info?: { id?: string } } | undefined)?.info
         await invoke({
           hook_event_name: "SessionEnd",
           source_app: "OpenCode",
-          session_id: info?.id,
+          session_id: props?.info?.id,
         })
+      } else if (event.type === "session.error") {
+        // Close the trace even when the session ends in error.
+        await invoke({
+          hook_event_name: "SessionEnd",
+          source_app: "OpenCode",
+          session_id: props?.info?.id,
+          status: "error",
+        })
+      } else if (event.type === "session.idle") {
+        // Agent finished responding — equivalent to the Stop event in other IDEs.
+        await invoke({
+          hook_event_name: "Stop",
+          source_app: "OpenCode",
+          session_id: props?.info?.id,
+          status: "idle",
+        })
+      } else if (event.type === "message.updated") {
+        // Capture user prompts only (not assistant responses).
+        const msg = props?.message
+        if (msg?.role === "user") {
+          const textPart = msg.parts?.find((p) => p.type === "text")
+          await invoke({
+            hook_event_name: "UserPromptSubmit",
+            source_app: "OpenCode",
+            session_id: msg.sessionID,
+            prompt: textPart?.text,
+          })
+        }
       }
     },
 

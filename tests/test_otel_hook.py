@@ -288,6 +288,18 @@ class TestOpenCodePluginPayloads:
         payload = {"hook_event_name": "PostToolUse", "source_app": "OpenCode", "session_id": "abc123", "tool_name": "bash", "tool_id": "call-1", "tool_output": "ok"}
         assert otel_hook._detect_ide(payload) == "opencode"
 
+    def test_stop_from_session_idle_detected_as_opencode(self):
+        payload = {"hook_event_name": "Stop", "source_app": "OpenCode", "session_id": "abc123", "status": "idle"}
+        assert otel_hook._detect_ide(payload) == "opencode"
+
+    def test_user_prompt_submit_detected_as_opencode(self):
+        payload = {"hook_event_name": "UserPromptSubmit", "source_app": "OpenCode", "session_id": "abc123", "prompt": "list files"}
+        assert otel_hook._detect_ide(payload) == "opencode"
+
+    def test_session_end_error_detected_as_opencode(self):
+        payload = {"hook_event_name": "SessionEnd", "source_app": "OpenCode", "session_id": "abc123", "status": "error"}
+        assert otel_hook._detect_ide(payload) == "opencode"
+
     # ── Event name normalisation ──────────────────────────────────────────
 
     @pytest.mark.parametrize("event_name", [
@@ -295,6 +307,8 @@ class TestOpenCodePluginPayloads:
         "SessionEnd",
         "PreToolUse",
         "PostToolUse",
+        "Stop",
+        "UserPromptSubmit",
     ])
     def test_plugin_events_already_canonical(self, event_name):
         # Plugin emits PascalCase names that are already canonical — no mapping needed.
@@ -303,6 +317,18 @@ class TestOpenCodePluginPayloads:
     def test_get_event_name_from_plugin_payload(self):
         payload = {"hook_event_name": "PreToolUse", "source_app": "OpenCode", "session_id": "s1", "tool_name": "bash"}
         assert otel_hook._get_event_name(payload) == "PreToolUse"
+
+    def test_get_event_name_stop_from_session_idle(self):
+        payload = {"hook_event_name": "Stop", "source_app": "OpenCode", "session_id": "s1", "status": "idle"}
+        assert otel_hook._get_event_name(payload) == "Stop"
+
+    def test_get_event_name_user_prompt_submit(self):
+        payload = {"hook_event_name": "UserPromptSubmit", "source_app": "OpenCode", "session_id": "s1", "prompt": "hello"}
+        assert otel_hook._get_event_name(payload) == "UserPromptSubmit"
+
+    def test_get_event_name_session_end_error(self):
+        payload = {"hook_event_name": "SessionEnd", "source_app": "OpenCode", "session_id": "s1", "status": "error"}
+        assert otel_hook._get_event_name(payload) == "SessionEnd"
 
     # ── source_app takes priority over PascalCase auto-detection ─────────
 
