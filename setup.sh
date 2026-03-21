@@ -2,14 +2,16 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # OpenTelemetry Hook — Quick Setup
 #
-# Registers the OTel hook with Cursor IDE and/or Claude Code.
+# Registers the OTel hook with Cursor IDE, Claude Code, and/or OpenCode.
 # Safe to run multiple times — skips hooks that are already registered.
 #
 # Usage:
-#   bash setup.sh                   # Auto-detect and set up all found IDEs
-#   bash setup.sh --cursor          # Cursor only
-#   bash setup.sh --claude          # Claude Code only
-#   bash setup.sh --claude --global # Claude Code global (~/.claude/settings.json)
+#   bash setup.sh                    # Auto-detect and set up all found IDEs
+#   bash setup.sh --cursor           # Cursor only
+#   bash setup.sh --claude           # Claude Code only
+#   bash setup.sh --claude --global  # Claude Code global (~/.claude/settings.json)
+#   bash setup.sh --opencode         # OpenCode project-level (.opencode/plugins/)
+#   bash setup.sh --opencode --global # OpenCode global (~/.config/opencode/plugins/)
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -47,19 +49,22 @@ CLAUDE_MATCHER_EVENTS="PreToolUse PostToolUse PostToolUseFailure"
 # ─── Parse arguments ─────────────────────────────────────────────────────────
 DO_CURSOR=""
 DO_CLAUDE=""
+DO_OPENCODE=""
 CLAUDE_GLOBAL=""
+OPENCODE_GLOBAL=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --cursor)  DO_CURSOR=1; shift ;;
-    --claude)  DO_CLAUDE=1; shift ;;
-    --global)  CLAUDE_GLOBAL=1; shift ;;
-    *)         echo "Unknown option: $1"; exit 1 ;;
+    --cursor)   DO_CURSOR=1; shift ;;
+    --claude)   DO_CLAUDE=1; shift ;;
+    --opencode) DO_OPENCODE=1; shift ;;
+    --global)   CLAUDE_GLOBAL=1; OPENCODE_GLOBAL=1; shift ;;
+    *)          echo "Unknown option: $1"; exit 1 ;;
   esac
 done
 
 # Auto-detect if no flags given
-if [[ -z "$DO_CURSOR" && -z "$DO_CLAUDE" ]]; then
+if [[ -z "$DO_CURSOR" && -z "$DO_CLAUDE" && -z "$DO_OPENCODE" ]]; then
   # Check for a .cursor workspace directory in the current or parent directories,
   # or fallback to cursor being installed on PATH or in $HOME.
   CURSOR_DIR_FOUND=""
@@ -88,8 +93,14 @@ if [[ -z "$DO_CURSOR" && -z "$DO_CLAUDE" ]]; then
     DO_CLAUDE=1
     CLAUDE_GLOBAL=1
   fi
-  if [[ -z "$DO_CURSOR" && -z "$DO_CLAUDE" ]]; then
-    echo "No supported IDE detected. Use --cursor or --claude to force setup."
+  # Check if opencode is installed
+  OPENCODE_CONFIG_DIR="${OPENCODE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode}"
+  if command -v opencode &>/dev/null || [ -d "$OPENCODE_CONFIG_DIR" ]; then
+    DO_OPENCODE=1
+    OPENCODE_GLOBAL=1
+  fi
+  if [[ -z "$DO_CURSOR" && -z "$DO_CLAUDE" && -z "$DO_OPENCODE" ]]; then
+    echo "No supported IDE detected. Use --cursor, --claude, or --opencode to force setup."
     exit 1
   fi
 fi
@@ -252,6 +263,38 @@ if not added:
 " "$settings_json" "$HOOK_CMD" "${CLAUDE_EVENTS[@]}"
 }
 
+# ─── OpenCode setup ──────────────────────────────────────────────────────────
+setup_opencode() {
+  local plugin_dir
+  local plugin_src="$HOOK_DIR/plugin/opencode.ts"
+
+  if [ ! -f "$plugin_src" ]; then
+    echo "  ❌ Plugin source not found: $plugin_src"
+    echo "     Run setup.sh from the opentelemetry-hooks repo directory."
+    return 1
+  fi
+
+  if [[ -n "$OPENCODE_GLOBAL" ]]; then
+    # Respect OPENCODE_CONFIG_DIR if set (mirrors rtk's behavior)
+    local config_dir="${OPENCODE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode}"
+    plugin_dir="$config_dir/plugins"
+    echo "📦 OpenCode (global: $plugin_dir/otel-hook.ts)"
+  else
+    plugin_dir="$(pwd)/.opencode/plugins"
+    echo "📦 OpenCode (project: $plugin_dir/otel-hook.ts)"
+  fi
+
+  mkdir -p "$plugin_dir"
+  local dest="$plugin_dir/otel-hook.ts"
+
+  if [ -f "$dest" ] && diff -q "$plugin_src" "$dest" &>/dev/null; then
+    echo "  ✅ OpenCode plugin already up to date — nothing to do"
+  else
+    cp "$plugin_src" "$dest"
+    echo "  ✅ Installed OpenCode plugin → $dest"
+  fi
+}
+
 # ─── Run setup for selected IDEs ────────────────────────────────────────────
 if [[ -n "$DO_CURSOR" ]]; then
   setup_cursor
@@ -260,6 +303,11 @@ fi
 
 if [[ -n "$DO_CLAUDE" ]]; then
   setup_claude
+  echo ""
+fi
+
+if [[ -n "$DO_OPENCODE" ]]; then
+  setup_opencode
   echo ""
 fi
 
@@ -278,6 +326,9 @@ if [[ -n "$DO_CURSOR" ]]; then
 fi
 if [[ -n "$DO_CLAUDE" ]]; then
   echo "  2. Restart Claude Code to activate hooks"
+fi
+if [[ -n "$DO_OPENCODE" ]]; then
+  echo "  2. Restart OpenCode to activate the plugin"
 fi
 # Determine the hook home used for logging: prefer IDE_OTEL_HOOK_HOME, then
 # fall back to the system default for otel-hook, or the local script dir.

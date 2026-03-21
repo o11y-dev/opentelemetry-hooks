@@ -194,11 +194,39 @@ cp .cursor/hooks/opentelemetry-hook/examples/antigravity-workflow.example.md .ag
 
 Replace `{{SCRIPT_PATH}}` in the copied workflow with the hook command you want Antigravity to invoke. For a copied-source checkout use `python3 .cursor/hooks/opentelemetry-hook/otel_hook.py`; use `otel-hook` for a pip-installed package.
 
-When your runner uses camelCase payload keys such as `sessionId`, `toolName`, `toolInput`, or `hookEventType`, the hook normalizes them automatically before exporting spans.
+#### OpenCode
 
-#### OpenCode and other compatible runners
+A native TypeScript plugin is included at `plugin/opencode.ts`. It hooks into OpenCode's session and tool lifecycle events and pipes JSON payloads to `otel-hook` on stdin — the same pattern used by [rtk](https://github.com/rtk-ai/rtk).
 
-OpenCode can be integrated through a wrapper/plugin that invokes `otel-hook` (or `python3 .../otel_hook.py`) and forwards compatible hook JSON. Set `IDE_OTEL_IDE_NAME=opencode`, or pass a self-reported client field such as `ide_name`, `client`, or `source_app` with the value `OpenCode`. Unlike Cursor or Claude Code, OpenCode does not currently have distinct structural payload markers that the hook can auto-detect on its own, so explicit name fields are the reliable detection path.
+**Quick setup (recommended):**
+
+```bash
+# Global — available in every OpenCode session
+bash setup.sh --opencode --global
+
+# Project-level — only active for this project
+bash setup.sh --opencode
+```
+
+**Manual install:**
+
+```bash
+# Global
+mkdir -p ~/.config/opencode/plugins
+cp plugin/opencode.ts ~/.config/opencode/plugins/otel-hook.ts
+
+# Project-level
+mkdir -p .opencode/plugins
+cp plugin/opencode.ts .opencode/plugins/otel-hook.ts
+```
+
+Restart OpenCode after installing. The plugin is auto-detected via the `source_app: "OpenCode"` field it includes in every payload — no extra environment variables required. `OPENCODE_CONFIG_DIR` is respected if set.
+
+**Events captured:** `SessionStart`, `SessionEnd`, `PreToolUse`, `PostToolUse`.
+
+#### Other compatible runners
+
+For any hook runner not listed above, invoke `otel-hook` (or `python3 .../otel_hook.py`) and forward compatible hook JSON on stdin. Pass a self-reported client field such as `ide_name`, `client`, or `source_app` with the value matching your tool, or set `IDE_OTEL_IDE_NAME` in the environment. When your runner uses camelCase payload keys such as `sessionId`, `toolName`, `toolInput`, or `hookEventType`, the hook normalizes them automatically before exporting spans.
 
 #### GitHub Copilot — Recommended Repositories
 
