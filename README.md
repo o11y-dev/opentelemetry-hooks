@@ -57,24 +57,24 @@ gen_ai.client.session (root)
 
 ## Supported Events
 
-| Canonical Name | Cursor IDE / CLI | Copilot | Claude Code / Antigravity / compatible runners |
-|---|---|---|---|
-| `SessionStart` | `sessionStart` | `sessionStart` | `SessionStart` |
-| `SessionEnd` | `sessionEnd` | `sessionEnd` | `SessionEnd` |
-| `UserPromptSubmit` | `beforeSubmitPrompt` | `userPromptSubmitted` | `UserPromptSubmit` |
-| `PreToolUse` | `preToolUse` | `preToolUse` | `PreToolUse` |
-| `PostToolUse` | `postToolUse` | `postToolUse` | `PostToolUse` |
-| `PostToolUseFailure` | `postToolUseFailure` | — | `PostToolUseFailure` |
-| `Stop` | `stop` | — | `Stop` |
-| `SubagentStart` | `subagentStart` | — | `SubagentStart` |
-| `SubagentStop` | `subagentStop` | — | `SubagentStop` |
-| `ErrorOccurred` | — | `errorOccurred` | — |
-| `BeforeShellExecution` | `beforeShellExecution` | — | — |
-| `AfterShellExecution` | `afterShellExecution` | — | — |
-| `BeforeMCPExecution` | `beforeMCPExecution` | — | — |
-| `AfterMCPExecution` | `afterMCPExecution` | — | — |
-| `BeforeReadFile` | `beforeReadFile` | — | — |
-| `AfterFileEdit` | `afterFileEdit` | — | — |
+| Canonical Name | Cursor IDE / CLI | Copilot | Claude Code / Antigravity | OpenCode (plugin) |
+|---|---|---|---|---|
+| `SessionStart` | `sessionStart` | `sessionStart` | `SessionStart` | `session.created` |
+| `SessionEnd` | `sessionEnd` | `sessionEnd` | `SessionEnd` | `session.deleted`, `session.error` |
+| `UserPromptSubmit` | `beforeSubmitPrompt` | `userPromptSubmitted` | `UserPromptSubmit` | `message.updated` (role=user) |
+| `PreToolUse` | `preToolUse` | `preToolUse` | `PreToolUse` | `tool.execute.before` |
+| `PostToolUse` | `postToolUse` | `postToolUse` | `PostToolUse` | `tool.execute.after` |
+| `PostToolUseFailure` | `postToolUseFailure` | — | `PostToolUseFailure` | — |
+| `Stop` | `stop` | — | `Stop` | `session.idle` |
+| `SubagentStart` | `subagentStart` | — | `SubagentStart` | — |
+| `SubagentStop` | `subagentStop` | — | `SubagentStop` | — |
+| `ErrorOccurred` | — | `errorOccurred` | — | — |
+| `BeforeShellExecution` | `beforeShellExecution` | — | — | — |
+| `AfterShellExecution` | `afterShellExecution` | — | — | — |
+| `BeforeMCPExecution` | `beforeMCPExecution` | — | — | — |
+| `AfterMCPExecution` | `afterMCPExecution` | — | — | — |
+| `BeforeReadFile` | `beforeReadFile` | — | — | — |
+| `AfterFileEdit` | `afterFileEdit` | — | — | — |
 
 ## Installation
 
@@ -222,7 +222,7 @@ cp plugin/opencode.ts .opencode/plugins/otel-hook.ts
 
 Restart OpenCode after installing. The plugin is auto-detected via the `source_app: "OpenCode"` field it includes in every payload — no extra environment variables required. `OPENCODE_CONFIG_DIR` is respected if set.
 
-**Events captured:** `SessionStart`, `SessionEnd`, `PreToolUse`, `PostToolUse`.
+**Events captured:** `SessionStart`, `SessionEnd`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`. Note: MCP tool calls do not trigger `tool.execute.before/after` (upstream OpenCode limitation).
 
 #### Other compatible runners
 
