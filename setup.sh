@@ -7,7 +7,8 @@
 #
 # Usage:
 #   bash setup.sh                    # Auto-detect and set up all found IDEs
-#   bash setup.sh --cursor           # Cursor only
+#   bash setup.sh --cursor           # Cursor project-level (.cursor/hooks.json)
+#   bash setup.sh --cursor --global  # Cursor global (~/.cursor/hooks.json)
 #   bash setup.sh --claude           # Claude Code only
 #   bash setup.sh --claude --global  # Claude Code global (~/.claude/settings.json)
 #   bash setup.sh --opencode         # OpenCode project-level (.opencode/plugins/)
@@ -50,6 +51,7 @@ CLAUDE_MATCHER_EVENTS="PreToolUse PostToolUse PostToolUseFailure"
 DO_CURSOR=""
 DO_CLAUDE=""
 DO_OPENCODE=""
+CURSOR_GLOBAL=""
 CLAUDE_GLOBAL=""
 OPENCODE_GLOBAL=""
 
@@ -58,7 +60,7 @@ while [[ $# -gt 0 ]]; do
     --cursor)   DO_CURSOR=1; shift ;;
     --claude)   DO_CLAUDE=1; shift ;;
     --opencode) DO_OPENCODE=1; shift ;;
-    --global)   CLAUDE_GLOBAL=1; OPENCODE_GLOBAL=1; shift ;;
+    --global)   CURSOR_GLOBAL=1; CLAUDE_GLOBAL=1; OPENCODE_GLOBAL=1; shift ;;
     *)          echo "Unknown option: $1"; exit 1 ;;
   esac
 done
@@ -119,11 +121,17 @@ echo ""
 
 # ─── Cursor IDE setup ───────────────────────────────────────────────────────
 setup_cursor() {
-  local repo_root
-  repo_root="$(cd "$HOOK_DIR/../../.." 2>/dev/null && pwd || echo "$HOOK_DIR")"
-  local hooks_json="$repo_root/.cursor/hooks.json"
+  local hooks_json
 
-  echo "📦 Cursor IDE"
+  if [[ -n "$CURSOR_GLOBAL" ]]; then
+    hooks_json="$HOME/.cursor/hooks.json"
+    echo "📦 Cursor IDE (global: $hooks_json)"
+  else
+    local repo_root
+    repo_root="$(cd "$HOOK_DIR/../../.." 2>/dev/null && pwd || echo "$HOOK_DIR")"
+    hooks_json="$repo_root/.cursor/hooks.json"
+    echo "📦 Cursor IDE (project: $hooks_json)"
+  fi
 
   if [ ! -f "$hooks_json" ]; then
     echo "  📝 Creating new .cursor/hooks.json ..."
@@ -323,6 +331,9 @@ echo "Next steps:"
 echo "  1. Configure your OTLP endpoint in otel_config.json"
 if [[ -n "$DO_CURSOR" ]]; then
   echo "  2. Restart Cursor IDE to activate hooks"
+  if [[ -n "$CURSOR_GLOBAL" ]]; then
+    echo "     (global hooks.json — applies to all projects)"
+  fi
 fi
 if [[ -n "$DO_CLAUDE" ]]; then
   echo "  2. Restart Claude Code to activate hooks"

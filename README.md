@@ -99,12 +99,16 @@ Once installed, `setup.sh` will automatically use the global `otel-hook` command
 ### One-Command Setup (Cursor IDE)
 
 ```bash
+# Project-level — hooks.json in the current repo (.cursor/hooks.json)
 bash .cursor/hooks/opentelemetry-hook/setup.sh
+
+# Global — applies to every Cursor project (~/.cursor/hooks.json)
+bash .cursor/hooks/opentelemetry-hook/setup.sh --cursor --global
 ```
 
 That's it. The script will:
 
-1. Create or **merge into** your existing `.cursor/hooks.json` (safe to re-run)
+1. Create or **merge into** your existing `hooks.json` (safe to re-run)
 2. Create `otel_config.json` from the example template (if missing)
 3. Bootstrap the Python venv in the background (~30s on first run)
 
