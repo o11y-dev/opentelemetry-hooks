@@ -54,16 +54,30 @@ DO_OPENCODE=""
 CURSOR_GLOBAL=""
 CLAUDE_GLOBAL=""
 OPENCODE_GLOBAL=""
+WANT_GLOBAL=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --cursor)   DO_CURSOR=1; shift ;;
     --claude)   DO_CLAUDE=1; shift ;;
     --opencode) DO_OPENCODE=1; shift ;;
-    --global)   CURSOR_GLOBAL=1; CLAUDE_GLOBAL=1; OPENCODE_GLOBAL=1; shift ;;
+    --global)   WANT_GLOBAL=1; shift ;;
     *)          echo "Unknown option: $1"; exit 1 ;;
   esac
 done
+
+# Apply --global only to the IDEs that were explicitly selected.
+# Requiring an explicit IDE flag avoids accidentally installing global hooks
+# for IDEs the user did not intend to configure.
+if [[ -n "$WANT_GLOBAL" ]]; then
+  if [[ -z "$DO_CURSOR" && -z "$DO_CLAUDE" && -z "$DO_OPENCODE" ]]; then
+    echo "Error: --global requires an explicit IDE flag (--cursor, --claude, or --opencode)."
+    exit 1
+  fi
+  [[ -n "$DO_CURSOR" ]]   && CURSOR_GLOBAL=1
+  [[ -n "$DO_CLAUDE" ]]   && CLAUDE_GLOBAL=1
+  [[ -n "$DO_OPENCODE" ]] && OPENCODE_GLOBAL=1
+fi
 
 # Auto-detect if no flags given
 if [[ -z "$DO_CURSOR" && -z "$DO_CLAUDE" && -z "$DO_OPENCODE" ]]; then
