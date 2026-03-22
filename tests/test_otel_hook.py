@@ -258,6 +258,115 @@ class TestDetectIDE:
                 assert otel_hook._detect_ide({}) == "cursor"
 
 
+# ── OpenCode plugin payload handling ──────────────────────────────────────
+
+
+class TestOpenCodePluginPayloads:
+    """Verify that payloads emitted by plugin/opencode.ts are handled correctly.
+
+    The TypeScript plugin sets source_app="OpenCode" and hook_event_name=<PascalCase>
+    on every payload it sends to otel-hook. These tests confirm that the Python
+    hook correctly detects the IDE and normalises the event name for each event
+    type the plugin emits.
+    """
+
+    # ── IDE detection via source_app ──────────────────────────────────────
+
+    def test_session_start_detected_as_opencode(self):
+        payload = {"hook_event_name": "SessionStart", "source_app": "OpenCode", "session_id": "abc123", "cwd": "/home/user/project"}
+        assert otel_hook._detect_ide(payload) == "opencode"
+
+    def test_session_end_detected_as_opencode(self):
+        payload = {"hook_event_name": "SessionEnd", "source_app": "OpenCode", "session_id": "abc123"}
+        assert otel_hook._detect_ide(payload) == "opencode"
+
+    def test_pre_tool_use_detected_as_opencode(self):
+        payload = {"hook_event_name": "PreToolUse", "source_app": "OpenCode", "session_id": "abc123", "tool_name": "bash", "tool_id": "call-1"}
+        assert otel_hook._detect_ide(payload) == "opencode"
+
+    def test_post_tool_use_detected_as_opencode(self):
+        payload = {"hook_event_name": "PostToolUse", "source_app": "OpenCode", "session_id": "abc123", "tool_name": "bash", "tool_id": "call-1", "tool_output": "ok"}
+        assert otel_hook._detect_ide(payload) == "opencode"
+
+    def test_stop_from_session_idle_detected_as_opencode(self):
+        payload = {"hook_event_name": "Stop", "source_app": "OpenCode", "session_id": "abc123", "status": "idle"}
+        assert otel_hook._detect_ide(payload) == "opencode"
+
+    def test_user_prompt_submit_detected_as_opencode(self):
+        payload = {"hook_event_name": "UserPromptSubmit", "source_app": "OpenCode", "session_id": "abc123", "prompt": "list files"}
+        assert otel_hook._detect_ide(payload) == "opencode"
+
+    def test_session_end_error_detected_as_opencode(self):
+        payload = {"hook_event_name": "SessionEnd", "source_app": "OpenCode", "session_id": "abc123", "status": "error"}
+        assert otel_hook._detect_ide(payload) == "opencode"
+
+    def test_after_file_edit_detected_as_opencode(self):
+        # file.edited carries no session_id — only file_path and source_app.
+        payload = {"hook_event_name": "AfterFileEdit", "source_app": "OpenCode", "file_path": "/home/user/project/main.py"}
+        assert otel_hook._detect_ide(payload) == "opencode"
+
+    def test_post_tool_use_failure_detected_as_opencode(self):
+        payload = {"hook_event_name": "PostToolUseFailure", "source_app": "OpenCode", "session_id": "abc123",
+                   "tool_name": "bash", "tool_id": "call-1", "exit_code": 1, "error": "exit 1"}
+        assert otel_hook._detect_ide(payload) == "opencode"
+
+    # ── Event name normalisation ──────────────────────────────────────────
+
+    @pytest.mark.parametrize("event_name", [
+        "SessionStart",
+        "SessionEnd",
+        "PreToolUse",
+        "PostToolUse",
+        "PostToolUseFailure",
+        "Stop",
+        "UserPromptSubmit",
+        "AfterFileEdit",
+    ])
+    def test_plugin_events_already_canonical(self, event_name):
+        # Plugin emits PascalCase names that are already canonical — no mapping needed.
+        assert otel_hook._normalize_event(event_name) == event_name
+
+    def test_get_event_name_from_plugin_payload(self):
+        payload = {"hook_event_name": "PreToolUse", "source_app": "OpenCode", "session_id": "s1", "tool_name": "bash"}
+        assert otel_hook._get_event_name(payload) == "PreToolUse"
+
+    def test_get_event_name_stop_from_session_idle(self):
+        payload = {"hook_event_name": "Stop", "source_app": "OpenCode", "session_id": "s1", "status": "idle"}
+        assert otel_hook._get_event_name(payload) == "Stop"
+
+    def test_get_event_name_user_prompt_submit(self):
+        payload = {"hook_event_name": "UserPromptSubmit", "source_app": "OpenCode", "session_id": "s1", "prompt": "hello"}
+        assert otel_hook._get_event_name(payload) == "UserPromptSubmit"
+
+    def test_get_event_name_session_end_error(self):
+        payload = {"hook_event_name": "SessionEnd", "source_app": "OpenCode", "session_id": "s1", "status": "error"}
+        assert otel_hook._get_event_name(payload) == "SessionEnd"
+
+    def test_get_event_name_after_file_edit(self):
+        payload = {"hook_event_name": "AfterFileEdit", "source_app": "OpenCode", "file_path": "/src/main.py"}
+        assert otel_hook._get_event_name(payload) == "AfterFileEdit"
+
+    def test_get_event_name_post_tool_use_failure(self):
+        payload = {"hook_event_name": "PostToolUseFailure", "source_app": "OpenCode",
+                   "session_id": "s1", "tool_name": "bash", "exit_code": 1, "error": "exit 1"}
+        assert otel_hook._get_event_name(payload) == "PostToolUseFailure"
+
+    # ── source_app takes priority over PascalCase auto-detection ─────────
+
+    def test_source_app_beats_pascal_case_detection(self):
+        # PascalCase hook_event_name would normally signal Claude Code (level 4),
+        # but source_app="OpenCode" is a level-1 self-reported field and wins.
+        payload = {"hook_event_name": "PreToolUse", "source_app": "OpenCode", "session_id": "s1"}
+        assert otel_hook._detect_ide(payload) == "opencode"
+
+    # ── IDE_OTEL_IDE_NAME env var still overrides source_app ─────────────
+
+    def test_env_var_overrides_source_app(self, monkeypatch):
+        monkeypatch.setenv("IDE_OTEL_IDE_NAME", "cursor")
+        payload = {"hook_event_name": "PreToolUse", "source_app": "OpenCode", "session_id": "s1"}
+        assert otel_hook._detect_ide(payload) == "cursor"
+
+
 # ── Privacy functions ─────────────────────────────────────────────────────
 
 

@@ -57,24 +57,27 @@ gen_ai.client.session (root)
 
 ## Supported Events
 
-| Canonical Name | Cursor IDE / CLI | Copilot | Claude Code / Antigravity / compatible runners |
-|---|---|---|---|
-| `SessionStart` | `sessionStart` | `sessionStart` | `SessionStart` |
-| `SessionEnd` | `sessionEnd` | `sessionEnd` | `SessionEnd` |
-| `UserPromptSubmit` | `beforeSubmitPrompt` | `userPromptSubmitted` | `UserPromptSubmit` |
-| `PreToolUse` | `preToolUse` | `preToolUse` | `PreToolUse` |
-| `PostToolUse` | `postToolUse` | `postToolUse` | `PostToolUse` |
-| `PostToolUseFailure` | `postToolUseFailure` | — | `PostToolUseFailure` |
-| `Stop` | `stop` | — | `Stop` |
-| `SubagentStart` | `subagentStart` | — | `SubagentStart` |
-| `SubagentStop` | `subagentStop` | — | `SubagentStop` |
-| `ErrorOccurred` | — | `errorOccurred` | — |
-| `BeforeShellExecution` | `beforeShellExecution` | — | — |
-| `AfterShellExecution` | `afterShellExecution` | — | — |
-| `BeforeMCPExecution` | `beforeMCPExecution` | — | — |
-| `AfterMCPExecution` | `afterMCPExecution` | — | — |
-| `BeforeReadFile` | `beforeReadFile` | — | — |
-| `AfterFileEdit` | `afterFileEdit` | — | — |
+| Canonical Name | Cursor IDE / CLI | Copilot | Claude Code / Antigravity | OpenCode (plugin) |
+|---|---|---|---|---|
+| `SessionStart` | `sessionStart` | `sessionStart` | `SessionStart` | `session.created` |
+| `SessionEnd` | `sessionEnd` | `sessionEnd` | `SessionEnd` | `session.deleted`, `session.error` |
+| `UserPromptSubmit` | `beforeSubmitPrompt` | `userPromptSubmitted` | `UserPromptSubmit` | `message.updated` (role=user) |
+| `PreToolUse` | `preToolUse` | `preToolUse` | `PreToolUse` | `tool.execute.before` ¹ |
+| `PostToolUse` | `postToolUse` | `postToolUse` | `PostToolUse` | `tool.execute.after` (exit=0) |
+| `PostToolUseFailure` | `postToolUseFailure` | — | `PostToolUseFailure` | `tool.execute.after` (exit≠0) |
+| `Stop` | `stop` | — | `Stop` | `session.idle` |
+| `SubagentStart` | `subagentStart` | — | `SubagentStart` | — ² |
+| `SubagentStop` | `subagentStop` | — | `SubagentStop` | — ² |
+| `ErrorOccurred` | — | `errorOccurred` | — | — |
+| `BeforeShellExecution` | `beforeShellExecution` | — | — | — ¹ |
+| `AfterShellExecution` | `afterShellExecution` | — | — | — ¹ |
+| `BeforeMCPExecution` | `beforeMCPExecution` | — | — | — ¹ |
+| `AfterMCPExecution` | `afterMCPExecution` | — | — | — ¹ |
+| `BeforeReadFile` | `beforeReadFile` | — | — | — ¹ |
+| `AfterFileEdit` | `afterFileEdit` | — | — | `file.edited` |
+
+¹ OpenCode routes bash, read, write, MCP, and all other tools through the universal `tool.execute.before/after` hooks, so these events are observable as `PreToolUse`/`PostToolUse` with the appropriate `tool_name`.<br>
+² Subagent invocations surface as `PreToolUse`/`PostToolUse` with `tool_name=task` — there are no dedicated subagent hook events in OpenCode.
 
 ## Installation
 
@@ -99,12 +102,16 @@ Once installed, `setup.sh` will automatically use the global `otel-hook` command
 ### One-Command Setup (Cursor IDE)
 
 ```bash
+# Project-level — hooks.json in the current repo (.cursor/hooks.json)
 bash .cursor/hooks/opentelemetry-hook/setup.sh
+
+# Global — applies to every Cursor project (~/.cursor/hooks.json)
+bash .cursor/hooks/opentelemetry-hook/setup.sh --cursor --global
 ```
 
 That's it. The script will:
 
-1. Create or **merge into** your existing `.cursor/hooks.json` (safe to re-run)
+1. Create or **merge into** your existing `hooks.json` (safe to re-run)
 2. Create `otel_config.json` from the example template (if missing)
 3. Bootstrap the Python venv in the background (~30s on first run)
 
@@ -194,11 +201,39 @@ cp .cursor/hooks/opentelemetry-hook/examples/antigravity-workflow.example.md .ag
 
 Replace `{{SCRIPT_PATH}}` in the copied workflow with the hook command you want Antigravity to invoke. For a copied-source checkout use `python3 .cursor/hooks/opentelemetry-hook/otel_hook.py`; use `otel-hook` for a pip-installed package.
 
-When your runner uses camelCase payload keys such as `sessionId`, `toolName`, `toolInput`, or `hookEventType`, the hook normalizes them automatically before exporting spans.
+#### OpenCode
 
-#### OpenCode and other compatible runners
+A native TypeScript plugin is included at `plugin/opencode.ts`. It hooks into OpenCode's session and tool lifecycle events and pipes JSON payloads to `otel-hook` on stdin — the same pattern used by [rtk](https://github.com/rtk-ai/rtk).
 
-OpenCode can be integrated through a wrapper/plugin that invokes `otel-hook` (or `python3 .../otel_hook.py`) and forwards compatible hook JSON. Set `IDE_OTEL_IDE_NAME=opencode`, or pass a self-reported client field such as `ide_name`, `client`, or `source_app` with the value `OpenCode`. Unlike Cursor or Claude Code, OpenCode does not currently have distinct structural payload markers that the hook can auto-detect on its own, so explicit name fields are the reliable detection path.
+**Quick setup (recommended):**
+
+```bash
+# Global — available in every OpenCode session
+bash setup.sh --opencode --global
+
+# Project-level — only active for this project
+bash setup.sh --opencode
+```
+
+**Manual install:**
+
+```bash
+# Global
+mkdir -p ~/.config/opencode/plugins
+cp plugin/opencode.ts ~/.config/opencode/plugins/otel-hook.ts
+
+# Project-level
+mkdir -p .opencode/plugins
+cp plugin/opencode.ts .opencode/plugins/otel-hook.ts
+```
+
+Restart OpenCode after installing. The plugin is auto-detected via the `source_app: "OpenCode"` field it includes in every payload, so no additional environment variables are required for detection. For robustness, the bundled plugin also sets `IDE_OTEL_IDE_NAME=opencode` when invoking `otel-hook`, but this is an optional override. `OPENCODE_CONFIG_DIR` is respected if set.
+
+**Events captured:** `SessionStart`, `SessionEnd`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure` (detected via `metadata.exit`), `Stop`, `AfterFileEdit`. Bash, read, write, MCP, and subagent (`task`) tool calls all flow through the universal `tool.execute.before/after` hooks and appear as `PreToolUse`/`PostToolUse` with the appropriate `tool_name`.
+
+#### Other compatible runners
+
+For any hook runner not listed above, invoke `otel-hook` (or `python3 .../otel_hook.py`) and forward compatible hook JSON on stdin. Pass a self-reported client field such as `ide_name`, `client`, or `source_app` with the value matching your tool, or set `IDE_OTEL_IDE_NAME` in the environment. When your runner uses camelCase payload keys such as `sessionId`, `toolName`, `toolInput`, or `hookEventType`, the hook normalizes them automatically before exporting spans.
 
 #### GitHub Copilot — Recommended Repositories
 
