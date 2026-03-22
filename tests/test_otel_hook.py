@@ -1312,3 +1312,79 @@ class TestNewIdeAliases:
 
     def test_claude_cli_alias(self):
         assert otel_hook._normalize_ide_name("Claude CLI") == "claude"
+
+
+# ── Exporter deduplication guards ────────────────────────────────────────────
+
+
+class TestEnableFileExporterIdempotency:
+    """_enable_file_exporter must attach the processor only once per path."""
+
+    def test_first_call_registers_and_subsequent_calls_skip(self, monkeypatch, tmp_path):
+        path = str(tmp_path / "spans.jsonl")
+        monkeypatch.setattr(otel_hook, "_FILE_EXPORTER_PATHS", set())
+
+        try:
+            from opentelemetry.sdk.trace import TracerProvider
+        except ImportError:
+            pytest.skip("opentelemetry SDK not available")
+
+        mock_provider = mock.MagicMock(spec=TracerProvider)
+        mock_trace = mock.MagicMock()
+        mock_trace.get_tracer_provider.return_value = mock_provider
+        monkeypatch.setattr(otel_hook, "trace", mock_trace)
+
+        otel_hook._enable_file_exporter(path)
+        otel_hook._enable_file_exporter(path)
+        otel_hook._enable_file_exporter(path)
+
+        assert mock_provider.add_span_processor.call_count == 1
+        assert path in otel_hook._FILE_EXPORTER_PATHS
+
+    def test_different_paths_each_get_one_exporter(self, monkeypatch, tmp_path):
+        path_a = str(tmp_path / "a.jsonl")
+        path_b = str(tmp_path / "b.jsonl")
+        monkeypatch.setattr(otel_hook, "_FILE_EXPORTER_PATHS", set())
+
+        try:
+            from opentelemetry.sdk.trace import TracerProvider
+        except ImportError:
+            pytest.skip("opentelemetry SDK not available")
+
+        mock_provider = mock.MagicMock(spec=TracerProvider)
+        mock_trace = mock.MagicMock()
+        mock_trace.get_tracer_provider.return_value = mock_provider
+        monkeypatch.setattr(otel_hook, "trace", mock_trace)
+
+        otel_hook._enable_file_exporter(path_a)
+        otel_hook._enable_file_exporter(path_a)
+        otel_hook._enable_file_exporter(path_b)
+        otel_hook._enable_file_exporter(path_b)
+
+        assert mock_provider.add_span_processor.call_count == 2
+        assert path_a in otel_hook._FILE_EXPORTER_PATHS
+        assert path_b in otel_hook._FILE_EXPORTER_PATHS
+
+
+class TestEnableConsoleExporterIdempotency:
+    """_enable_console_exporter must attach the processor only once."""
+
+    def test_first_call_registers_and_subsequent_calls_skip(self, monkeypatch):
+        monkeypatch.setattr(otel_hook, "_CONSOLE_EXPORTER_REGISTERED", False)
+
+        try:
+            from opentelemetry.sdk.trace import TracerProvider
+        except ImportError:
+            pytest.skip("opentelemetry SDK not available")
+
+        mock_provider = mock.MagicMock(spec=TracerProvider)
+        mock_trace = mock.MagicMock()
+        mock_trace.get_tracer_provider.return_value = mock_provider
+        monkeypatch.setattr(otel_hook, "trace", mock_trace)
+
+        otel_hook._enable_console_exporter()
+        otel_hook._enable_console_exporter()
+        otel_hook._enable_console_exporter()
+
+        assert mock_provider.add_span_processor.call_count == 1
+        assert otel_hook._CONSOLE_EXPORTER_REGISTERED is True
