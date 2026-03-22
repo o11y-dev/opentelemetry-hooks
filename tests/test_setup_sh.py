@@ -1,9 +1,10 @@
-"""Tests for setup.sh command-selection logic and --global flag scoping.
+"""Tests for setup.sh command-selection logic, --global flag scoping, and --reinstall.
 
 Verifies that setup.sh prefers the system-installed otel-hook command when it
 is available on PATH, and falls back to the local script otherwise.
 
-Also verifies that --global is scoped to only the explicitly selected IDEs.
+Also verifies that --global is scoped to only the explicitly selected IDEs,
+and that --reinstall calls `pipx install --force .` before registering hooks.
 """
 
 import json
@@ -207,3 +208,87 @@ class TestSetupShGlobalScoping:
         assert not os.path.exists(opencode_global_plugin), (
             "--cursor --claude --global must not install OpenCode's global plugin"
         )
+
+
+class TestSetupShReinstall:
+    """--reinstall must call `pipx install --force .` before registering hooks."""
+
+    def _minimal_env(self, tmp_path) -> dict:
+        """Return an env dict with HOME set to tmp_path and a minimal PATH."""
+        python3_bin = shutil.which("python3") or "/usr/bin/python3"
+        python3_dir = os.path.dirname(python3_bin)
+        return {
+            "HOME": str(tmp_path),
+            "PATH": f"{python3_dir}:/usr/bin:/bin",
+        }
+
+    def test_reinstall_without_pipx_errors(self, tmp_path):
+        """--reinstall must exit non-zero with a clear error when pipx is not found."""
+        hook_dir = _make_hook_dir(str(tmp_path))
+        # Use a PATH that has python3 but definitely no pipx.
+        env = self._minimal_env(tmp_path)
+
+        result = _run_setup(hook_dir, args=["--cursor", "--reinstall"], env=env)
+        assert result.returncode != 0, "Expected non-zero exit when pipx is not on PATH"
+        assert "pipx" in result.stdout or "pipx" in result.stderr, (
+            "Expected error message to mention pipx"
+        )
+
+    def test_reinstall_calls_pipx_force(self, tmp_path):
+        """--reinstall must invoke `pipx install --force .` before hook registration."""
+        hook_dir = _make_hook_dir(str(tmp_path))
+
+        # Create a fake pipx that records its invocation and exits successfully.
+        fake_bin = str(tmp_path / "fakebin")
+        os.makedirs(fake_bin, exist_ok=True)
+        invocation_log = str(tmp_path / "pipx_invocations.txt")
+        fake_pipx = os.path.join(fake_bin, "pipx")
+        with open(fake_pipx, "w") as f:
+            f.write(
+                f"#!/bin/sh\necho \"$@\" >> {invocation_log}\nexit 0\n"
+            )
+        os.chmod(fake_pipx, 0o755)
+
+        python3_bin = shutil.which("python3") or "/usr/bin/python3"
+        python3_dir = os.path.dirname(python3_bin)
+        env = {
+            "HOME": str(tmp_path),
+            "PATH": f"{fake_bin}:{python3_dir}:/usr/bin:/bin",
+        }
+
+        result = _run_setup(hook_dir, args=["--cursor", "--reinstall"], env=env)
+        assert result.returncode == 0, result.stderr
+
+        # The fake pipx should have been called with 'install --force .'
+        assert os.path.exists(invocation_log), "pipx was never invoked"
+        with open(invocation_log) as f:
+            invocations = f.read()
+        assert "install --force ." in invocations, (
+            f"Expected 'install --force .' in pipx invocations, got: {invocations!r}"
+        )
+
+    def test_reinstall_still_registers_hooks(self, tmp_path):
+        """--reinstall must register hooks after a successful pipx reinstall."""
+        hook_dir = _make_hook_dir(str(tmp_path))
+
+        # Fake pipx that succeeds silently.
+        fake_bin = str(tmp_path / "fakebin")
+        os.makedirs(fake_bin, exist_ok=True)
+        fake_pipx = os.path.join(fake_bin, "pipx")
+        with open(fake_pipx, "w") as f:
+            f.write("#!/bin/sh\nexit 0\n")
+        os.chmod(fake_pipx, 0o755)
+
+        python3_bin = shutil.which("python3") or "/usr/bin/python3"
+        python3_dir = os.path.dirname(python3_bin)
+        env = {
+            "HOME": str(tmp_path),
+            "PATH": f"{fake_bin}:{python3_dir}:/usr/bin:/bin",
+        }
+
+        result = _run_setup(hook_dir, args=["--cursor", "--reinstall"], env=env)
+        assert result.returncode == 0, result.stderr
+
+        # Hooks must still be written
+        cmds = _hooks_json_commands(str(tmp_path))
+        assert len(cmds) == 1, f"Expected one distinct command in hooks.json, got: {cmds}"
