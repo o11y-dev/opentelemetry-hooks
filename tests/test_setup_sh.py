@@ -1,18 +1,22 @@
-"""Tests for setup.sh command-selection logic.
+"""Tests for setup.sh command-selection logic and --global flag scoping.
 
 Verifies that setup.sh prefers the system-installed otel-hook command when it
 is available on PATH, and falls back to the local script otherwise.
+
+Also verifies that --global is scoped to only the explicitly selected IDEs.
 """
 
 import json
 import os
 import shutil
 import subprocess
+from typing import Dict, List, Optional
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SETUP_SH = os.path.join(REPO_ROOT, "setup.sh")
 OTEL_HOOK_PY = os.path.join(REPO_ROOT, "otel_hook.py")
 OTEL_CONFIG_EXAMPLE = os.path.join(REPO_ROOT, "otel_config.example.json")
+PLUGIN_SRC = os.path.join(REPO_ROOT, "plugin", "opencode.ts")
 
 
 def _make_hook_dir(tmp_root: str) -> str:
@@ -24,11 +28,16 @@ def _make_hook_dir(tmp_root: str) -> str:
     shutil.copy(SETUP_SH, os.path.join(hook_dir, "setup.sh"))
     shutil.copy(OTEL_HOOK_PY, os.path.join(hook_dir, "otel_hook.py"))
     shutil.copy(OTEL_CONFIG_EXAMPLE, os.path.join(hook_dir, "otel_config.example.json"))
+    # Copy the OpenCode plugin source so --opencode tests can find it.
+    if os.path.exists(PLUGIN_SRC):
+        plugin_dir = os.path.join(hook_dir, "plugin")
+        os.makedirs(plugin_dir, exist_ok=True)
+        shutil.copy(PLUGIN_SRC, os.path.join(plugin_dir, "opencode.ts"))
     return hook_dir
 
 
-def _run_setup(hook_dir: str, env=None) -> subprocess.CompletedProcess:
-    """Run setup.sh from *hook_dir*, capturing stdout/stderr.
+def _run_setup(hook_dir: str, args: Optional[List[str]] = None, env: Optional[Dict[str, str]] = None) -> subprocess.CompletedProcess:
+    """Run setup.sh from *hook_dir* with optional extra *args*, capturing stdout/stderr.
 
     Individual tests control PATH via *env* to determine whether otel-hook
     is visible.  Tests that check the global-preferred behavior inject a fake
@@ -40,8 +49,9 @@ def _run_setup(hook_dir: str, env=None) -> subprocess.CompletedProcess:
     if env:
         full_env.update(env)
 
+    cmd = ["bash", os.path.join(hook_dir, "setup.sh")] + (args or [])
     return subprocess.run(
-        ["bash", os.path.join(hook_dir, "setup.sh")],
+        cmd,
         capture_output=True,
         text=True,
         cwd=os.path.dirname(os.path.dirname(os.path.dirname(hook_dir))),  # tmp_root
@@ -107,4 +117,93 @@ class TestSetupShCommandSelection:
         cmd = cmds[0]
         assert "otel_hook.py" in cmd, (
             f"Expected local script fallback when otel-hook not found, got: {cmd!r}"
+        )
+
+
+class TestSetupShGlobalScoping:
+    """--global must only affect the explicitly selected IDE(s)."""
+
+    def _minimal_env(self, tmp_path) -> dict:
+        """Return an env dict with HOME set to tmp_path and a minimal PATH.
+
+        Setting HOME isolates global-install paths (~/.cursor, ~/.claude, etc.)
+        from the real home directory. A minimal PATH ensures no spurious
+        otel-hook binary leaks in.
+        """
+        python3_bin = shutil.which("python3") or "/usr/bin/python3"
+        python3_dir = os.path.dirname(python3_bin)
+        return {
+            "HOME": str(tmp_path),
+            "PATH": f"{python3_dir}:/usr/bin:/bin",
+        }
+
+    def test_global_without_ide_flag_errors(self, tmp_path):
+        """--global alone (no IDE flag) must exit non-zero with a clear error."""
+        hook_dir = _make_hook_dir(str(tmp_path))
+        result = _run_setup(hook_dir, args=["--global"], env=self._minimal_env(tmp_path))
+        assert result.returncode != 0, "Expected non-zero exit when --global used without IDE flag"
+        assert "--cursor" in result.stdout or "--cursor" in result.stderr, (
+            "Expected error message to mention IDE flags"
+        )
+
+    def test_cursor_global_only_affects_cursor(self, tmp_path):
+        """--cursor --global writes ~/.cursor/hooks.json but not ~/.claude/settings.json."""
+        hook_dir = _make_hook_dir(str(tmp_path))
+        env = self._minimal_env(tmp_path)
+
+        result = _run_setup(hook_dir, args=["--cursor", "--global"], env=env)
+        assert result.returncode == 0, result.stderr
+
+        # Global Cursor hooks.json must be created under the fake HOME
+        global_cursor = os.path.join(str(tmp_path), ".cursor", "hooks.json")
+        assert os.path.exists(global_cursor), (
+            f"Expected {global_cursor} to be created by --cursor --global"
+        )
+
+        # Claude settings must NOT be touched
+        global_claude = os.path.join(str(tmp_path), ".claude", "settings.json")
+        assert not os.path.exists(global_claude), (
+            "--cursor --global must not create Claude's settings.json"
+        )
+
+    def test_claude_global_only_affects_claude(self, tmp_path):
+        """--claude --global writes ~/.claude/settings.json but not ~/.cursor/hooks.json."""
+        hook_dir = _make_hook_dir(str(tmp_path))
+        env = self._minimal_env(tmp_path)
+
+        result = _run_setup(hook_dir, args=["--claude", "--global"], env=env)
+        assert result.returncode == 0, result.stderr
+
+        # Global Claude settings must be created under the fake HOME
+        global_claude = os.path.join(str(tmp_path), ".claude", "settings.json")
+        assert os.path.exists(global_claude), (
+            f"Expected {global_claude} to be created by --claude --global"
+        )
+
+        # Cursor global hooks.json must NOT be touched by a --claude --global run
+        global_cursor_hooks = os.path.join(str(tmp_path), ".cursor", "hooks.json")
+        assert not os.path.exists(global_cursor_hooks), (
+            "--claude --global must not create Cursor's global hooks.json"
+        )
+
+    def test_multi_ide_global_affects_only_selected(self, tmp_path):
+        """--cursor --claude --global installs globally for Cursor and Claude but not OpenCode."""
+        hook_dir = _make_hook_dir(str(tmp_path))
+        env = self._minimal_env(tmp_path)
+
+        result = _run_setup(hook_dir, args=["--cursor", "--claude", "--global"], env=env)
+        assert result.returncode == 0, result.stderr
+
+        # Both Cursor and Claude global files must exist
+        global_cursor = os.path.join(str(tmp_path), ".cursor", "hooks.json")
+        global_claude = os.path.join(str(tmp_path), ".claude", "settings.json")
+        assert os.path.exists(global_cursor), "Expected ~/.cursor/hooks.json for --cursor --global"
+        assert os.path.exists(global_claude), "Expected ~/.claude/settings.json for --claude --global"
+
+        # OpenCode global plugin dir must NOT be created
+        opencode_global_plugin = os.path.join(
+            str(tmp_path), ".config", "opencode", "plugins", "otel-hook.ts"
+        )
+        assert not os.path.exists(opencode_global_plugin), (
+            "--cursor --claude --global must not install OpenCode's global plugin"
         )
