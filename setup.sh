@@ -302,7 +302,9 @@ setup_opencode() {
     plugin_dir="$config_dir/plugins"
     echo "📦 OpenCode (global: $plugin_dir/otel-hook.ts)"
   else
-    plugin_dir="$(pwd)/.opencode/plugins"
+    # Derive project root from HOOK_DIR (matches Cursor/Claude behavior)
+    local project_root="$HOOK_DIR"
+    plugin_dir="$project_root/.opencode/plugins"
     echo "📦 OpenCode (project: $plugin_dir/otel-hook.ts)"
   fi
 
