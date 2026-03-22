@@ -142,8 +142,8 @@ if [[ -n "$DO_REINSTALL" ]]; then
     echo "❌ pipx not found. Install pipx and re-run with --reinstall."
     exit 1
   fi
-  echo "📦 Reinstalling package: pipx install --force ."
-  pipx install --force .
+  echo "📦 Reinstalling package: pipx install --force \"$HOOK_DIR\""
+  pipx install --force "$HOOK_DIR"
   echo "✅ Package reinstalled"
   echo ""
   # Refresh HOOK_CMD in case otel-hook just became available on PATH

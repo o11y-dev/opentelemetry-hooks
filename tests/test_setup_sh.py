@@ -225,8 +225,21 @@ class TestSetupShReinstall:
     def test_reinstall_without_pipx_errors(self, tmp_path):
         """--reinstall must exit non-zero with a clear error when pipx is not found."""
         hook_dir = _make_hook_dir(str(tmp_path))
-        # Use a PATH that has python3 but definitely no pipx.
-        env = self._minimal_env(tmp_path)
+
+        # Build a controlled fake PATH that contains only the minimal executables
+        # setup.sh needs (bash + python3) but deliberately omits pipx.
+        fake_bin = str(tmp_path / "no_pipx_bin")
+        os.makedirs(fake_bin, exist_ok=True)
+        python3_real = shutil.which("python3") or "/usr/bin/python3"
+        bash_real = shutil.which("bash") or "/bin/bash"
+        for name, real in [("python3", python3_real), ("bash", bash_real)]:
+            link = os.path.join(fake_bin, name)
+            if not os.path.exists(link):
+                os.symlink(real, link)
+        env = {
+            "HOME": str(tmp_path),
+            "PATH": fake_bin,
+        }
 
         result = _run_setup(hook_dir, args=["--cursor", "--reinstall"], env=env)
         assert result.returncode != 0, "Expected non-zero exit when pipx is not on PATH"
@@ -235,7 +248,7 @@ class TestSetupShReinstall:
         )
 
     def test_reinstall_calls_pipx_force(self, tmp_path):
-        """--reinstall must invoke `pipx install --force .` before hook registration."""
+        """--reinstall must invoke `pipx install --force <HOOK_DIR>` before hook registration."""
         hook_dir = _make_hook_dir(str(tmp_path))
 
         # Create a fake pipx that records its invocation and exits successfully.
@@ -259,12 +272,15 @@ class TestSetupShReinstall:
         result = _run_setup(hook_dir, args=["--cursor", "--reinstall"], env=env)
         assert result.returncode == 0, result.stderr
 
-        # The fake pipx should have been called with 'install --force .'
+        # The fake pipx should have been called with 'install --force <hook_dir>'
         assert os.path.exists(invocation_log), "pipx was never invoked"
         with open(invocation_log) as f:
             invocations = f.read()
-        assert "install --force ." in invocations, (
-            f"Expected 'install --force .' in pipx invocations, got: {invocations!r}"
+        assert "install --force" in invocations, (
+            f"Expected 'install --force' in pipx invocations, got: {invocations!r}"
+        )
+        assert hook_dir in invocations, (
+            f"Expected hook_dir path {hook_dir!r} in pipx invocations, got: {invocations!r}"
         )
 
     def test_reinstall_still_registers_hooks(self, tmp_path):
