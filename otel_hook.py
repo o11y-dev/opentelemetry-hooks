@@ -35,6 +35,8 @@ from typing import Optional, Tuple
 
 # Whether to attach OS/host attributes to every span in addition to resource attributes.
 # Defaults to False to avoid duplicate data and hot-path overhead.
+_CONSOLE_EXPORTER_REGISTERED = False
+
 _ATTACH_OS_ATTRIBUTES_PER_SPAN = os.getenv("IDE_HOOK_ATTACH_OS_PER_SPAN") == "1"
 
 # ---------------------------------------------------------------------------
@@ -175,6 +177,8 @@ except ImportError:
 # ---------------------------------------------------------------------------
 _TRACING_INITIALIZED = False
 _LOGS_INITIALIZED = False
+_FILE_EXPORTER_PATHS: set[str] = set()   # paths that already have a FileSpanExporter attached
+_CONSOLE_EXPORTER_REGISTERED = False  # True once a ConsoleSpanExporter has been attached
 _OTEL_LOG_HANDLER = None  # OTel LoggingHandler for OTLP log export
 _LOGGER = logging.getLogger("otel_hook")
 _CONFIG_DEFAULT = os.path.join(_HOOK_DIR, "otel_config.json")
@@ -1119,6 +1123,9 @@ def _init_sdk_logger_provider(resource_attrs: dict, disable_batch: bool) -> bool
 
 
 def _enable_console_exporter() -> None:
+    global _CONSOLE_EXPORTER_REGISTERED
+    if _CONSOLE_EXPORTER_REGISTERED:
+        return
     try:
         from opentelemetry.sdk.trace import TracerProvider
         from opentelemetry.sdk.trace.export import ConsoleSpanExporter, SimpleSpanProcessor
@@ -1128,6 +1135,7 @@ def _enable_console_exporter() -> None:
     provider = trace.get_tracer_provider()
     if isinstance(provider, TracerProvider):
         provider.add_span_processor(SimpleSpanProcessor(ConsoleSpanExporter()))
+        _CONSOLE_EXPORTER_REGISTERED = True
 
 
 def _enable_console_log_exporter() -> None:
@@ -1198,6 +1206,8 @@ class _FileSpanExporter:
 
 def _enable_file_exporter(path: str) -> None:
     """Add a file span exporter to the TracerProvider for local span persistence."""
+    if path in _FILE_EXPORTER_PATHS:
+        return
     try:
         from opentelemetry.sdk.trace import TracerProvider
         from opentelemetry.sdk.trace.export import SimpleSpanProcessor
@@ -1207,6 +1217,7 @@ def _enable_file_exporter(path: str) -> None:
     provider = trace.get_tracer_provider()
     if isinstance(provider, TracerProvider):
         provider.add_span_processor(SimpleSpanProcessor(_FileSpanExporter(path)))
+        _FILE_EXPORTER_PATHS.add(path)
 
 
 def _force_flush_provider(timeout_millis: int = 5000) -> None:
