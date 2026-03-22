@@ -227,7 +227,7 @@ mkdir -p .opencode/plugins
 cp plugin/opencode.ts .opencode/plugins/otel-hook.ts
 ```
 
-Restart OpenCode after installing. The plugin is auto-detected via the `source_app: "OpenCode"` field it includes in every payload — no extra environment variables required. `OPENCODE_CONFIG_DIR` is respected if set.
+Restart OpenCode after installing. The plugin is auto-detected via the `source_app: "OpenCode"` field it includes in every payload, so no additional environment variables are required for detection. For robustness, the bundled plugin also sets `IDE_OTEL_IDE_NAME=opencode` when invoking `otel-hook`, but this is an optional override. `OPENCODE_CONFIG_DIR` is respected if set.
 
 **Events captured:** `SessionStart`, `SessionEnd`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure` (detected via `metadata.exit`), `Stop`, `AfterFileEdit`. Bash, read, write, MCP, and subagent (`task`) tool calls all flow through the universal `tool.execute.before/after` hooks and appear as `PreToolUse`/`PostToolUse` with the appropriate `tool_name`.
 
