@@ -35,6 +35,9 @@ from typing import Optional, Tuple
 
 # Whether to attach OS/host attributes to every span in addition to resource attributes.
 # Defaults to False to avoid duplicate data and hot-path overhead.
+
+# Guard to prevent registering the console span exporter multiple times.
+_CONSOLE_EXPORTER_REGISTERED = False
 _ATTACH_OS_ATTRIBUTES_PER_SPAN = os.getenv("IDE_HOOK_ATTACH_OS_PER_SPAN") == "1"
 
 # ---------------------------------------------------------------------------
