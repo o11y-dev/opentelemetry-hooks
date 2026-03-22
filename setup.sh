@@ -13,6 +13,7 @@
 #   bash setup.sh --claude --global  # Claude Code global (~/.claude/settings.json)
 #   bash setup.sh --opencode         # OpenCode project-level (.opencode/plugins/)
 #   bash setup.sh --opencode --global # OpenCode global (~/.config/opencode/plugins/)
+#   bash setup.sh --reinstall        # pipx install --force . then register hooks
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -55,14 +56,16 @@ CURSOR_GLOBAL=""
 CLAUDE_GLOBAL=""
 OPENCODE_GLOBAL=""
 WANT_GLOBAL=""
+DO_REINSTALL=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --cursor)   DO_CURSOR=1; shift ;;
-    --claude)   DO_CLAUDE=1; shift ;;
-    --opencode) DO_OPENCODE=1; shift ;;
-    --global)   WANT_GLOBAL=1; shift ;;
-    *)          echo "Unknown option: $1"; exit 1 ;;
+    --cursor)    DO_CURSOR=1; shift ;;
+    --claude)    DO_CLAUDE=1; shift ;;
+    --opencode)  DO_OPENCODE=1; shift ;;
+    --global)    WANT_GLOBAL=1; shift ;;
+    --reinstall) DO_REINSTALL=1; shift ;;
+    *)           echo "Unknown option: $1"; exit 1 ;;
   esac
 done
 
@@ -132,6 +135,22 @@ fi
 echo "✅ python3 found: $(python3 --version 2>&1)"
 echo "✅ hook command: $HOOK_CMD"
 echo ""
+
+# ─── Optional: reinstall package via pipx ───────────────────────────────────
+if [[ -n "$DO_REINSTALL" ]]; then
+  if ! command -v pipx &>/dev/null; then
+    echo "❌ pipx not found. Install pipx and re-run with --reinstall."
+    exit 1
+  fi
+  echo "📦 Reinstalling package: pipx install --force \"$HOOK_DIR\""
+  pipx install --force "$HOOK_DIR"
+  echo "✅ Package reinstalled"
+  echo ""
+  # Refresh HOOK_CMD in case otel-hook just became available on PATH
+  if command -v otel-hook &>/dev/null; then
+    HOOK_CMD="otel-hook"
+  fi
+fi
 
 # ─── Cursor IDE setup ───────────────────────────────────────────────────────
 setup_cursor() {
