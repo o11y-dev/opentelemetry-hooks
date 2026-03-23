@@ -73,6 +73,18 @@ def _hooks_json_commands(tmp_root: str) -> list[str]:
     return list(commands)
 
 
+def _hooks_json_doc(tmp_root: str) -> dict:
+    hooks_json = os.path.join(tmp_root, ".cursor", "hooks.json")
+    with open(hooks_json) as f:
+        return json.load(f)
+
+
+def _claude_settings_doc(tmp_root: str) -> dict:
+    settings_json = os.path.join(tmp_root, ".claude", "settings.json")
+    with open(settings_json) as f:
+        return json.load(f)
+
+
 class TestSetupShCommandSelection:
     """setup.sh must prefer the global otel-hook command when available."""
 
@@ -208,6 +220,90 @@ class TestSetupShGlobalScoping:
         assert not os.path.exists(opencode_global_plugin), (
             "--cursor --claude --global must not install OpenCode's global plugin"
         )
+
+
+class TestSetupShIdeIdentityEnv:
+    def _minimal_env(self, tmp_path) -> dict:
+        python3_bin = shutil.which("python3") or "/usr/bin/python3"
+        python3_dir = os.path.dirname(python3_bin)
+        return {
+            "HOME": str(tmp_path),
+            "PATH": f"{python3_dir}:/usr/bin:/bin",
+        }
+
+    def test_cursor_new_hooks_include_explicit_ide_env(self, tmp_path):
+        hook_dir = _make_hook_dir(str(tmp_path))
+        result = _run_setup(hook_dir, args=["--cursor"], env=self._minimal_env(tmp_path))
+        assert result.returncode == 0, result.stderr
+
+        doc = _hooks_json_doc(str(tmp_path))
+        for event_hooks in doc["hooks"].values():
+            assert event_hooks == [{
+                "command": event_hooks[0]["command"],
+                "env": {"IDE_OTEL_IDE_NAME": "cursor"},
+            }]
+
+    def test_cursor_merge_adds_explicit_ide_env_to_existing_command(self, tmp_path):
+        hook_dir = _make_hook_dir(str(tmp_path))
+        hooks_json = tmp_path / ".cursor" / "hooks.json"
+        hooks_json.parent.mkdir(parents=True, exist_ok=True)
+        hooks_json.write_text(json.dumps({
+            "version": 1,
+            "hooks": {
+                "sessionStart": [{"command": "python3 /tmp/other.py"}],
+                "preToolUse": [{"command": "python3 %s/otel_hook.py" % hook_dir}],
+            },
+        }))
+
+        result = _run_setup(hook_dir, args=["--cursor"], env=self._minimal_env(tmp_path))
+        assert result.returncode == 0, result.stderr
+
+        doc = _hooks_json_doc(str(tmp_path))
+        matching = [h for h in doc["hooks"]["preToolUse"] if h["command"] == "python3 %s/otel_hook.py" % hook_dir]
+        assert matching == [{
+            "command": "python3 %s/otel_hook.py" % hook_dir,
+            "env": {"IDE_OTEL_IDE_NAME": "cursor"},
+        }]
+
+    def test_claude_new_hooks_include_explicit_ide_env(self, tmp_path):
+        hook_dir = _make_hook_dir(str(tmp_path))
+        result = _run_setup(hook_dir, args=["--claude"], env=self._minimal_env(tmp_path))
+        assert result.returncode == 0, result.stderr
+
+        doc = _claude_settings_doc(str(tmp_path))
+        for event_entries in doc["hooks"].values():
+            for event_entry in event_entries:
+                for hook in event_entry["hooks"]:
+                    if hook["command"].endswith("otel_hook.py"):
+                        assert hook["env"] == {"IDE_OTEL_IDE_NAME": "claude"}
+
+    def test_claude_merge_adds_explicit_ide_env_to_existing_command(self, tmp_path):
+        hook_dir = _make_hook_dir(str(tmp_path))
+        settings_json = tmp_path / ".claude" / "settings.json"
+        settings_json.parent.mkdir(parents=True)
+        settings_json.write_text(json.dumps({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "*",
+                    "hooks": [{"type": "command", "command": "python3 %s/otel_hook.py" % hook_dir}],
+                }],
+            },
+        }))
+
+        result = _run_setup(hook_dir, args=["--claude"], env=self._minimal_env(tmp_path))
+        assert result.returncode == 0, result.stderr
+
+        doc = _claude_settings_doc(str(tmp_path))
+        matching = []
+        for event_entry in doc["hooks"]["PreToolUse"]:
+            for hook in event_entry["hooks"]:
+                if hook["command"] == "python3 %s/otel_hook.py" % hook_dir:
+                    matching.append(hook)
+        assert matching == [{
+            "type": "command",
+            "command": "python3 %s/otel_hook.py" % hook_dir,
+            "env": {"IDE_OTEL_IDE_NAME": "claude"},
+        }]
 
 
 class TestSetupShReinstall:

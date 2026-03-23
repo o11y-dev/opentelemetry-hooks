@@ -493,6 +493,41 @@ def _detect_client_version(data: dict, ide: str) -> Optional[str]:
     return None
 
 
+def _detect_agent_engine(data: dict) -> Optional[str]:
+    """Detect an inner agent engine without consulting IDE_OTEL_IDE_NAME."""
+    explicit = _normalize_ide_name(_first_present(data, ("agent_engine", "agentEngine", "engine", "engine_name")))
+    if explicit:
+        return explicit
+
+    reported = _normalize_ide_name(_first_present(data, ("ide_name", "ide", "client", "source_app")))
+    if reported:
+        return reported
+
+    if os.getenv("CLAUDE_CODE_ENTRYPOINT"):
+        return "claude"
+
+    if data.get("transcript_path") or data.get("permission_mode") or data.get("notification_type"):
+        return "claude"
+
+    raw_event = _first_present(data, ("hook_event_name", "hook_event_type", "event"))
+    if isinstance(raw_event, str) and raw_event and raw_event[0].isupper():
+        return "claude"
+
+    return None
+
+
+def _set_client_identity_attributes(
+    span, ide: str, data: Optional[dict] = None, agent_engine: Optional[str] = None,
+) -> Optional[str]:
+    """Attach outer IDE identity and, when distinct, the inner agent engine."""
+    span.set_attribute("gen_ai.client.name", ide)
+    resolved_engine = agent_engine if agent_engine is not None else _detect_agent_engine(data or {})
+    if resolved_engine and resolved_engine != ide:
+        span.set_attribute("gen_ai.client.agent_engine", resolved_engine)
+        return resolved_engine
+    return None
+
+
 def _normalize_input_data(data: dict) -> dict:
     """Add snake_case aliases for compatible hook payloads when needed."""
     normalized = None
@@ -1570,24 +1605,21 @@ def _detect_ide(data: dict) -> str:
     do not expose enough identifying fields.
 
     Detection order (highest to lowest confidence):
-    1. Explicit override via env var or self-reported field
-    2. Claude Code env var (CLAUDE_CODE_ENTRYPOINT set by Claude Code)
-    3. Claude-specific payload fields (transcript_path, permission_mode, etc.)
-    4. PascalCase hook_event_name (Claude always uses PascalCase; Cursor uses camelCase)
-    5. Cursor-specific fields (conversation_id, generation_id, composer_mode, etc.)
-    6. Workspace .cursor directory presence
-    7. Copilot (session_id without other indicators)
-    8. Default: cursor
+    1. Explicit override via IDE_OTEL_IDE_NAME
+    2. Self-reported payload fields (ide_name, ide, client, source_app)
+    3. Heuristic fallback (Claude env/payload/event casing, Cursor fields, workspace hints)
+    4. Copilot (session_id without other indicators)
+    5. Default: cursor
     """
-    # Level 1: Explicit override (env var or self-reported field)
-    override = _normalize_ide_name(
-        os.getenv("IDE_OTEL_IDE_NAME")
-        or _first_present(data, ("ide_name", "ide", "client", "source_app"))
-    )
+    override = _normalize_ide_name(os.getenv("IDE_OTEL_IDE_NAME"))
     if override:
         return override
 
-    # Level 2: CLAUDE_CODE_ENTRYPOINT is set by Claude Code when running hooks
+    reported = _normalize_ide_name(_first_present(data, ("ide_name", "ide", "client", "source_app")))
+    if reported:
+        return reported
+
+    # Level 3: CLAUDE_CODE_ENTRYPOINT is set by Claude Code when running hooks
     if os.getenv("CLAUDE_CODE_ENTRYPOINT"):
         return "claude"
 
@@ -1596,14 +1628,14 @@ def _detect_ide(data: dict) -> str:
     if data.get("transcript_path") or data.get("permission_mode") or data.get("notification_type"):
         return "claude"
 
-    # Level 4: PascalCase hook_event_name is a strong Claude Code signal.
+    # Level 3: PascalCase hook_event_name is a strong Claude Code signal.
     # Claude Code always emits PascalCase names (PreToolUse, SessionStart);
     # Cursor always emits camelCase (preToolUse, sessionStart).
     raw_event = _first_present(data, ("hook_event_name", "hook_event_type", "event"))
     if isinstance(raw_event, str) and raw_event and raw_event[0].isupper():
         return "claude"
 
-    # Level 5: Cursor-specific fields (check before session_id).
+    # Level 3: Cursor-specific fields (check before session_id).
     # Note: subagent_type is intentionally excluded — Claude Code also sends it
     # in SubagentStart events with snake_case field names.
     if data.get("conversation_id") or data.get("generation_id"):
@@ -1613,7 +1645,7 @@ def _detect_ide(data: dict) -> str:
     if any(data.get(key) for key in cursor_indicators):
         return "cursor"
 
-    # Level 6: Workspace .cursor directory presence
+    # Level 3: Workspace .cursor directory presence
     try:
         cwd = data.get("cwd") or os.getcwd()
         if ".cursor" in cwd or os.path.exists(os.path.join(cwd, ".cursor")):
@@ -1621,7 +1653,7 @@ def _detect_ide(data: dict) -> str:
     except Exception:
         pass
 
-    # Level 7: Copilot only sends session_id without other indicators
+    # Level 4: Copilot only sends session_id without other indicators
     if data.get("session_id"):
         return "copilot"
 
@@ -1681,6 +1713,9 @@ def _create_session_context(session_key: str, data: dict, ide: str) -> dict:
         "generation_count": 0,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
+    agent_engine = _detect_agent_engine(data)
+    if agent_engine and agent_engine != ide:
+        ctx["agent_engine"] = agent_engine
     lock_path = os.path.join(_LOCK_DIR, f"{re.sub(r'[^A-Za-z0-9_.-]+', '_', session_key)}.lock")
     with _acquire_lock(lock_path):
         _atomic_write_json(_session_path(session_key), ctx)
@@ -1993,7 +2028,7 @@ def _apply_genai_semconv(span, event_name: str, data: dict, ide: str) -> None:
 def _populate_span(span, event_name: str, data: dict, ide: str) -> None:
     """Attach all attributes to a span and emit OTel log records."""
     span.set_attribute("gen_ai.client.hook.event", event_name)
-    span.set_attribute("gen_ai.client.name", ide)
+    _set_client_identity_attributes(span, ide, data=data)
 
     # Optionally attach OS / host attributes on every span.
     # These are already present as resource attributes via OTEL_RESOURCE_ATTRIBUTES,
@@ -2087,7 +2122,7 @@ def _flush_generation(tracer, gen_key: str, session_ctx: Optional[dict], ide: st
     with _span_context(gen_span):
         gen_span.set_attribute("gen_ai.client.generation_id", gen_key)
         gen_span.set_attribute("gen_ai.client.event.count", len(batch))
-        gen_span.set_attribute("gen_ai.client.name", ide)
+        _set_client_identity_attributes(gen_span, ide, agent_engine=(session_ctx or {}).get("agent_engine"))
         _log_with_span(_LOGGER, logging.INFO, gen_span, "Generation span: gen_key=%s events=%d", gen_key, len(batch))
 
         for idx, entry in enumerate(batch):
@@ -2127,7 +2162,7 @@ def _flush_session(tracer, session_key: str, session_ctx: dict, ide: str) -> Non
     )
     with _span_context(session_span):
         session_span.set_attribute("gen_ai.client.session_id", session_key)
-        session_span.set_attribute("gen_ai.client.name", ide)
+        _set_client_identity_attributes(session_span, ide, agent_engine=session_ctx.get("agent_engine"))
         session_span.set_attribute("gen_ai.client.generation_count", session_ctx.get("generation_count", 0))
         session_span.set_attribute("gen_ai.client.session.duration_ms", (end_ns - start_ns) // 1_000_000)
         _log_with_span(_LOGGER, logging.INFO, session_span, "Session span: session=%s", session_key)
@@ -2173,6 +2208,10 @@ def main() -> int:
     try:
         sk = _session_key(data)
         session_ctx = _load_session_context(sk)
+        agent_engine = _detect_agent_engine(data)
+        if sk and session_ctx and agent_engine and agent_engine != ide and session_ctx.get("agent_engine") != agent_engine:
+            session_ctx["agent_engine"] = agent_engine
+            _write_session_context(sk, session_ctx)
 
         # ── Batch mode: session-level trace hierarchy ──
         if _batch_enabled():

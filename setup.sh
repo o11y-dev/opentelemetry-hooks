@@ -155,6 +155,7 @@ fi
 # ─── Cursor IDE setup ───────────────────────────────────────────────────────
 setup_cursor() {
   local hooks_json
+  local ide_name="cursor"
 
   if [[ -n "$CURSOR_GLOBAL" ]]; then
     hooks_json="$HOME/.cursor/hooks.json"
@@ -172,13 +173,15 @@ setup_cursor() {
 
     python3 -c "
 import json, sys
-events = sys.argv[1:]
+ide_name = sys.argv[1]
+hook_cmd = sys.argv[2]
+events = sys.argv[3:]
 hooks = {}
 for event in events:
-    hooks[event] = [{'command': '$HOOK_CMD'}]
+    hooks[event] = [{'command': hook_cmd, 'env': {'IDE_OTEL_IDE_NAME': ide_name}}]
 doc = {'version': 1, 'hooks': hooks}
 print(json.dumps(doc, indent=2))
-" "${CURSOR_EVENTS[@]}" > "$hooks_json"
+" "$ide_name" "$HOOK_CMD" "${CURSOR_EVENTS[@]}" > "$hooks_json"
 
     echo "  ✅ Created $hooks_json with all OTel hook events"
   else
@@ -188,42 +191,59 @@ print(json.dumps(doc, indent=2))
 import json, sys
 
 hooks_path = sys.argv[1]
-hook_cmd = sys.argv[2]
-events = sys.argv[3:]
+ide_name = sys.argv[2]
+hook_cmd = sys.argv[3]
+events = sys.argv[4:]
 
 with open(hooks_path, 'r') as f:
     doc = json.load(f)
 
 hooks = doc.setdefault('hooks', {})
 added = []
+updated = []
 skipped = []
 
 for event in events:
     event_hooks = hooks.setdefault(event, [])
-    already = any(h.get('command') == hook_cmd for h in event_hooks)
-    if already:
-        skipped.append(event)
+    matches = [h for h in event_hooks if h.get('command') == hook_cmd]
+    if matches:
+        changed = False
+        for hook in matches:
+            env = hook.get('env')
+            if not isinstance(env, dict):
+                env = {}
+                hook['env'] = env
+            if env.get('IDE_OTEL_IDE_NAME') != ide_name:
+                env['IDE_OTEL_IDE_NAME'] = ide_name
+                changed = True
+        if changed:
+            updated.append(event)
+        else:
+            skipped.append(event)
     else:
-        event_hooks.append({'command': hook_cmd})
+        event_hooks.append({'command': hook_cmd, 'env': {'IDE_OTEL_IDE_NAME': ide_name}})
         added.append(event)
-
+ 
 with open(hooks_path, 'w') as f:
     json.dump(doc, f, indent=2)
     f.write('\n')
 
 if added:
     print(f'  ✅ Added OTel hook to {len(added)} events: {\", \".join(added)}')
+if updated:
+    print(f'  ✅ Added IDE_OTEL_IDE_NAME to {len(updated)} existing events: {\", \".join(updated)}')
 if skipped:
     print(f'  ⏭️  Already registered in {len(skipped)} events (no changes)')
-if not added:
+if not added and not updated:
     print('  ✅ All hook events already registered — nothing to do')
-" "$hooks_json" "$HOOK_CMD" "${CURSOR_EVENTS[@]}"
+ " "$hooks_json" "$ide_name" "$HOOK_CMD" "${CURSOR_EVENTS[@]}"
   fi
 }
 
 # ─── Claude Code setup ──────────────────────────────────────────────────────
 setup_claude() {
   local settings_json
+  local ide_name="claude"
 
   if [[ -n "$CLAUDE_GLOBAL" ]]; then
     settings_json="$HOME/.claude/settings.json"
@@ -242,8 +262,9 @@ setup_claude() {
 import json, sys, os
 
 settings_path = sys.argv[1]
-hook_cmd = sys.argv[2]
-events = sys.argv[3:]
+ide_name = sys.argv[2]
+hook_cmd = sys.argv[3]
+events = sys.argv[4:]
 matcher_events = set('$CLAUDE_MATCHER_EVENTS'.split())
 
 # Load existing settings or start fresh
@@ -258,29 +279,39 @@ else:
 
 hooks = settings.setdefault('hooks', {})
 added = []
+updated = []
 skipped = []
 
 for event in events:
     event_list = hooks.setdefault(event, [])
 
     # Check if otel-hook is already registered for this event
-    already = False
+    matches = []
     for entry in event_list:
         for h in entry.get('hooks', []):
             if h.get('command') == hook_cmd:
-                already = True
-                break
-        if already:
-            break
+                matches.append(h)
 
-    if already:
-        skipped.append(event)
+    if matches:
+        changed = False
+        for hook in matches:
+            env = hook.get('env')
+            if not isinstance(env, dict):
+                env = {}
+                hook['env'] = env
+            if env.get('IDE_OTEL_IDE_NAME') != ide_name:
+                env['IDE_OTEL_IDE_NAME'] = ide_name
+                changed = True
+        if changed:
+            updated.append(event)
+        else:
+            skipped.append(event)
         continue
 
     # Build the hook entry in Claude Code format
     hook_entry = {
         'hooks': [
-            {'type': 'command', 'command': hook_cmd}
+            {'type': 'command', 'command': hook_cmd, 'env': {'IDE_OTEL_IDE_NAME': ide_name}}
         ]
     }
 
@@ -297,11 +328,13 @@ with open(settings_path, 'w') as f:
 
 if added:
     print(f'  ✅ Added OTel hook to {len(added)} events: {\", \".join(added)}')
+if updated:
+    print(f'  ✅ Added IDE_OTEL_IDE_NAME to {len(updated)} existing events: {\", \".join(updated)}')
 if skipped:
     print(f'  ⏭️  Already registered in {len(skipped)} events (no changes)')
-if not added:
+if not added and not updated:
     print('  ✅ All hook events already registered — nothing to do')
-" "$settings_json" "$HOOK_CMD" "${CLAUDE_EVENTS[@]}"
+ " "$settings_json" "$ide_name" "$HOOK_CMD" "${CLAUDE_EVENTS[@]}"
 }
 
 # ─── OpenCode setup ──────────────────────────────────────────────────────────

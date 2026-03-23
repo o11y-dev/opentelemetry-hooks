@@ -24,7 +24,7 @@ IDE Event → stdin (JSON) → otel-hook → OpenTelemetry SDK → OTLP Backend
 
 ## Features
 
-- **Multi-IDE Support**: One script, multiple hook providers — auto-detects Cursor, GitHub Copilot, and Claude Code from hook input fields, treats Cursor IDE / CLI as the same Cursor hook format, and supports explicit `IDE_OTEL_IDE_NAME` / self-reported client-name overrides for labels such as GitHub Copilot Chat, Anthropic Claude Code, and CLI / IDE suffix variants of supported names (for example `GitHub Copilot CLI`, `Claude Code CLI`, `OpenCode CLI`, `Cursor IDE`).
+- **Multi-IDE Support**: One script, multiple hook providers — `setup.sh` now writes an explicit `IDE_OTEL_IDE_NAME` into generated hook configs for Cursor and Claude Code, the bundled examples do the same for Copilot/Claude/Cursor, and the runtime falls back to self-reported fields or heuristics only when an explicit identity is unavailable.
 
 - **Session-level Traces**: Groups all events within a session into a single trace with a 3-tier hierarchy:
 
@@ -115,6 +115,8 @@ That's it. The script will:
 2. Create `otel_config.json` from the example template (if missing)
 3. Bootstrap the Python venv in the background (~30s on first run)
 
+Each generated Cursor hook entry includes `env.IDE_OTEL_IDE_NAME=cursor`, so nested agents still export `gen_ai.client.name=cursor` even if the inner engine emits Claude-specific signals.
+
 Then edit your endpoint config and restart Cursor:
 
 ```bash
@@ -160,6 +162,7 @@ cp .cursor/hooks/opentelemetry-hook/examples/copilot-hooks.example.json .github/
 ```
 
 Replace `{{SCRIPT_PATH}}` with the hook command. For a copied-source checkout the default is `python3 .cursor/hooks/opentelemetry-hook/otel_hook.py`; use `otel-hook` only when the package is installed via pipx or pip.
+The bundled example already wraps the command with `IDE_OTEL_IDE_NAME=copilot`.
 See [GitHub Copilot hooks docs](https://docs.github.com/en/copilot/concepts/agents/coding-agent/about-hooks).
 
 #### Claude Code
@@ -178,8 +181,8 @@ python3 .cursor/hooks/opentelemetry-hook/otel_hook.py
 otel-hook
 ```
 
-If you want to force the IDE label explicitly, you can wrap the command with `env IDE_OTEL_IDE_NAME=claude`.
-Claude Code is auto-detected from hook metadata such as `session_id`, `transcript_path`, `permission_mode`, and `notification_type`. The camelCase alias handling is mainly for compatible third-party hook runners and mixed payload formats.
+The bundled Claude example and `setup.sh --claude` both write `IDE_OTEL_IDE_NAME=claude` into the hook config automatically.
+Claude Code is auto-detected from hook metadata such as `session_id`, `transcript_path`, `permission_mode`, and `notification_type` only as a fallback. The camelCase alias handling is mainly for compatible third-party hook runners and mixed payload formats.
 
 #### Antigravity
 
@@ -541,7 +544,8 @@ Requires the [Datadog Agent](https://docs.datadoghq.com/opentelemetry/) with OTL
 | Attribute | Description |
 |-----------|-------------|
 | `gen_ai.client.hook.event` | Canonical event name (PascalCase) |
-| `gen_ai.client.name` | Detected IDE (`cursor`, `copilot`) |
+| `gen_ai.client.name` | Outer IDE or hook host (`cursor`, `copilot`, `claude`, `opencode`, etc.) |
+| `gen_ai.client.agent_engine` | Inner agent engine when it differs from the outer IDE (for example Cursor running Claude Code) |
 | `gen_ai.client.session_id` | Session identifier |
 | `gen_ai.client.generation_id` | Generation identifier (Cursor) |
 | `gen_ai.client.workspace` | Workspace / working directory |
@@ -647,7 +651,9 @@ The hook auto-detects which IDE is calling it:
 | `transcript_path`, `permission_mode`, or `notification_type` | Claude Code |
 | `session_id` only (no Cursor-specific fields) | GitHub Copilot |
 
-The detected IDE is recorded on spans as the `gen_ai.client.name` attribute and is also exported as the `gen_ai.system` resource attribute via `OTEL_RESOURCE_ATTRIBUTES` for backward compatibility. When the hook can infer a provider from the payload, it additionally sets `gen_ai.provider.name` as the canonical provider attribute (v1.37+).
+Detection order is: (1) explicit `IDE_OTEL_IDE_NAME`, (2) self-reported payload fields, then (3) heuristics. `setup.sh` writes the explicit env var into generated Cursor and Claude configs so heuristics are mainly a compatibility fallback for older/manual installs.
+
+The detected outer IDE is recorded on spans as `gen_ai.client.name` and is also exported as the `gen_ai.system` resource attribute via `OTEL_RESOURCE_ATTRIBUTES` for backward compatibility. When nested signals indicate a different inner engine (for example Cursor hosting Claude Code), the hook additionally records `gen_ai.client.agent_engine`. When the hook can infer a provider from the payload, it also sets `gen_ai.provider.name` as the canonical provider attribute (v1.37+).
 
 ## File Structure
 
