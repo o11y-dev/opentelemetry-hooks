@@ -499,10 +499,6 @@ def _detect_agent_engine(data: dict) -> Optional[str]:
     if explicit:
         return explicit
 
-    reported = _normalize_ide_name(_first_present(data, ("ide_name", "ide", "client", "source_app")))
-    if reported:
-        return reported
-
     if os.getenv("CLAUDE_CODE_ENTRYPOINT"):
         return "claude"
 
@@ -512,6 +508,10 @@ def _detect_agent_engine(data: dict) -> Optional[str]:
     raw_event = _first_present(data, ("hook_event_name", "hook_event_type", "event"))
     if isinstance(raw_event, str) and raw_event and raw_event[0].isupper():
         return "claude"
+
+    reported = _normalize_ide_name(_first_present(data, ("ide_name", "ide", "client", "source_app")))
+    if reported:
+        return reported
 
     return None
 

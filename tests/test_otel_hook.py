@@ -270,6 +270,10 @@ class TestDetectAgentEngine:
         monkeypatch.setenv("CLAUDE_CODE_ENTRYPOINT", "1")
         assert otel_hook._detect_agent_engine({"session_id": "sess-1"}) == "claude"
 
+    def test_detects_claude_when_outer_cursor_ide_present(self, monkeypatch):
+        monkeypatch.setenv("CLAUDE_CODE_ENTRYPOINT", "1")
+        assert otel_hook._detect_agent_engine({"client": "Cursor IDE", "session_id": "sess-1"}) == "claude"
+
     def test_returns_none_without_engine_signal(self):
         assert otel_hook._detect_agent_engine({"session_id": "sess-1"}) is None
 

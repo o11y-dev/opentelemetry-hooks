@@ -249,10 +249,10 @@ class TestSetupShIdeIdentityEnv:
 
         doc = _hooks_json_doc(str(tmp_path))
         for event_hooks in doc["hooks"].values():
-            assert event_hooks == [{
-                "command": event_hooks[0]["command"],
-                "env": {"IDE_OTEL_IDE_NAME": "cursor"},
-            }]
+            assert len(event_hooks) == 1
+            hook = event_hooks[0]
+            assert "command" in hook and hook["command"]
+            assert hook["env"] == {"IDE_OTEL_IDE_NAME": "cursor"}
 
     def test_cursor_merge_adds_explicit_ide_env_to_existing_command(self, tmp_path):
         hook_dir = _make_hook_dir(str(tmp_path))
