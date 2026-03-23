@@ -236,7 +236,7 @@ if skipped:
     print(f'  ⏭️  Already registered in {len(skipped)} events (no changes)')
 if not added and not updated:
     print('  ✅ All hook events already registered — nothing to do')
- " "$hooks_json" "$ide_name" "$HOOK_CMD" "${CURSOR_EVENTS[@]}"
+" "$hooks_json" "$ide_name" "$HOOK_CMD" "${CURSOR_EVENTS[@]}"
   fi
 }
 
@@ -334,7 +334,7 @@ if skipped:
     print(f'  ⏭️  Already registered in {len(skipped)} events (no changes)')
 if not added and not updated:
     print('  ✅ All hook events already registered — nothing to do')
- " "$settings_json" "$ide_name" "$HOOK_CMD" "${CLAUDE_EVENTS[@]}"
+" "$settings_json" "$ide_name" "$HOOK_CMD" "${CLAUDE_EVENTS[@]}"
 }
 
 # ─── OpenCode setup ──────────────────────────────────────────────────────────

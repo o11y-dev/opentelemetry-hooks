@@ -519,7 +519,11 @@ def _detect_agent_engine(data: dict) -> Optional[str]:
 def _set_client_identity_attributes(
     span, ide: str, data: Optional[dict] = None, agent_engine: Optional[str] = None,
 ) -> Optional[str]:
-    """Attach outer IDE identity and, when distinct, the inner agent engine."""
+    """Attach outer IDE identity and, when distinct, the inner agent engine.
+
+    Returns the resolved inner engine when one is detected and differs from the
+    outer IDE; otherwise returns ``None``.
+    """
     span.set_attribute("gen_ai.client.name", ide)
     resolved_engine = agent_engine if agent_engine is not None else _detect_agent_engine(data or {})
     if resolved_engine and resolved_engine != ide:
