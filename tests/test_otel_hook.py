@@ -251,11 +251,31 @@ class TestDetectIDE:
     def test_antigravity_cli_self_reported_name(self):
         assert otel_hook._detect_ide({"source_app": "Anti Gravity CLI"}) == "antigravity"
 
+    def test_self_reported_name_beats_claude_heuristics(self, monkeypatch):
+        monkeypatch.setenv("CLAUDE_CODE_ENTRYPOINT", "1")
+        assert otel_hook._detect_ide({"client": "Cursor IDE", "session_id": "sess-1"}) == "cursor"
+
     def test_empty_defaults_cursor(self):
         # Default when no IDE signals present
         with mock.patch("os.getcwd", return_value="/tmp/test"):
             with mock.patch("os.path.exists", return_value=False):
                 assert otel_hook._detect_ide({}) == "cursor"
+
+
+class TestDetectAgentEngine:
+    def test_detects_claude_from_self_reported_payload(self):
+        assert otel_hook._detect_agent_engine({"client": "Claude Code"}) == "claude"
+
+    def test_detects_claude_from_heuristics(self, monkeypatch):
+        monkeypatch.setenv("CLAUDE_CODE_ENTRYPOINT", "1")
+        assert otel_hook._detect_agent_engine({"session_id": "sess-1"}) == "claude"
+
+    def test_detects_claude_when_outer_cursor_ide_present(self, monkeypatch):
+        monkeypatch.setenv("CLAUDE_CODE_ENTRYPOINT", "1")
+        assert otel_hook._detect_agent_engine({"client": "Cursor IDE", "session_id": "sess-1"}) == "claude"
+
+    def test_returns_none_without_engine_signal(self):
+        assert otel_hook._detect_agent_engine({"session_id": "sess-1"}) is None
 
 
 # ── OpenCode plugin payload handling ──────────────────────────────────────
@@ -691,6 +711,34 @@ class TestGenAISemconv:
         attrs = self._attrs(span)
         assert attrs["gen_ai.provider.name"] == "openai"
         assert attrs["gen_ai.system"] == "cursor"
+
+
+class TestClientIdentityAttributes:
+    @staticmethod
+    def _attrs(span):
+        return {
+            args[0]: args[1]
+            for args, _kwargs in (call for call in span.set_attribute.call_args_list)
+        }
+
+    def test_sets_nested_agent_engine_when_distinct_from_outer_ide(self, monkeypatch):
+        monkeypatch.setenv("CLAUDE_CODE_ENTRYPOINT", "1")
+        span = mock.MagicMock()
+
+        otel_hook._set_client_identity_attributes(span, "cursor", data={"session_id": "sess-1"})
+
+        attrs = self._attrs(span)
+        assert attrs["gen_ai.client.name"] == "cursor"
+        assert attrs["gen_ai.client.agent_engine"] == "claude"
+
+    def test_omits_agent_engine_when_same_as_outer_ide(self):
+        span = mock.MagicMock()
+
+        otel_hook._set_client_identity_attributes(span, "claude", data={"client": "Claude Code"})
+
+        attrs = self._attrs(span)
+        assert attrs["gen_ai.client.name"] == "claude"
+        assert "gen_ai.client.agent_engine" not in attrs
 
 
 # ── Log endpoint derivation ───────────────────────────────────────────────
