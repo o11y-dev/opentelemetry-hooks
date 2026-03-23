@@ -162,7 +162,7 @@ cp .cursor/hooks/opentelemetry-hook/examples/copilot-hooks.example.json .github/
 ```
 
 Replace `{{SCRIPT_PATH}}` with the hook command. For a copied-source checkout the default is `python3 .cursor/hooks/opentelemetry-hook/otel_hook.py`; use `otel-hook` only when the package is installed via pipx or pip.
-The bundled example already wraps the command with `IDE_OTEL_IDE_NAME=copilot`.
+The bundled example already wraps every Copilot hook command with `IDE_OTEL_IDE_NAME=copilot`, so the hook config itself is the source of truth and payload heuristics are only a fallback.
 See [GitHub Copilot hooks docs](https://docs.github.com/en/copilot/concepts/agents/coding-agent/about-hooks).
 
 #### Claude Code
@@ -230,7 +230,7 @@ mkdir -p .opencode/plugins
 cp plugin/opencode.ts .opencode/plugins/otel-hook.ts
 ```
 
-Restart OpenCode after installing. The plugin is auto-detected via the `source_app: "OpenCode"` field it includes in every payload, so no additional environment variables are required for detection. For robustness, the bundled plugin also sets `IDE_OTEL_IDE_NAME=opencode` when invoking `otel-hook`, but this is an optional override. `OPENCODE_CONFIG_DIR` is respected if set.
+Restart OpenCode after installing. The bundled plugin — including the copy installed by `setup.sh --opencode` — invokes `otel-hook` with `IDE_OTEL_IDE_NAME=opencode`, so the plugin config is the primary identity signal. Its `source_app: "OpenCode"` payload field remains as a compatibility fallback. `OPENCODE_CONFIG_DIR` is respected if set.
 
 **Events captured:** `SessionStart`, `SessionEnd`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure` (detected via `metadata.exit`), `Stop`, `AfterFileEdit`. Bash, read, write, MCP, and subagent (`task`) tool calls all flow through the universal `tool.execute.before/after` hooks and appear as `PreToolUse`/`PostToolUse` with the appropriate `tool_name`.
 

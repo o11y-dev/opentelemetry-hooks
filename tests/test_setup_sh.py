@@ -18,6 +18,7 @@ SETUP_SH = os.path.join(REPO_ROOT, "setup.sh")
 OTEL_HOOK_PY = os.path.join(REPO_ROOT, "otel_hook.py")
 OTEL_CONFIG_EXAMPLE = os.path.join(REPO_ROOT, "otel_config.example.json")
 PLUGIN_SRC = os.path.join(REPO_ROOT, "plugin", "opencode.ts")
+COPILOT_EXAMPLE = os.path.join(REPO_ROOT, "examples", "copilot-hooks.example.json")
 
 
 def _make_hook_dir(tmp_root: str) -> str:
@@ -83,6 +84,16 @@ def _claude_settings_doc(tmp_root: str) -> dict:
     settings_json = os.path.join(tmp_root, ".claude", "settings.json")
     with open(settings_json) as f:
         return json.load(f)
+
+
+def _opencode_plugin_text(tmp_root: str, global_install: bool = False, config_dir: Optional[str] = None) -> str:
+    if global_install:
+        base_dir = config_dir or os.path.join(tmp_root, ".config", "opencode")
+        plugin_path = os.path.join(base_dir, "plugins", "otel-hook.ts")
+    else:
+        plugin_path = os.path.join(tmp_root, ".opencode", "plugins", "otel-hook.ts")
+    with open(plugin_path) as f:
+        return f.read()
 
 
 class TestSetupShCommandSelection:
@@ -404,3 +415,33 @@ class TestSetupShReinstall:
         # Hooks must still be written
         cmds = _hooks_json_commands(str(tmp_path))
         assert len(cmds) == 1, f"Expected one distinct command in hooks.json, got: {cmds}"
+
+
+class TestExplicitIdeIdentityExamples:
+    def _minimal_env(self, tmp_path) -> dict:
+        python3_bin = shutil.which("python3") or "/usr/bin/python3"
+        python3_dir = os.path.dirname(python3_bin)
+        return {
+            "HOME": str(tmp_path),
+            "PATH": f"{python3_dir}:/usr/bin:/bin",
+        }
+
+    def test_setup_opencode_installs_global_plugin_with_explicit_ide_env(self, tmp_path):
+        hook_dir = _make_hook_dir(str(tmp_path))
+        config_dir = str(tmp_path / "opencode-config")
+        env = self._minimal_env(tmp_path)
+        env["OPENCODE_CONFIG_DIR"] = config_dir
+
+        result = _run_setup(hook_dir, args=["--opencode", "--global"], env=env)
+        assert result.returncode == 0, result.stderr
+
+        plugin_text = _opencode_plugin_text(str(tmp_path), global_install=True, config_dir=config_dir)
+        assert "IDE_OTEL_IDE_NAME=opencode otel-hook" in plugin_text
+
+    def test_copilot_example_wraps_commands_with_explicit_ide_env(self):
+        with open(COPILOT_EXAMPLE) as f:
+            doc = json.load(f)
+
+        for event_hooks in doc["hooks"].values():
+            for hook in event_hooks:
+                assert hook["bash"].startswith("env IDE_OTEL_IDE_NAME=copilot ")
