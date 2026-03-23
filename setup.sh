@@ -22,7 +22,7 @@ HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"
 # Prefer the system-installed otel-hook command (pip/pipx deployment) when it is
 # on PATH; fall back to the local script for source-checkout / copied-source use.
 if command -v otel-hook &>/dev/null; then
-  HOOK_CMD="otel-hook"
+  HOOK_CMD="$(command -v otel-hook)"
 else
   HOOK_CMD="python3 $HOOK_DIR/otel_hook.py"
 fi
@@ -148,7 +148,7 @@ if [[ -n "$DO_REINSTALL" ]]; then
   echo ""
   # Refresh HOOK_CMD in case otel-hook just became available on PATH
   if command -v otel-hook &>/dev/null; then
-    HOOK_CMD="otel-hook"
+    HOOK_CMD="$(command -v otel-hook)"
   fi
 fi
 
@@ -380,7 +380,7 @@ fi
 # fall back to the system default for otel-hook, or the local script dir.
 LOG_HOME="${IDE_OTEL_HOOK_HOME:-}"
 if [[ -z "$LOG_HOME" ]]; then
-  if [[ "$HOOK_CMD" == "otel-hook" ]]; then
+  if [[ "$HOOK_CMD" == *"/otel-hook" ]]; then
     LOG_HOME="$HOME/.local/share/opentelemetry-hooks"
   else
     LOG_HOME="$HOOK_DIR"

@@ -77,7 +77,7 @@ class TestSetupShCommandSelection:
     """setup.sh must prefer the global otel-hook command when available."""
 
     def test_default_uses_global_when_otel_hook_available(self, tmp_path):
-        """When otel-hook is on PATH, setup.sh writes 'otel-hook' as the command."""
+        """When otel-hook is on PATH, setup.sh writes its absolute path as the command."""
         hook_dir = _make_hook_dir(str(tmp_path))
 
         fake_bin = str(tmp_path / "fakebin")
@@ -96,8 +96,8 @@ class TestSetupShCommandSelection:
         cmds = _hooks_json_commands(str(tmp_path))
         assert len(cmds) == 1
         cmd = cmds[0]
-        assert cmd == "otel-hook", (
-            f"Expected 'otel-hook' when it is on PATH, got: {cmd!r}"
+        assert cmd == fake_otel, (
+            f"Expected absolute path '{fake_otel}' when otel-hook is on PATH, got: {cmd!r}"
         )
 
     def test_falls_back_to_local_when_no_otel_hook(self, tmp_path):
