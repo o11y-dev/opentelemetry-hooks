@@ -83,10 +83,10 @@ gen_ai.client.session (root)
 
 ```bash
 # Recommended: pipx keeps otel-hook on PATH in an isolated venv
-pipx install git+https://github.com/o11y-dev/opentelemetry-hooks.git@v0.8.0
+pipx install git+https://github.com/o11y-dev/opentelemetry-hooks.git@v0.9.0
 
 # Or with pip
-pip install git+https://github.com/o11y-dev/opentelemetry-hooks.git@v0.8.0
+pip install git+https://github.com/o11y-dev/opentelemetry-hooks.git@v0.9.0
 ```
 
 Or install from a pre-built wheel from the [Releases](https://github.com/o11y-dev/opentelemetry-hooks/releases) page:
