@@ -85,6 +85,7 @@ class TestLowerOrNone:
         ("HELLO", "hello"),
         ("  hello  ", "hello"),
         ("\tHELLO\n", "hello"),
+        ("", None),
         ("   ", None),
         (None, None),
         (42, None),
@@ -96,10 +97,14 @@ class TestLowerOrNone:
 class TestNormalizeGenaiOutputType:
     @pytest.mark.parametrize("value,expected", [
         ("json_schema", "json"),
+        ("Json_Schema", "json"),
         ("JSON_OBJECT", "json"),
         ("text", "text"),
+        ("TEXT", "text"),
         ("image", "image"),
+        ("ImAgE", "image"),
         ("speech", "speech"),
+        ("SpEeCh", "speech"),
         ("  json  ", "json"),
         ("invalid", None),
         ("", None),
