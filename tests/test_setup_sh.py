@@ -38,6 +38,18 @@ def _make_hook_dir(tmp_root: str) -> str:
     return hook_dir
 
 
+def _make_repo_root(tmp_root: str) -> str:
+    """Create a minimal repo-root layout inside *tmp_root* and return it."""
+    shutil.copy(SETUP_SH, os.path.join(tmp_root, "setup.sh"))
+    shutil.copy(OTEL_HOOK_PY, os.path.join(tmp_root, "otel_hook.py"))
+    shutil.copy(OTEL_CONFIG_EXAMPLE, os.path.join(tmp_root, "otel_config.example.json"))
+    if os.path.exists(PLUGIN_SRC):
+        plugin_dir = os.path.join(tmp_root, "plugin")
+        os.makedirs(plugin_dir, exist_ok=True)
+        shutil.copy(PLUGIN_SRC, os.path.join(plugin_dir, "opencode.ts"))
+    return tmp_root
+
+
 def _run_setup(hook_dir: str, args: Optional[List[str]] = None, env: Optional[Dict[str, str]] = None) -> subprocess.CompletedProcess:
     """Run setup.sh from *hook_dir* with optional extra *args*, capturing stdout/stderr.
 
@@ -380,6 +392,25 @@ class TestSetupShIdeDetectionConfig:
             "timeoutSec": 45,
         }]
 
+    def test_project_level_setup_works_when_run_from_repo_root(self, tmp_path):
+        repo_root = _make_repo_root(str(tmp_path))
+        env = self._minimal_env(tmp_path)
+
+        for args, expected_path in (
+            (["--cursor"], tmp_path / ".cursor" / "hooks.json"),
+            (["--claude"], tmp_path / ".claude" / "settings.json"),
+            (["--copilot"], tmp_path / ".github" / "hooks" / "otel-hooks.json"),
+        ):
+            result = subprocess.run(
+                ["bash", os.path.join(repo_root, "setup.sh"), *args],
+                capture_output=True,
+                text=True,
+                cwd=repo_root,
+                env={**os.environ, **env},
+            )
+            assert result.returncode == 0, result.stderr
+            assert expected_path.exists(), f"Expected {expected_path} to be created"
+
 
 class TestSetupShReinstall:
     """--reinstall must call `pipx install --force .` before registering hooks."""
@@ -481,7 +512,7 @@ class TestSetupShReinstall:
         assert len(cmds) == 1, f"Expected one distinct command in hooks.json, got: {cmds}"
 
 
-class TestExplicitIdeIdentityExamples:
+class TestProcessDiscoveryExamples:
     def _minimal_env(self, tmp_path) -> dict:
         python3_bin = shutil.which("python3") or "/usr/bin/python3"
         python3_dir = os.path.dirname(python3_bin)
@@ -490,7 +521,7 @@ class TestExplicitIdeIdentityExamples:
             "PATH": f"{python3_dir}:/usr/bin:/bin",
         }
 
-    def test_setup_opencode_installs_global_plugin_with_explicit_ide_env(self, tmp_path):
+    def test_setup_opencode_installs_global_plugin_without_ide_override_env(self, tmp_path):
         hook_dir = _make_hook_dir(str(tmp_path))
         config_dir = str(tmp_path / "opencode-config")
         env = self._minimal_env(tmp_path)
