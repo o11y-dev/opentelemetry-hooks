@@ -1602,46 +1602,93 @@ def _emit_event_log(event_name: str, data: dict) -> None:
 # ---------------------------------------------------------------------------
 # IDE detection and event normalization
 # ---------------------------------------------------------------------------
-def _detect_ide(data: dict) -> str:
-    """Detect which IDE is calling this hook based on input fields.
 
-    IDE_OTEL_IDE_NAME can be used to force the IDE name for hook systems that
-    do not expose enough identifying fields.
+def _detect_ide_from_process_tree() -> Optional[str]:
+    """Walk the parent process chain to detect the outermost IDE.
+
+    This is the most reliable detection method because it inspects the
+    actual process hierarchy rather than relying on environment variables
+    (which leak across embedded agents) or payload heuristics.
+
+    Typical process chains:
+      Cursor session:  otel-hook → node → Cursor Helper → Cursor.app
+      Claude terminal: otel-hook → claude → zsh → iTerm/Terminal
+      VS Code:         otel-hook → node → Code Helper → Code.app
+
+    Not cached — each hook invocation is a fresh process so there is no
+    reuse concern.  The walk costs ~10 ms (5–8 ps calls), negligible
+    compared to Python startup.
+    """
+    try:
+        import subprocess as _sp
+        pid = os.getpid()
+        for _ in range(20):
+            if not pid or pid <= 1:
+                break
+            out = _sp.check_output(
+                ["ps", "-p", str(pid), "-o", "ppid=,comm="],
+                text=True, timeout=2,
+            ).strip()
+            if not out:
+                break
+            parts = out.split(None, 1)
+            ppid = int(parts[0])
+            comm = parts[1].lower() if len(parts) > 1 else ""
+
+            if "cursor" in comm:
+                return "cursor"
+            if "opencode" in comm:
+                return "opencode"
+            if ("code helper" in comm or comm.endswith("/code") or
+                    "visual studio code" in comm):
+                return "copilot"
+            if comm.endswith("claude") or comm.endswith("/claude"):
+                return "claude"
+
+            pid = ppid
+    except Exception:
+        # Best-effort IDE detection: failures should not break the hook.
+        logging.debug("Failed to detect IDE from process tree; returning None.", exc_info=True)
+    return None
+
+
+def _detect_ide(data: dict) -> str:
+    """Detect which IDE is calling this hook.
 
     Detection order (highest to lowest confidence):
-    1. Explicit override via IDE_OTEL_IDE_NAME
-    2. Self-reported payload fields (ide_name, ide, client, source_app)
-    3. Heuristic fallback (Claude env/payload/event casing, Cursor fields, workspace hints)
-    4. Copilot (session_id without other indicators)
+    1. Process tree inspection (outermost IDE in parent chain)
+    2. Explicit override via IDE_OTEL_IDE_NAME env var
+    3. Self-reported payload fields (ide_name, ide, client, source_app)
+    4. Heuristic fallback (Claude env/payload/event casing, Cursor fields)
     5. Default: cursor
     """
+    # Level 1: Process tree — most reliable, immune to env-var leakage.
+    ptree_ide = _detect_ide_from_process_tree()
+    if ptree_ide:
+        return ptree_ide
+
+    # Level 2: Explicit override from hook config env block.
     override = _normalize_ide_name(os.getenv("IDE_OTEL_IDE_NAME"))
     if override:
         return override
 
+    # Level 3: Self-reported payload fields.
     reported = _normalize_ide_name(_first_present(data, ("ide_name", "ide", "client", "source_app")))
     if reported:
         return reported
 
-    # Level 3: CLAUDE_CODE_ENTRYPOINT is set by Claude Code when running hooks
+    # Level 4: Heuristic fallback — Claude-specific signals.
     if os.getenv("CLAUDE_CODE_ENTRYPOINT"):
         return "claude"
 
-    # Level 3: Claude-specific payload fields — check BEFORE .cursor directory
-    # so Claude Code running inside a Cursor workspace is detected correctly.
     if data.get("transcript_path") or data.get("permission_mode") or data.get("notification_type"):
         return "claude"
 
-    # Level 3: PascalCase hook_event_name is a strong Claude Code signal.
-    # Claude Code always emits PascalCase names (PreToolUse, SessionStart);
-    # Cursor always emits camelCase (preToolUse, sessionStart).
     raw_event = _first_present(data, ("hook_event_name", "hook_event_type", "event"))
     if isinstance(raw_event, str) and raw_event and raw_event[0].isupper():
         return "claude"
 
-    # Level 3: Cursor-specific fields (check before session_id).
-    # Note: subagent_type is intentionally excluded — Claude Code also sends it
-    # in SubagentStart events with snake_case field names.
+    # Level 4: Cursor-specific fields.
     if data.get("conversation_id") or data.get("generation_id"):
         return "cursor"
 
@@ -1649,7 +1696,6 @@ def _detect_ide(data: dict) -> str:
     if any(data.get(key) for key in cursor_indicators):
         return "cursor"
 
-    # Level 3: Workspace .cursor directory presence
     try:
         cwd = data.get("cwd") or os.getcwd()
         if ".cursor" in cwd or os.path.exists(os.path.join(cwd, ".cursor")):
@@ -1657,7 +1703,7 @@ def _detect_ide(data: dict) -> str:
     except Exception:
         pass
 
-    # Level 4: Copilot only sends session_id without other indicators
+    # Level 5: Copilot (session_id without other indicators).
     if data.get("session_id"):
         return "copilot"
 
