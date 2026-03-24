@@ -392,7 +392,7 @@ class TestSetupShIdeDetectionConfig:
             "timeoutSec": 45,
         }]
 
-    def test_project_level_setup_works_when_run_from_repo_root(self, tmp_path):
+    def test_setup_from_repo_root_creates_project_configs(self, tmp_path):
         repo_root = _make_repo_root(str(tmp_path))
         env = self._minimal_env(tmp_path)
 

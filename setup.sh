@@ -54,6 +54,8 @@ COPILOT_EVENTS=(
   errorOccurred
 )
 
+REPO_MARKERS=(.git .github .cursor .claude .opencode)
+
 # Events that require a matcher (Claude Code tool-related hooks)
 CLAUDE_MATCHER_EVENTS="PreToolUse PostToolUse PostToolUseFailure"
 
@@ -170,12 +172,15 @@ fi
 find_repo_root_from() {
   local current="$1"
   local parent
+  local marker
 
   while [[ -n "$current" && "$current" != "/" ]]; do
-    if [[ -d "$current/.git" || -d "$current/.github" || -d "$current/.cursor" || -d "$current/.claude" || -d "$current/.opencode" ]]; then
-      printf '%s\n' "$current"
-      return 0
-    fi
+    for marker in "${REPO_MARKERS[@]}"; do
+      if [[ -d "$current/$marker" ]]; then
+        printf '%s\n' "$current"
+        return 0
+      fi
+    done
     parent="$(dirname "$current")"
     if [[ "$parent" == "$current" ]]; then
       break
@@ -189,9 +194,14 @@ find_repo_root_from() {
 find_repo_root() {
   local candidate
   local repo_root=""
+  local has_git=""
+
+  if command -v git >/dev/null 2>&1; then
+    has_git=1
+  fi
 
   for candidate in "$PWD" "$HOOK_DIR"; do
-    if command -v git >/dev/null 2>&1; then
+    if [[ -n "$has_git" ]]; then
       repo_root="$(git -C "$candidate" rev-parse --show-toplevel 2>/dev/null || true)"
       if [[ -n "$repo_root" ]]; then
         printf '%s\n' "$repo_root"
