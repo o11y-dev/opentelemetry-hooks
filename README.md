@@ -24,7 +24,7 @@ IDE Event → stdin (JSON) → otel-hook → OpenTelemetry SDK → OTLP Backend
 
 ## Features
 
-- **Multi-IDE Support**: One script, multiple hook providers — `setup.sh` now creates native hook configs for Cursor, GitHub Copilot, and Claude Code without extra IDE override env vars, while the bundled examples cover Copilot/Claude/Cursor for manual installs. The runtime prefers parent-process discovery first, then falls back to self-reported payload fields, explicit overrides, and heuristics when needed.
+- **Multi-IDE Support**: One script, multiple hook providers — `setup.sh` now creates native hook configs for Cursor, GitHub Copilot, and Claude Code without extra IDE override env vars, while the bundled examples cover Copilot/Claude/Cursor for manual installs. The runtime prefers parent-process discovery first, then explicit overrides, then self-reported payload fields, and finally heuristics when needed.
 
 - **Session-level Traces**: Groups all events within a session into a single trace with a 3-tier hierarchy:
 

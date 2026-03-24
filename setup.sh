@@ -54,6 +54,8 @@ COPILOT_EVENTS=(
   errorOccurred
 )
 
+REPO_MARKERS=(.git .github .cursor .claude .opencode)
+
 # Events that require a matcher (Claude Code tool-related hooks)
 CLAUDE_MATCHER_EVENTS="PreToolUse PostToolUse PostToolUseFailure"
 
@@ -167,6 +169,58 @@ if [[ -n "$DO_REINSTALL" ]]; then
   fi
 fi
 
+find_repo_root_from() {
+  local current="$1"
+  local parent
+  local marker
+
+  while [[ -n "$current" && "$current" != "/" ]]; do
+    for marker in "${REPO_MARKERS[@]}"; do
+      if [[ -d "$current/$marker" ]]; then
+        printf '%s\n' "$current"
+        return 0
+      fi
+    done
+    parent="$(dirname "$current")"
+    if [[ "$parent" == "$current" ]]; then
+      break
+    fi
+    current="$parent"
+  done
+
+  return 1
+}
+
+find_repo_root() {
+  local candidate
+  local repo_root=""
+  local has_git=""
+
+  if command -v git >/dev/null 2>&1; then
+    has_git=1
+  fi
+
+  for candidate in "$PWD" "$HOOK_DIR"; do
+    if [[ -n "$has_git" ]]; then
+      repo_root="$(git -C "$candidate" rev-parse --show-toplevel 2>/dev/null || true)"
+      if [[ -n "$repo_root" ]]; then
+        printf '%s\n' "$repo_root"
+        return 0
+      fi
+    fi
+  done
+
+  for candidate in "$PWD" "$HOOK_DIR"; do
+    repo_root="$(find_repo_root_from "$candidate" 2>/dev/null || true)"
+    if [[ -n "$repo_root" ]]; then
+      printf '%s\n' "$repo_root"
+      return 0
+    fi
+  done
+
+  printf '%s\n' "$PWD"
+}
+
 # ─── Cursor IDE setup ───────────────────────────────────────────────────────
 setup_cursor() {
   local hooks_json
@@ -176,7 +230,7 @@ setup_cursor() {
     echo "📦 Cursor IDE (global: $hooks_json)"
   else
     local repo_root
-    repo_root="$(cd "$HOOK_DIR/../../.." 2>/dev/null && pwd || echo "$HOOK_DIR")"
+    repo_root="$(find_repo_root)"
     hooks_json="$repo_root/.cursor/hooks.json"
     echo "📦 Cursor IDE (project: $hooks_json)"
   fi
@@ -264,7 +318,7 @@ setup_claude() {
   else
     # Project-level: .claude/settings.json in the repo root
     local repo_root
-    repo_root="$(cd "$HOOK_DIR/../../.." 2>/dev/null && pwd || echo "$HOOK_DIR")"
+    repo_root="$(find_repo_root)"
     settings_json="$repo_root/.claude/settings.json"
     echo "📦 Claude Code (project: $settings_json)"
   fi
@@ -355,7 +409,7 @@ if not added and not updated:
 setup_copilot() {
   local hooks_json
   local repo_root
-  repo_root="$(cd "$HOOK_DIR/../../.." 2>/dev/null && pwd || echo "$HOOK_DIR")"
+  repo_root="$(find_repo_root)"
   hooks_json="$repo_root/.github/hooks/otel-hooks.json"
 
   echo "📦 GitHub Copilot (repo: $hooks_json)"
