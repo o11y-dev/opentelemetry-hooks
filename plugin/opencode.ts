@@ -25,13 +25,13 @@ export const OtelHookPlugin: Plugin = async ({ $, directory }) => {
   }
 
   // Pipe a JSON payload to otel-hook on stdin.
-  // IDE_OTEL_IDE_NAME is set for belt-and-suspenders detection; the payload
-  // also carries source_app: "OpenCode" which triggers auto-detection.
+  // The payload carries source_app: "OpenCode", and the hook also prefers
+  // parent-process discovery, so no IDE override env var is needed here.
   // Hook errors are always non-fatal — never block agent execution.
   async function invoke(payload: Record<string, unknown>): Promise<void> {
     const json = JSON.stringify(payload)
     try {
-      await $`IDE_OTEL_IDE_NAME=opencode otel-hook`
+      await $`otel-hook`
         .stdin(json)
         .quiet()
         .nothrow()

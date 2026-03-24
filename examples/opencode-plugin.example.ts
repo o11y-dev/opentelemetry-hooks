@@ -27,7 +27,7 @@ export const OtelHookPlugin: Plugin = async ({ $, directory }) => {
   async function invoke(payload: Record<string, unknown>): Promise<void> {
     const json = JSON.stringify(payload)
     try {
-      await $`IDE_OTEL_IDE_NAME=opencode otel-hook`
+      await $`otel-hook`
         .stdin(json)
         .quiet()
         .nothrow()
