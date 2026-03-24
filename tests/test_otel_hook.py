@@ -80,6 +80,35 @@ class TestFloatOrNone:
         assert otel_hook._float_or_none("xyz") is None
 
 
+class TestLowerOrNone:
+    @pytest.mark.parametrize("value,expected", [
+        ("HELLO", "hello"),
+        ("  hello  ", "hello"),
+        ("\tHELLO\n", "hello"),
+        ("   ", None),
+        (None, None),
+        (42, None),
+    ])
+    def test_normalizes_or_rejects_values(self, value, expected):
+        assert otel_hook._lower_or_none(value) == expected
+
+
+class TestNormalizeGenaiOutputType:
+    @pytest.mark.parametrize("value,expected", [
+        ("json_schema", "json"),
+        ("JSON_OBJECT", "json"),
+        ("text", "text"),
+        ("image", "image"),
+        ("speech", "speech"),
+        ("  json  ", "json"),
+        ("invalid", None),
+        ("", None),
+        (None, None),
+    ])
+    def test_normalizes_known_output_types(self, value, expected):
+        assert otel_hook._normalize_genai_output_type(value) == expected
+
+
 # ── Event normalization ───────────────────────────────────────────────────
 
 
@@ -711,6 +740,28 @@ class TestGenAISemconv:
         attrs = self._attrs(span)
         assert attrs["gen_ai.provider.name"] == "openai"
         assert attrs["gen_ai.system"] == "cursor"
+
+    @pytest.mark.parametrize("response_format,expected", [
+        ("json_schema", "json"),
+        ("json_object", "json"),
+        ("text", "text"),
+        ("image", "image"),
+        ("speech", "speech"),
+        ("invalid", None),
+        (None, None),
+    ])
+    def test_sets_output_type_only_for_supported_formats(self, response_format, expected):
+        span = mock.MagicMock()
+
+        otel_hook._apply_genai_semconv(span, "UserPromptSubmit", {
+            "response_format": response_format,
+        }, "cursor")
+
+        attrs = self._attrs(span)
+        if expected is None:
+            assert "gen_ai.output.type" not in attrs
+        else:
+            assert attrs["gen_ai.output.type"] == expected
 
 
 class TestClientIdentityAttributes:

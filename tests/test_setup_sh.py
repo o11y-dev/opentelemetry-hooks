@@ -86,6 +86,15 @@ def _claude_settings_doc(tmp_root: str) -> dict:
         return json.load(f)
 
 
+def _minimal_env(tmp_path) -> dict:
+    python3_bin = shutil.which("python3") or "/usr/bin/python3"
+    python3_dir = os.path.dirname(python3_bin)
+    return {
+        "HOME": str(tmp_path),
+        "PATH": f"{python3_dir}:/usr/bin:/bin",
+    }
+
+
 def _opencode_plugin_text(tmp_root: str, global_install: bool = False, config_dir: Optional[str] = None) -> str:
     if global_install:
         base_dir = config_dir or os.path.join(tmp_root, ".config", "opencode")
@@ -147,24 +156,10 @@ class TestSetupShCommandSelection:
 class TestSetupShGlobalScoping:
     """--global must only affect the explicitly selected IDE(s)."""
 
-    def _minimal_env(self, tmp_path) -> dict:
-        """Return an env dict with HOME set to tmp_path and a minimal PATH.
-
-        Setting HOME isolates global-install paths (~/.cursor, ~/.claude, etc.)
-        from the real home directory. A minimal PATH ensures no spurious
-        otel-hook binary leaks in.
-        """
-        python3_bin = shutil.which("python3") or "/usr/bin/python3"
-        python3_dir = os.path.dirname(python3_bin)
-        return {
-            "HOME": str(tmp_path),
-            "PATH": f"{python3_dir}:/usr/bin:/bin",
-        }
-
     def test_global_without_ide_flag_errors(self, tmp_path):
         """--global alone (no IDE flag) must exit non-zero with a clear error."""
         hook_dir = _make_hook_dir(str(tmp_path))
-        result = _run_setup(hook_dir, args=["--global"], env=self._minimal_env(tmp_path))
+        result = _run_setup(hook_dir, args=["--global"], env=_minimal_env(tmp_path))
         assert result.returncode != 0, "Expected non-zero exit when --global used without IDE flag"
         assert "--cursor" in result.stdout or "--cursor" in result.stderr, (
             "Expected error message to mention IDE flags"
@@ -173,7 +168,7 @@ class TestSetupShGlobalScoping:
     def test_cursor_global_only_affects_cursor(self, tmp_path):
         """--cursor --global writes ~/.cursor/hooks.json but not ~/.claude/settings.json."""
         hook_dir = _make_hook_dir(str(tmp_path))
-        env = self._minimal_env(tmp_path)
+        env = _minimal_env(tmp_path)
 
         result = _run_setup(hook_dir, args=["--cursor", "--global"], env=env)
         assert result.returncode == 0, result.stderr
@@ -193,7 +188,7 @@ class TestSetupShGlobalScoping:
     def test_claude_global_only_affects_claude(self, tmp_path):
         """--claude --global writes ~/.claude/settings.json but not ~/.cursor/hooks.json."""
         hook_dir = _make_hook_dir(str(tmp_path))
-        env = self._minimal_env(tmp_path)
+        env = _minimal_env(tmp_path)
 
         result = _run_setup(hook_dir, args=["--claude", "--global"], env=env)
         assert result.returncode == 0, result.stderr
@@ -213,7 +208,7 @@ class TestSetupShGlobalScoping:
     def test_multi_ide_global_affects_only_selected(self, tmp_path):
         """--cursor --claude --global installs globally for Cursor and Claude but not OpenCode."""
         hook_dir = _make_hook_dir(str(tmp_path))
-        env = self._minimal_env(tmp_path)
+        env = _minimal_env(tmp_path)
 
         result = _run_setup(hook_dir, args=["--cursor", "--claude", "--global"], env=env)
         assert result.returncode == 0, result.stderr
@@ -234,17 +229,9 @@ class TestSetupShGlobalScoping:
 
 
 class TestSetupShIdeIdentityEnv:
-    def _minimal_env(self, tmp_path) -> dict:
-        python3_bin = shutil.which("python3") or "/usr/bin/python3"
-        python3_dir = os.path.dirname(python3_bin)
-        return {
-            "HOME": str(tmp_path),
-            "PATH": f"{python3_dir}:/usr/bin:/bin",
-        }
-
     def test_cursor_new_hooks_include_explicit_ide_env(self, tmp_path):
         hook_dir = _make_hook_dir(str(tmp_path))
-        result = _run_setup(hook_dir, args=["--cursor"], env=self._minimal_env(tmp_path))
+        result = _run_setup(hook_dir, args=["--cursor"], env=_minimal_env(tmp_path))
         assert result.returncode == 0, result.stderr
 
         doc = _hooks_json_doc(str(tmp_path))
@@ -266,7 +253,7 @@ class TestSetupShIdeIdentityEnv:
             },
         }))
 
-        result = _run_setup(hook_dir, args=["--cursor"], env=self._minimal_env(tmp_path))
+        result = _run_setup(hook_dir, args=["--cursor"], env=_minimal_env(tmp_path))
         assert result.returncode == 0, result.stderr
 
         doc = _hooks_json_doc(str(tmp_path))
@@ -278,7 +265,7 @@ class TestSetupShIdeIdentityEnv:
 
     def test_claude_new_hooks_include_explicit_ide_env(self, tmp_path):
         hook_dir = _make_hook_dir(str(tmp_path))
-        result = _run_setup(hook_dir, args=["--claude"], env=self._minimal_env(tmp_path))
+        result = _run_setup(hook_dir, args=["--claude"], env=_minimal_env(tmp_path))
         assert result.returncode == 0, result.stderr
 
         doc = _claude_settings_doc(str(tmp_path))
@@ -301,7 +288,7 @@ class TestSetupShIdeIdentityEnv:
             },
         }))
 
-        result = _run_setup(hook_dir, args=["--claude"], env=self._minimal_env(tmp_path))
+        result = _run_setup(hook_dir, args=["--claude"], env=_minimal_env(tmp_path))
         assert result.returncode == 0, result.stderr
 
         doc = _claude_settings_doc(str(tmp_path))
@@ -319,15 +306,6 @@ class TestSetupShIdeIdentityEnv:
 
 class TestSetupShReinstall:
     """--reinstall must call `pipx install --force .` before registering hooks."""
-
-    def _minimal_env(self, tmp_path) -> dict:
-        """Return an env dict with HOME set to tmp_path and a minimal PATH."""
-        python3_bin = shutil.which("python3") or "/usr/bin/python3"
-        python3_dir = os.path.dirname(python3_bin)
-        return {
-            "HOME": str(tmp_path),
-            "PATH": f"{python3_dir}:/usr/bin:/bin",
-        }
 
     def test_reinstall_without_pipx_errors(self, tmp_path):
         """--reinstall must exit non-zero with a clear error when pipx is not found."""
@@ -418,18 +396,10 @@ class TestSetupShReinstall:
 
 
 class TestExplicitIdeIdentityExamples:
-    def _minimal_env(self, tmp_path) -> dict:
-        python3_bin = shutil.which("python3") or "/usr/bin/python3"
-        python3_dir = os.path.dirname(python3_bin)
-        return {
-            "HOME": str(tmp_path),
-            "PATH": f"{python3_dir}:/usr/bin:/bin",
-        }
-
     def test_setup_opencode_installs_global_plugin_with_explicit_ide_env(self, tmp_path):
         hook_dir = _make_hook_dir(str(tmp_path))
         config_dir = str(tmp_path / "opencode-config")
-        env = self._minimal_env(tmp_path)
+        env = _minimal_env(tmp_path)
         env["OPENCODE_CONFIG_DIR"] = config_dir
 
         result = _run_setup(hook_dir, args=["--opencode", "--global"], env=env)
