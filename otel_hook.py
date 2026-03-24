@@ -1647,7 +1647,8 @@ def _detect_ide_from_process_tree() -> Optional[str]:
 
             pid = ppid
     except Exception:
-        pass
+        # Best-effort IDE detection: failures should not break the hook.
+        logging.debug("Failed to detect IDE from process tree; returning None.", exc_info=True)
     return None
 
 
