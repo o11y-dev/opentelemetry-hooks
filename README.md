@@ -24,7 +24,7 @@ IDE Event → stdin (JSON) → otel-hook → OpenTelemetry SDK → OTLP Backend
 
 ## Features
 
-- **Multi-IDE Support**: One script, multiple hook providers — `setup.sh` now writes an explicit `IDE_OTEL_IDE_NAME` into generated hook configs for Cursor and Claude Code, the bundled examples do the same for Copilot/Claude/Cursor, and the runtime falls back to self-reported fields or heuristics only when an explicit identity is unavailable.
+- **Multi-IDE Support**: One script, multiple hook providers — `setup.sh` now creates native hook configs for Cursor, GitHub Copilot, and Claude Code without extra IDE override env vars, while the bundled examples cover Copilot/Claude/Cursor for manual installs. The runtime prefers parent-process discovery first, then explicit overrides, then self-reported payload fields, and finally heuristics when needed.
 
 - **Session-level Traces**: Groups all events within a session into a single trace with a 3-tier hierarchy:
 
@@ -115,7 +115,7 @@ That's it. The script will:
 2. Create `otel_config.json` from the example template (if missing)
 3. Bootstrap the Python venv in the background (~30s on first run)
 
-Each generated Cursor hook entry includes `env.IDE_OTEL_IDE_NAME=cursor`, so nested agents still export `gen_ai.client.name=cursor` even if the inner engine emits Claude-specific signals.
+Generated Cursor hook entries invoke `otel-hook` directly. The runtime now prefers parent-process discovery for the outer IDE and separately records any distinct inner engine as `gen_ai.client.agent_engine`.
 
 Then edit your endpoint config and restart Cursor:
 
@@ -157,12 +157,22 @@ Cursor CLI uses the same `.cursor/hooks.json` configuration and hook payload sha
 #### GitHub Copilot
 
 ```bash
+# Repo-scoped hooks file (.github/hooks/otel-hooks.json)
+bash .cursor/hooks/opentelemetry-hook/setup.sh --copilot
+```
+
+`setup.sh --copilot` creates or merges `.github/hooks/otel-hooks.json` and points each event directly at `otel-hook` (or the local `otel_hook.py` fallback). Copilot is then detected from the process tree first, with `session_id`-based heuristics as a fallback.
+
+GitHub Copilot hooks are repository-scoped, so `--copilot --global` is intentionally unsupported. Commit `.github/hooks/otel-hooks.json` to your default branch for the coding agent to pick it up.
+
+If you prefer a manual install, copy the bundled example instead:
+
+```bash
 mkdir -p .github/hooks
 cp .cursor/hooks/opentelemetry-hook/examples/copilot-hooks.example.json .github/hooks/otel-hooks.json
 ```
 
-Replace `{{SCRIPT_PATH}}` with the hook command. For a copied-source checkout the default is `python3 .cursor/hooks/opentelemetry-hook/otel_hook.py`; use `otel-hook` only when the package is installed via pipx or pip.
-The bundled example already wraps every Copilot hook command with `IDE_OTEL_IDE_NAME=copilot`, so the hook config itself is the source of truth and payload heuristics are only a fallback.
+Then replace `{{SCRIPT_PATH}}` with the hook command. For a copied-source checkout the default is `python3 .cursor/hooks/opentelemetry-hook/otel_hook.py`; use `otel-hook` only when the package is installed via pipx or pip.
 See [GitHub Copilot hooks docs](https://docs.github.com/en/copilot/concepts/agents/coding-agent/about-hooks).
 
 #### Claude Code
@@ -181,8 +191,8 @@ python3 .cursor/hooks/opentelemetry-hook/otel_hook.py
 otel-hook
 ```
 
-The bundled Claude example and `setup.sh --claude` both write `IDE_OTEL_IDE_NAME=claude` into the hook config automatically.
-Claude Code is auto-detected from hook metadata such as `session_id`, `transcript_path`, `permission_mode`, and `notification_type` only as a fallback. The camelCase alias handling is mainly for compatible third-party hook runners and mixed payload formats.
+The bundled Claude example and `setup.sh --claude` both invoke `otel-hook` directly without an IDE override env var.
+Claude Code is auto-detected from the parent process tree first; hook metadata such as `session_id`, `transcript_path`, `permission_mode`, and `notification_type` is used as a fallback. The camelCase alias handling is mainly for compatible third-party hook runners and mixed payload formats.
 
 #### Antigravity
 
@@ -230,7 +240,7 @@ mkdir -p .opencode/plugins
 cp plugin/opencode.ts .opencode/plugins/otel-hook.ts
 ```
 
-Restart OpenCode after installing. The bundled plugin — including the copy installed by `setup.sh --opencode` — invokes `otel-hook` with `IDE_OTEL_IDE_NAME=opencode`, so the plugin config is the primary identity signal. Its `source_app: "OpenCode"` payload field remains as a compatibility fallback. `OPENCODE_CONFIG_DIR` is respected if set.
+Restart OpenCode after installing. The bundled plugin — including the copy installed by `setup.sh --opencode` — invokes `otel-hook` directly. The runtime prefers parent-process discovery, while the plugin's `source_app: "OpenCode"` payload field remains a compatibility fallback. `OPENCODE_CONFIG_DIR` is respected if set.
 
 **Events captured:** `SessionStart`, `SessionEnd`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure` (detected via `metadata.exit`), `Stop`, `AfterFileEdit`. Bash, read, write, MCP, and subagent (`task`) tool calls all flow through the universal `tool.execute.before/after` hooks and appear as `PreToolUse`/`PostToolUse` with the appropriate `tool_name`.
 
@@ -645,13 +655,14 @@ The hook auto-detects which IDE is calling it:
 
 | Signal | IDE |
 |--------|-----|
-| `IDE_OTEL_IDE_NAME` env var | Explicit override (`cursor`, `copilot`, `claude`, `antigravity`, `opencode`) |
+| Parent process tree (`ps` parent-chain walk) | Preferred detection for supported IDEs such as Cursor, Copilot / VS Code, Claude Code, and OpenCode |
+| `IDE_OTEL_IDE_NAME` env var | Explicit override for generic hook runners or manual debugging |
 | Self-reported `ide_name`, `client`, or `source_app` values such as `GitHub Copilot`, `GitHub Copilot CLI`, `GitHub Copilot Chat`, `Claude Code`, `Claude Code CLI`, `Anthropic Claude Code`, `Cursor IDE`, `Cursor CLI`, `Anti Gravity`, `Anti Gravity CLI`, or `OpenCode` / `OpenCode CLI` (case-insensitive, hyphen/space-insensitive) | Normalized to the canonical `gen_ai.client.name` |
 | `conversation_id` or `generation_id` in input | Cursor |
 | `transcript_path`, `permission_mode`, or `notification_type` | Claude Code |
 | `session_id` only (no Cursor-specific fields) | GitHub Copilot |
 
-Detection order is: (1) explicit `IDE_OTEL_IDE_NAME`, (2) self-reported payload fields, then (3) heuristics. `setup.sh` writes the explicit env var into generated Cursor and Claude configs so heuristics are mainly a compatibility fallback for older/manual installs.
+Detection order is: (1) parent process tree, (2) explicit `IDE_OTEL_IDE_NAME`, (3) self-reported payload fields, then (4) heuristics. `setup.sh` now relies on process discovery for generated Cursor, Copilot, and Claude configs, while the env var remains available as an escape hatch for generic runners and debugging.
 
 The detected outer IDE is recorded on spans as `gen_ai.client.name` and is also exported as the `gen_ai.system` resource attribute via `OTEL_RESOURCE_ATTRIBUTES` for backward compatibility. When nested signals indicate a different inner engine (for example Cursor hosting Claude Code), the hook additionally records `gen_ai.client.agent_engine`. When the hook can infer a provider from the payload, it also sets `gen_ai.provider.name` as the canonical provider attribute (v1.37+).
 
@@ -735,7 +746,7 @@ echo '{"hook_event_name":"SessionStart","session_id":"test-123"}' | otel-hook
 | `cx.application.name required` | Coralogix needs this — set automatically, or add to `OTEL_RESOURCE_ATTRIBUTES` |
 | Orphan spans | Enable `IDE_OTEL_BATCH_ON_STOP=true` for session-level traces |
 | No traces appearing | Check endpoint, protocol, and auth headers in config. Verify the backend is running and reachable. |
-| Wrong IDE detected | Set `IDE_OTEL_IDE_NAME` explicitly in the hook command or check that your IDE provides the expected input fields |
+| Wrong IDE detected | Check the parent process chain and input payload first; for generic runners or debugging, set `IDE_OTEL_IDE_NAME` explicitly in the hook command |
 | Traces going to the wrong backend | Verify `OTEL_EXPORTER_OTLP_ENDPOINT` points to the intended backend |
 
 ## Contributing

@@ -2,13 +2,15 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # OpenTelemetry Hook — Quick Setup
 #
-# Registers the OTel hook with Cursor IDE, Claude Code, and/or OpenCode.
+# Registers the OTel hook with Cursor IDE, GitHub Copilot, Claude Code,
+# and/or OpenCode.
 # Safe to run multiple times — skips hooks that are already registered.
 #
 # Usage:
 #   bash setup.sh                    # Auto-detect and set up all found IDEs
 #   bash setup.sh --cursor           # Cursor project-level (.cursor/hooks.json)
 #   bash setup.sh --cursor --global  # Cursor global (~/.cursor/hooks.json)
+#   bash setup.sh --copilot          # GitHub Copilot (.github/hooks/otel-hooks.json)
 #   bash setup.sh --claude           # Claude Code only
 #   bash setup.sh --claude --global  # Claude Code global (~/.claude/settings.json)
 #   bash setup.sh --opencode         # OpenCode project-level (.opencode/plugins/)
@@ -45,11 +47,21 @@ CLAUDE_EVENTS=(
   UserPromptSubmit Stop
 )
 
+COPILOT_EVENTS=(
+  sessionStart sessionEnd
+  userPromptSubmitted
+  preToolUse postToolUse
+  errorOccurred
+)
+
+REPO_MARKERS=(.git .github .cursor .claude .opencode)
+
 # Events that require a matcher (Claude Code tool-related hooks)
 CLAUDE_MATCHER_EVENTS="PreToolUse PostToolUse PostToolUseFailure"
 
 # ─── Parse arguments ─────────────────────────────────────────────────────────
 DO_CURSOR=""
+DO_COPILOT=""
 DO_CLAUDE=""
 DO_OPENCODE=""
 CURSOR_GLOBAL=""
@@ -61,6 +73,7 @@ DO_REINSTALL=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --cursor)    DO_CURSOR=1; shift ;;
+    --copilot)  DO_COPILOT=1; shift ;;
     --claude)    DO_CLAUDE=1; shift ;;
     --opencode)  DO_OPENCODE=1; shift ;;
     --global)    WANT_GLOBAL=1; shift ;;
@@ -73,8 +86,12 @@ done
 # Requiring an explicit IDE flag avoids accidentally installing global hooks
 # for IDEs the user did not intend to configure.
 if [[ -n "$WANT_GLOBAL" ]]; then
-  if [[ -z "$DO_CURSOR" && -z "$DO_CLAUDE" && -z "$DO_OPENCODE" ]]; then
-    echo "Error: --global requires an explicit IDE flag (--cursor, --claude, or --opencode)."
+  if [[ -z "$DO_CURSOR" && -z "$DO_COPILOT" && -z "$DO_CLAUDE" && -z "$DO_OPENCODE" ]]; then
+    echo "Error: --global requires an explicit IDE flag (--cursor, --copilot, --claude, or --opencode)."
+    exit 1
+  fi
+  if [[ -n "$DO_COPILOT" ]]; then
+    echo "Error: GitHub Copilot hooks are repository-scoped; --copilot does not support --global."
     exit 1
   fi
   [[ -n "$DO_CURSOR" ]]   && CURSOR_GLOBAL=1
@@ -83,7 +100,7 @@ if [[ -n "$WANT_GLOBAL" ]]; then
 fi
 
 # Auto-detect if no flags given
-if [[ -z "$DO_CURSOR" && -z "$DO_CLAUDE" && -z "$DO_OPENCODE" ]]; then
+if [[ -z "$DO_CURSOR" && -z "$DO_COPILOT" && -z "$DO_CLAUDE" && -z "$DO_OPENCODE" ]]; then
   # Check for a .cursor workspace directory in the current or parent directories,
   # or fallback to cursor being installed on PATH or in $HOME.
   CURSOR_DIR_FOUND=""
@@ -118,8 +135,8 @@ if [[ -z "$DO_CURSOR" && -z "$DO_CLAUDE" && -z "$DO_OPENCODE" ]]; then
     DO_OPENCODE=1
     OPENCODE_GLOBAL=1
   fi
-  if [[ -z "$DO_CURSOR" && -z "$DO_CLAUDE" && -z "$DO_OPENCODE" ]]; then
-    echo "No supported IDE detected. Use --cursor, --claude, or --opencode to force setup."
+  if [[ -z "$DO_CURSOR" && -z "$DO_COPILOT" && -z "$DO_CLAUDE" && -z "$DO_OPENCODE" ]]; then
+    echo "No supported IDE detected. Use --cursor, --copilot, --claude, or --opencode to force setup."
     exit 1
   fi
 fi
@@ -152,17 +169,68 @@ if [[ -n "$DO_REINSTALL" ]]; then
   fi
 fi
 
+find_repo_root_from() {
+  local current="$1"
+  local parent
+  local marker
+
+  while [[ -n "$current" && "$current" != "/" ]]; do
+    for marker in "${REPO_MARKERS[@]}"; do
+      if [[ -d "$current/$marker" ]]; then
+        printf '%s\n' "$current"
+        return 0
+      fi
+    done
+    parent="$(dirname "$current")"
+    if [[ "$parent" == "$current" ]]; then
+      break
+    fi
+    current="$parent"
+  done
+
+  return 1
+}
+
+find_repo_root() {
+  local candidate
+  local repo_root=""
+  local has_git=""
+
+  if command -v git >/dev/null 2>&1; then
+    has_git=1
+  fi
+
+  for candidate in "$PWD" "$HOOK_DIR"; do
+    if [[ -n "$has_git" ]]; then
+      repo_root="$(git -C "$candidate" rev-parse --show-toplevel 2>/dev/null || true)"
+      if [[ -n "$repo_root" ]]; then
+        printf '%s\n' "$repo_root"
+        return 0
+      fi
+    fi
+  done
+
+  for candidate in "$PWD" "$HOOK_DIR"; do
+    repo_root="$(find_repo_root_from "$candidate" 2>/dev/null || true)"
+    if [[ -n "$repo_root" ]]; then
+      printf '%s\n' "$repo_root"
+      return 0
+    fi
+  done
+
+  printf '%s\n' "$PWD"
+}
+
 # ─── Cursor IDE setup ───────────────────────────────────────────────────────
 setup_cursor() {
   local hooks_json
-  local ide_name="cursor"
 
   if [[ -n "$CURSOR_GLOBAL" ]]; then
     hooks_json="$HOME/.cursor/hooks.json"
     echo "📦 Cursor IDE (global: $hooks_json)"
   else
     local repo_root
-    repo_root="$(cd "$HOOK_DIR/../../.." 2>/dev/null && pwd || echo "$HOOK_DIR")"
+    repo_root="$(find_repo_root)"
     hooks_json="$repo_root/.cursor/hooks.json"
     echo "📦 Cursor IDE (project: $hooks_json)"
   fi
@@ -173,15 +241,14 @@ setup_cursor() {
 
     python3 -c "
 import json, sys
-ide_name = sys.argv[1]
-hook_cmd = sys.argv[2]
-events = sys.argv[3:]
+hook_cmd = sys.argv[1]
+events = sys.argv[2:]
 hooks = {}
 for event in events:
-    hooks[event] = [{'command': hook_cmd, 'env': {'IDE_OTEL_IDE_NAME': ide_name}}]
+    hooks[event] = [{'command': hook_cmd}]
 doc = {'version': 1, 'hooks': hooks}
 print(json.dumps(doc, indent=2))
-" "$ide_name" "$HOOK_CMD" "${CURSOR_EVENTS[@]}" > "$hooks_json"
+" "$HOOK_CMD" "${CURSOR_EVENTS[@]}" > "$hooks_json"
 
     echo "  ✅ Created $hooks_json with all OTel hook events"
   else
@@ -191,9 +258,8 @@ print(json.dumps(doc, indent=2))
 import json, sys
 
 hooks_path = sys.argv[1]
-ide_name = sys.argv[2]
-hook_cmd = sys.argv[3]
-events = sys.argv[4:]
+hook_cmd = sys.argv[2]
+events = sys.argv[3:]
 
 with open(hooks_path, 'r') as f:
     doc = json.load(f)
@@ -210,18 +276,20 @@ for event in events:
         changed = False
         for hook in matches:
             env = hook.get('env')
-            if not isinstance(env, dict):
-                env = {}
-                hook['env'] = env
-            if env.get('IDE_OTEL_IDE_NAME') != ide_name:
-                env['IDE_OTEL_IDE_NAME'] = ide_name
+            if isinstance(env, dict) and 'IDE_OTEL_IDE_NAME' in env:
+                env = dict(env)
+                env.pop('IDE_OTEL_IDE_NAME', None)
+                if env:
+                    hook['env'] = env
+                else:
+                    hook.pop('env', None)
                 changed = True
         if changed:
             updated.append(event)
         else:
             skipped.append(event)
     else:
-        event_hooks.append({'command': hook_cmd, 'env': {'IDE_OTEL_IDE_NAME': ide_name}})
+        event_hooks.append({'command': hook_cmd})
         added.append(event)
  
 with open(hooks_path, 'w') as f:
@@ -231,19 +299,18 @@ with open(hooks_path, 'w') as f:
 if added:
     print(f'  ✅ Added OTel hook to {len(added)} events: {\", \".join(added)}')
 if updated:
-    print(f'  ✅ Added IDE_OTEL_IDE_NAME to {len(updated)} existing events: {\", \".join(updated)}')
+    print(f'  ✅ Removed IDE_OTEL_IDE_NAME from {len(updated)} existing events: {\", \".join(updated)}')
 if skipped:
     print(f'  ⏭️  Already registered in {len(skipped)} events (no changes)')
 if not added and not updated:
     print('  ✅ All hook events already registered — nothing to do')
-" "$hooks_json" "$ide_name" "$HOOK_CMD" "${CURSOR_EVENTS[@]}"
+" "$hooks_json" "$HOOK_CMD" "${CURSOR_EVENTS[@]}"
   fi
 }
 
 # ─── Claude Code setup ──────────────────────────────────────────────────────
 setup_claude() {
   local settings_json
-  local ide_name="claude"
 
   if [[ -n "$CLAUDE_GLOBAL" ]]; then
     settings_json="$HOME/.claude/settings.json"
@@ -251,7 +318,7 @@ setup_claude() {
   else
     # Project-level: .claude/settings.json in the repo root
     local repo_root
-    repo_root="$(cd "$HOOK_DIR/../../.." 2>/dev/null && pwd || echo "$HOOK_DIR")"
+    repo_root="$(find_repo_root)"
     settings_json="$repo_root/.claude/settings.json"
     echo "📦 Claude Code (project: $settings_json)"
   fi
@@ -262,9 +329,8 @@ setup_claude() {
 import json, sys, os
 
 settings_path = sys.argv[1]
-ide_name = sys.argv[2]
-hook_cmd = sys.argv[3]
-events = sys.argv[4:]
+hook_cmd = sys.argv[2]
+events = sys.argv[3:]
 matcher_events = set('$CLAUDE_MATCHER_EVENTS'.split())
 
 # Load existing settings or start fresh
@@ -296,11 +362,13 @@ for event in events:
         changed = False
         for hook in matches:
             env = hook.get('env')
-            if not isinstance(env, dict):
-                env = {}
-                hook['env'] = env
-            if env.get('IDE_OTEL_IDE_NAME') != ide_name:
-                env['IDE_OTEL_IDE_NAME'] = ide_name
+            if isinstance(env, dict) and 'IDE_OTEL_IDE_NAME' in env:
+                env = dict(env)
+                env.pop('IDE_OTEL_IDE_NAME', None)
+                if env:
+                    hook['env'] = env
+                else:
+                    hook.pop('env', None)
                 changed = True
         if changed:
             updated.append(event)
@@ -311,7 +379,7 @@ for event in events:
     # Build the hook entry in Claude Code format
     hook_entry = {
         'hooks': [
-            {'type': 'command', 'command': hook_cmd, 'env': {'IDE_OTEL_IDE_NAME': ide_name}}
+            {'type': 'command', 'command': hook_cmd}
         ]
     }
 
@@ -329,12 +397,103 @@ with open(settings_path, 'w') as f:
 if added:
     print(f'  ✅ Added OTel hook to {len(added)} events: {\", \".join(added)}')
 if updated:
-    print(f'  ✅ Added IDE_OTEL_IDE_NAME to {len(updated)} existing events: {\", \".join(updated)}')
+    print(f'  ✅ Removed IDE_OTEL_IDE_NAME from {len(updated)} existing events: {\", \".join(updated)}')
 if skipped:
     print(f'  ⏭️  Already registered in {len(skipped)} events (no changes)')
 if not added and not updated:
     print('  ✅ All hook events already registered — nothing to do')
-" "$settings_json" "$ide_name" "$HOOK_CMD" "${CLAUDE_EVENTS[@]}"
+" "$settings_json" "$HOOK_CMD" "${CLAUDE_EVENTS[@]}"
+}
+
+# ─── GitHub Copilot setup ─────────────────────────────────────────────────────
+setup_copilot() {
+  local hooks_json
+  local repo_root
+  repo_root="$(find_repo_root)"
+  hooks_json="$repo_root/.github/hooks/otel-hooks.json"
+
+  echo "📦 GitHub Copilot (repo: $hooks_json)"
+  mkdir -p "$(dirname "$hooks_json")"
+
+  if [ ! -f "$hooks_json" ]; then
+    echo "  📝 Creating new .github/hooks/otel-hooks.json ..."
+
+    python3 -c "
+import json, sys
+hook_cmd = sys.argv[1]
+events = sys.argv[2:]
+hooks = {}
+for event in events:
+    hooks[event] = [{'type': 'command', 'bash': hook_cmd, 'timeoutSec': 30}]
+doc = {'version': 1, 'hooks': hooks}
+print(json.dumps(doc, indent=2))
+" "$HOOK_CMD" "${COPILOT_EVENTS[@]}" > "$hooks_json"
+
+    echo "  ✅ Created $hooks_json with all OTel hook events"
+  else
+    echo "  📝 Merging OTel hooks into existing .github/hooks/otel-hooks.json ..."
+
+    python3 -c "
+import json, sys
+
+hooks_path = sys.argv[1]
+hook_cmd = sys.argv[2]
+events = sys.argv[3:]
+wrapped_bash_cmds = [
+    f'env IDE_OTEL_IDE_NAME=copilot {hook_cmd}',
+    f'env IDE_OTEL_IDE_NAME=GitHub Copilot {hook_cmd}',
+]
+
+with open(hooks_path, 'r') as f:
+    doc = json.load(f)
+
+doc.setdefault('version', 1)
+hooks = doc.setdefault('hooks', {})
+added = []
+updated = []
+skipped = []
+
+for event in events:
+    event_hooks = hooks.setdefault(event, [])
+    plain_matches = [h for h in event_hooks if h.get('type') == 'command' and h.get('bash') == hook_cmd]
+    if plain_matches:
+        changed = False
+        for hook in plain_matches:
+            if 'timeoutSec' not in hook:
+                hook['timeoutSec'] = 30
+                changed = True
+        if changed:
+            updated.append(event)
+        else:
+            skipped.append(event)
+        continue
+
+    legacy_matches = [h for h in event_hooks if h.get('type') == 'command' and h.get('bash') in wrapped_bash_cmds]
+    if legacy_matches:
+        for hook in legacy_matches:
+            hook['type'] = 'command'
+            hook['bash'] = hook_cmd
+            hook.setdefault('timeoutSec', 30)
+        updated.append(event)
+        continue
+
+    event_hooks.append({'type': 'command', 'bash': hook_cmd, 'timeoutSec': 30})
+    added.append(event)
+
+with open(hooks_path, 'w') as f:
+    json.dump(doc, f, indent=2)
+    f.write('\n')
+
+if added:
+    print(f'  ✅ Added OTel hook to {len(added)} events: {\", \".join(added)}')
+if updated:
+    print(f'  ✅ Updated {len(updated)} existing Copilot hook commands: {\", \".join(updated)}')
+if skipped:
+    print(f'  ⏭️  Already registered in {len(skipped)} events (no changes)')
+if not added and not updated:
+    print('  ✅ All hook events already registered — nothing to do')
+" "$hooks_json" "$HOOK_CMD" "${COPILOT_EVENTS[@]}"
+  fi
 }
 
 # ─── OpenCode setup ──────────────────────────────────────────────────────────
@@ -382,6 +541,11 @@ if [[ -n "$DO_CLAUDE" ]]; then
   echo ""
 fi
 
+if [[ -n "$DO_COPILOT" ]]; then
+  setup_copilot
+  echo ""
+fi
+
 if [[ -n "$DO_OPENCODE" ]]; then
   setup_opencode
   echo ""
@@ -405,6 +569,9 @@ if [[ -n "$DO_CURSOR" ]]; then
 fi
 if [[ -n "$DO_CLAUDE" ]]; then
   echo "  2. Restart Claude Code to activate hooks"
+fi
+if [[ -n "$DO_COPILOT" ]]; then
+  echo "  2. Commit .github/hooks/otel-hooks.json to your default branch for Copilot to load it"
 fi
 if [[ -n "$DO_OPENCODE" ]]; then
   echo "  2. Restart OpenCode to activate the plugin"
