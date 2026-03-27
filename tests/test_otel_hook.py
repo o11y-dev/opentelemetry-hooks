@@ -1436,3 +1436,103 @@ class TestEnableConsoleExporterIdempotency:
 
         assert mock_provider.add_span_processor.call_count == 1
         assert otel_hook._CONSOLE_EXPORTER_REGISTERED is True
+
+
+class TestModelAttributionFallback:
+    """Tests for the model attribution fallback chain in _apply_genai_semconv.
+
+    Priority: data["model"] → session_ctx["last_known_model"] → batch_model → env vars.
+    """
+
+    @staticmethod
+    def _attrs(span):
+        return {
+            args[0]: args[1]
+            for args, _kwargs in (call for call in span.set_attribute.call_args_list)
+        }
+
+    def test_model_from_data_field(self):
+        """Model is taken directly from the event data when present."""
+        span = mock.MagicMock()
+        otel_hook._apply_genai_semconv(span, "SubagentStop", {"model": "claude-3-7-sonnet"}, "claude")
+        attrs = self._attrs(span)
+        assert attrs.get("gen_ai.request.model") == "claude-3-7-sonnet"
+
+    def test_model_falls_back_to_last_known_model(self):
+        """When event data has no model, fall back to session_ctx['last_known_model']."""
+        span = mock.MagicMock()
+        session_ctx = {"last_known_model": "claude-3-5-haiku"}
+        otel_hook._apply_genai_semconv(span, "SubagentStop", {}, "claude", session_ctx=session_ctx)
+        attrs = self._attrs(span)
+        assert attrs.get("gen_ai.request.model") == "claude-3-5-haiku"
+
+    def test_model_falls_back_to_batch_model(self):
+        """When neither data nor session_ctx has a model, fall back to batch_model."""
+        span = mock.MagicMock()
+        otel_hook._apply_genai_semconv(span, "SubagentStop", {}, "claude",
+                                       session_ctx={}, batch_model="claude-opus-4")
+        attrs = self._attrs(span)
+        assert attrs.get("gen_ai.request.model") == "claude-opus-4"
+
+    def test_model_falls_back_to_claude_env(self, monkeypatch):
+        """When all other sources are absent, fall back to CLAUDE_MODEL env var."""
+        monkeypatch.setenv("CLAUDE_MODEL", "claude-3-haiku-20240307")
+        monkeypatch.delenv("ANTHROPIC_MODEL", raising=False)
+        span = mock.MagicMock()
+        otel_hook._apply_genai_semconv(span, "SubagentStop", {}, "claude", session_ctx={})
+        attrs = self._attrs(span)
+        assert attrs.get("gen_ai.request.model") == "claude-3-haiku-20240307"
+
+    def test_model_falls_back_to_anthropic_env(self, monkeypatch):
+        """When CLAUDE_MODEL is absent, fall back to ANTHROPIC_MODEL env var."""
+        monkeypatch.delenv("CLAUDE_MODEL", raising=False)
+        monkeypatch.setenv("ANTHROPIC_MODEL", "claude-3-sonnet-20240229")
+        span = mock.MagicMock()
+        otel_hook._apply_genai_semconv(span, "SubagentStop", {}, "claude", session_ctx={})
+        attrs = self._attrs(span)
+        assert attrs.get("gen_ai.request.model") == "claude-3-sonnet-20240229"
+
+    def test_data_model_overrides_session_ctx(self):
+        """Model in data takes precedence over session_ctx['last_known_model']."""
+        span = mock.MagicMock()
+        session_ctx = {"last_known_model": "old-model"}
+        otel_hook._apply_genai_semconv(span, "SubagentStop", {"model": "new-model"}, "claude",
+                                       session_ctx=session_ctx)
+        attrs = self._attrs(span)
+        assert attrs.get("gen_ai.request.model") == "new-model"
+
+    def test_session_ctx_overrides_batch_model(self):
+        """session_ctx['last_known_model'] takes precedence over batch_model."""
+        span = mock.MagicMock()
+        session_ctx = {"last_known_model": "session-model"}
+        otel_hook._apply_genai_semconv(span, "SubagentStop", {}, "claude",
+                                       session_ctx=session_ctx, batch_model="batch-model")
+        attrs = self._attrs(span)
+        assert attrs.get("gen_ai.request.model") == "session-model"
+
+    def test_no_model_attribute_when_all_sources_absent(self, monkeypatch):
+        """When all fallback sources are absent, gen_ai.request.model must not be set."""
+        monkeypatch.delenv("CLAUDE_MODEL", raising=False)
+        monkeypatch.delenv("ANTHROPIC_MODEL", raising=False)
+        span = mock.MagicMock()
+        otel_hook._apply_genai_semconv(span, "SubagentStop", {}, "claude", session_ctx={})
+        attrs = self._attrs(span)
+        assert "gen_ai.request.model" not in attrs
+
+    def test_claude_event_without_model_uses_last_known(self):
+        """Simulates a Claude payload (no model in event) resolved via last_known_model."""
+        span = mock.MagicMock()
+        # Simulate a SessionEnd payload that has no model field
+        session_ctx = {
+            "session_id": "sess-abc",
+            "last_known_model": "claude-3-7-sonnet-20250219",
+        }
+        otel_hook._apply_genai_semconv(
+            span,
+            "SessionEnd",
+            {"session_id": "sess-abc", "duration_ms": 5000},
+            "claude",
+            session_ctx=session_ctx,
+        )
+        attrs = self._attrs(span)
+        assert attrs.get("gen_ai.request.model") == "claude-3-7-sonnet-20250219"

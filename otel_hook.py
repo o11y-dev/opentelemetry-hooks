@@ -223,6 +223,13 @@ _CANONICAL_EVENT = {
     # Copilot camelCase
     "userPromptSubmitted": "UserPromptSubmit",
     "errorOccurred": "ErrorOccurred",
+    # Gemini CLI
+    "BeforeModel": "UserPromptSubmit",
+    "AfterModel": "Stop",
+    "BeforeTool": "PreToolUse",
+    "AfterTool": "PostToolUse",
+    "BeforeAgent": "SubagentStart",
+    "AfterAgent": "SubagentStop",
 }
 
 # Common camelCase -> snake_case aliases used by compatible hook runners.
@@ -275,7 +282,7 @@ _INPUT_ALIASES = {
 
 # Canonical gen_ai.client.name values accepted directly from IDE_OTEL_IDE_NAME or
 # self-reported payload metadata before alias fallback.
-_CANONICAL_IDE_NAMES = {"cursor", "copilot", "claude", "antigravity", "opencode", "windsurf", "zed", "vscode"}
+_CANONICAL_IDE_NAMES = {"cursor", "copilot", "claude", "antigravity", "opencode", "windsurf", "zed", "vscode", "gemini"}
 _IDE_NAME_ALIASES = {
     "github copilot": "copilot",
     "github copilot chat": "copilot",
@@ -292,6 +299,8 @@ _IDE_NAME_ALIASES = {
     "vs code": "vscode",
     "zed editor": "zed",
     "open code": "opencode",
+    "gemini cli": "gemini",
+    "google gemini": "gemini",
 }
 _IDE_NAME_NORM_PATTERN = re.compile(r"[-_\s]+")
 
@@ -688,6 +697,10 @@ def _flush_stale_sessions(tracer) -> None:
                 continue
             session_key = name.removesuffix(".json")
             ide = ctx.get("ide", "unknown")
+            # Flush any dangling generation (Fix for Bug 4)
+            pending_gen = ctx.get("current_generation")
+            if pending_gen:
+                _flush_generation(tracer, pending_gen, ctx, ide)
             _flush_session(tracer, session_key, ctx, ide)
             os.remove(path)
             _LOGGER.info("Flushed stale session %s", session_key)
@@ -1763,6 +1776,9 @@ def _create_session_context(session_key: str, data: dict, ide: str) -> dict:
         "generation_count": 0,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
+    if model := _first_present(data, ("request_model", "model", "model_name")):
+        ctx["last_known_model"] = model
+
     agent_engine = _detect_agent_engine(data)
     if agent_engine and agent_engine != ide:
         ctx["agent_engine"] = agent_engine
@@ -1981,7 +1997,7 @@ def _genai_messages(
     return inp, out
 
 
-def _apply_genai_semconv(span, event_name: str, data: dict, ide: str) -> None:
+def _apply_genai_semconv(span, event_name: str, data: dict, ide: str, session_ctx: Optional[dict] = None, batch_model: Optional[str] = None) -> None:
     provider = _infer_genai_provider(data)
     if provider is not None:
         span.set_attribute("gen_ai.provider.name", provider)
@@ -1994,8 +2010,16 @@ def _apply_genai_semconv(span, event_name: str, data: dict, ide: str) -> None:
     _set_if_present(span, "gen_ai.agent.version", _first_present(data, ("agent_version",)))
     _set_if_present(span, "gen_ai.agent.description", _first_present(data, ("agent_description",)))
 
-    # Model
-    _set_if_present(span, "gen_ai.request.model", _first_present(data, ("request_model", "model", "model_name")))
+    # Model attribution with fallback chain (Fix A, B, C)
+    model = _first_present(data, ("request_model", "model", "model_name"))
+    if not model and session_ctx:
+        model = session_ctx.get("last_known_model")
+    if not model:
+        model = batch_model
+    if not model:
+        model = os.getenv("CLAUDE_MODEL") or os.getenv("ANTHROPIC_MODEL")
+
+    _set_if_present(span, "gen_ai.request.model", model)
     _set_if_present(span, "gen_ai.response.model", _first_present(data, ("response_model",)))
     _set_if_present(span, "gen_ai.request.choice.count", _int_or_none(_first_present(data, ("choice_count",))))
     _set_if_present(
@@ -2075,7 +2099,7 @@ def _apply_genai_semconv(span, event_name: str, data: dict, ide: str) -> None:
 # ---------------------------------------------------------------------------
 # Span population
 # ---------------------------------------------------------------------------
-def _populate_span(span, event_name: str, data: dict, ide: str) -> None:
+def _populate_span(span, event_name: str, data: dict, ide: str, session_ctx: Optional[dict] = None, batch_model: Optional[str] = None) -> None:
     """Attach all attributes to a span and emit OTel log records."""
     span.set_attribute("gen_ai.client.hook.event", event_name)
     _set_client_identity_attributes(span, ide, data=data)
@@ -2100,7 +2124,7 @@ def _populate_span(span, event_name: str, data: dict, ide: str) -> None:
     span.set_attribute("gen_ai.client.workspace", data.get("cwd") or os.getcwd())
 
     # GenAI semantic conventions
-    _apply_genai_semconv(span, event_name, data, ide)
+    _apply_genai_semconv(span, event_name, data, ide, session_ctx=session_ctx, batch_model=batch_model)
 
     # Flatten metadata dict
     metadata = data.get("metadata")
@@ -2164,6 +2188,14 @@ def _flush_generation(tracer, gen_key: str, session_ctx: Optional[dict], ide: st
             session_ctx.get("phantom_parent_id", "0"),
         )
 
+    # Scan batch for model (Fix B)
+    batch_model = next(
+        (_first_present(e["data"], ("request_model", "model", "model_name"))
+         for e in batch
+         if _first_present(e["data"], ("request_model", "model", "model_name"))),
+        None
+    )
+
     gen_span = tracer.start_span(
         "gen_ai.client.generation", kind=SpanKind.INTERNAL,
         context=parent_ctx, start_time=first_ts,
@@ -2172,6 +2204,7 @@ def _flush_generation(tracer, gen_key: str, session_ctx: Optional[dict], ide: st
     with _span_context(gen_span):
         gen_span.set_attribute("gen_ai.client.generation_id", gen_key)
         gen_span.set_attribute("gen_ai.client.event.count", len(batch))
+        _set_if_present(gen_span, "gen_ai.request.model", batch_model)
         _set_client_identity_attributes(gen_span, ide, agent_engine=(session_ctx or {}).get("agent_engine"))
         _log_with_span(_LOGGER, logging.INFO, gen_span, "Generation span: gen_key=%s events=%d", gen_key, len(batch))
 
@@ -2186,7 +2219,7 @@ def _flush_generation(tracer, gen_key: str, session_ctx: Optional[dict], ide: st
                 context=gen_ctx, start_time=ts,
             )
             with _span_context(span):
-                _populate_span(span, evt, evt_data, ide)
+                _populate_span(span, evt, evt_data, ide, session_ctx=session_ctx, batch_model=batch_model)
             span.end(end_time=next_ts)
 
         gen_span.end(end_time=last_ts)
@@ -2263,6 +2296,13 @@ def main() -> int:
             session_ctx["agent_engine"] = agent_engine
             _write_session_context(sk, session_ctx)
 
+        # Update last_known_model if present in current event (Fix A)
+        if sk and session_ctx:
+            if model := _first_present(data, ("request_model", "model", "model_name")):
+                if session_ctx.get("last_known_model") != model:
+                    session_ctx["last_known_model"] = model
+                    _write_session_context(sk, session_ctx)
+
         # ── Batch mode: session-level trace hierarchy ──
         if _batch_enabled():
 
@@ -2301,6 +2341,10 @@ def main() -> int:
             # SessionEnd: emit session root span, clean up
             if event_name in _SESSION_END_EVENTS:
                 if sk and session_ctx:
+                    # Flush any dangling generation (Fix for Bug 4)
+                    pending_gen = session_ctx.get("current_generation")
+                    if pending_gen:
+                        _flush_generation(tracer, pending_gen, session_ctx, ide)
                     _flush_session(tracer, sk, session_ctx, ide)
                     _clear_session_context(sk)
                 print(_continue_response_json())
@@ -2322,7 +2366,7 @@ def main() -> int:
                     f"gen_ai.client.hook.{event_name}", kind=SpanKind.INTERNAL,
                     context=parent_ctx,
                 ) as span:
-                    _populate_span(span, event_name, data, ide)
+                    _populate_span(span, event_name, data, ide, session_ctx=session_ctx)
 
             print(_continue_response_json())
             return 0
@@ -2347,7 +2391,7 @@ def main() -> int:
             f"gen_ai.client.hook.{event_name}", kind=SpanKind.INTERNAL,
             context=parent_ctx,
         ) as span:
-            _populate_span(span, event_name, data, ide)
+            _populate_span(span, event_name, data, ide, session_ctx=session_ctx)
 
         # Clean up session on SessionEnd
         if event_name in _SESSION_END_EVENTS and sk:
