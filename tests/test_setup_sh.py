@@ -62,7 +62,10 @@ def _run_setup(hook_dir: str, args: Optional[List[str]] = None, env: Optional[Di
     full_env = os.environ.copy()
     if env:
         full_env.update(env)
-    full_env.setdefault("HOME", os.path.dirname(os.path.dirname(os.path.dirname(hook_dir))))
+    # ALWAYS override HOME so setup.sh never touches the real ~/.claude or ~/.cursor.
+    # Using setdefault was a bug: real HOME leaked through when env didn't include it,
+    # causing test artifacts to accumulate in the developer's global settings.
+    full_env["HOME"] = os.path.dirname(os.path.dirname(os.path.dirname(hook_dir)))
 
     cmd = ["bash", os.path.join(hook_dir, "setup.sh")] + (args or [])
     return subprocess.run(

@@ -47,6 +47,13 @@ CLAUDE_EVENTS=(
   UserPromptSubmit Stop
 )
 
+GEMINI_EVENTS=(
+  SessionStart SessionEnd
+  BeforeAgent AfterAgent
+  BeforeModel AfterModel
+  BeforeTool AfterTool
+)
+
 COPILOT_EVENTS=(
   sessionStart sessionEnd
   userPromptSubmitted
@@ -54,21 +61,27 @@ COPILOT_EVENTS=(
   errorOccurred
 )
 
-REPO_MARKERS=(.git .github .cursor .claude .opencode)
+REPO_MARKERS=(.git .github .cursor .claude .opencode .gemini)
 
 # Events that require a matcher (Claude Code tool-related hooks)
 CLAUDE_MATCHER_EVENTS="PreToolUse PostToolUse PostToolUseFailure"
+GEMINI_MATCHER_EVENTS="BeforeAgent AfterAgent BeforeModel AfterModel BeforeTool AfterTool"
 
 # ─── Parse arguments ─────────────────────────────────────────────────────────
 DO_CURSOR=""
 DO_COPILOT=""
 DO_CLAUDE=""
 DO_OPENCODE=""
+DO_GEMINI=""
 CURSOR_GLOBAL=""
 CLAUDE_GLOBAL=""
 OPENCODE_GLOBAL=""
+GEMINI_GLOBAL=""
 WANT_GLOBAL=""
 DO_REINSTALL=""
+DO_CLEAN=""
+DO_UNINSTALL=""
+DO_DIAGNOSE=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -76,8 +89,12 @@ while [[ $# -gt 0 ]]; do
     --copilot)  DO_COPILOT=1; shift ;;
     --claude)    DO_CLAUDE=1; shift ;;
     --opencode)  DO_OPENCODE=1; shift ;;
+    --gemini)    DO_GEMINI=1; shift ;;
     --global)    WANT_GLOBAL=1; shift ;;
     --reinstall) DO_REINSTALL=1; shift ;;
+    --clean)     DO_CLEAN=1; shift ;;
+    --uninstall) DO_UNINSTALL=1; shift ;;
+    --diagnose)  DO_DIAGNOSE=1; shift ;;
     *)           echo "Unknown option: $1"; exit 1 ;;
   esac
 done
@@ -86,8 +103,8 @@ done
 # Requiring an explicit IDE flag avoids accidentally installing global hooks
 # for IDEs the user did not intend to configure.
 if [[ -n "$WANT_GLOBAL" ]]; then
-  if [[ -z "$DO_CURSOR" && -z "$DO_COPILOT" && -z "$DO_CLAUDE" && -z "$DO_OPENCODE" ]]; then
-    echo "Error: --global requires an explicit IDE flag (--cursor, --copilot, --claude, or --opencode)."
+  if [[ -z "$DO_CURSOR" && -z "$DO_COPILOT" && -z "$DO_CLAUDE" && -z "$DO_OPENCODE" && -z "$DO_GEMINI" ]]; then
+    echo "Error: --global requires an explicit IDE flag (--cursor, --copilot, --claude, --gemini, or --opencode)."
     exit 1
   fi
   if [[ -n "$DO_COPILOT" ]]; then
@@ -97,10 +114,11 @@ if [[ -n "$WANT_GLOBAL" ]]; then
   [[ -n "$DO_CURSOR" ]]   && CURSOR_GLOBAL=1
   [[ -n "$DO_CLAUDE" ]]   && CLAUDE_GLOBAL=1
   [[ -n "$DO_OPENCODE" ]] && OPENCODE_GLOBAL=1
+  [[ -n "$DO_GEMINI" ]]   && GEMINI_GLOBAL=1
 fi
 
 # Auto-detect if no flags given
-if [[ -z "$DO_CURSOR" && -z "$DO_COPILOT" && -z "$DO_CLAUDE" && -z "$DO_OPENCODE" ]]; then
+if [[ -z "$DO_CURSOR" && -z "$DO_COPILOT" && -z "$DO_CLAUDE" && -z "$DO_OPENCODE" && -z "$DO_GEMINI" && -z "$DO_CLEAN" && -z "$DO_UNINSTALL" && -z "$DO_DIAGNOSE" ]]; then
   # Check for a .cursor workspace directory in the current or parent directories,
   # or fallback to cursor being installed on PATH or in $HOME.
   CURSOR_DIR_FOUND=""
@@ -135,8 +153,13 @@ if [[ -z "$DO_CURSOR" && -z "$DO_COPILOT" && -z "$DO_CLAUDE" && -z "$DO_OPENCODE
     DO_OPENCODE=1
     OPENCODE_GLOBAL=1
   fi
-  if [[ -z "$DO_CURSOR" && -z "$DO_COPILOT" && -z "$DO_CLAUDE" && -z "$DO_OPENCODE" ]]; then
-    echo "No supported IDE detected. Use --cursor, --copilot, --claude, or --opencode to force setup."
+  # Check if gemini-cli is installed
+  if command -v gemini &>/dev/null || [ -d "$HOME/.gemini" ]; then
+    DO_GEMINI=1
+    GEMINI_GLOBAL=1
+  fi
+  if [[ -z "$DO_CURSOR" && -z "$DO_COPILOT" && -z "$DO_CLAUDE" && -z "$DO_OPENCODE" && -z "$DO_GEMINI" ]]; then
+    echo "No supported IDE detected. Use --cursor, --copilot, --claude, --gemini, or --opencode to force setup."
     exit 1
   fi
 fi
@@ -219,6 +242,164 @@ find_repo_root() {
   done
 
   printf '%s\n' "$PWD"
+}
+
+# ─── Cursor IDE cleanup ─────────────────────────────────────────────────────
+diagnose_cursor() {
+  local hooks_json
+  if [[ -n "$CURSOR_GLOBAL" ]]; then
+    hooks_json="$HOME/.cursor/hooks.json"
+    echo "🔍 Cursor IDE (global: $hooks_json)"
+  else
+    local repo_root
+    repo_root="$(find_repo_root)"
+    hooks_json="$repo_root/.cursor/hooks.json"
+    echo "🔍 Cursor IDE (project: $hooks_json)"
+  fi
+
+  if [ ! -f "$hooks_json" ]; then
+    echo "  ⏭️  Hooks file not found"
+    return 0
+  fi
+
+  python3 -c "
+import json, sys, os
+
+hooks_path = sys.argv[1]
+with open(hooks_path, 'r') as f:
+    try:
+        doc = json.load(f)
+    except json.JSONDecodeError:
+        print('  ❌ Error: hooks.json is not valid JSON')
+        sys.exit(1)
+
+hooks = doc.get('hooks', {})
+registered_count = 0
+stale_count = 0
+
+for event, entries in hooks.items():
+    for h in entries:
+        cmd = h.get('command', '')
+        if 'otel_hook' in cmd or 'otel-hook' in cmd:
+            registered_count += 1
+            if not (os.path.exists(cmd) or cmd.startswith('/usr/local')):
+                stale_count += 1
+
+if registered_count > 0:
+    print(f'  ✅ {registered_count} OTel hook entries registered ({stale_count} stale)')
+else:
+    print('  ⏭️  No OTel hook entries found')
+" "$hooks_json"
+}
+
+uninstall_cursor() {
+  local hooks_json
+  if [[ -n "$CURSOR_GLOBAL" ]]; then
+    hooks_json="$HOME/.cursor/hooks.json"
+    echo "🗑️  Cursor IDE (global: $hooks_json)"
+  else
+    local repo_root
+    repo_root="$(find_repo_root)"
+    hooks_json="$repo_root/.cursor/hooks.json"
+    echo "🗑️  Cursor IDE (project: $hooks_json)"
+  fi
+
+  if [ ! -f "$hooks_json" ]; then
+    echo "  ⏭️  Hooks file not found — nothing to uninstall"
+    return 0
+  fi
+
+  python3 -c "
+import json, sys, os
+
+hooks_path = sys.argv[1]
+with open(hooks_path, 'r') as f:
+    try:
+        doc = json.load(f)
+    except json.JSONDecodeError:
+        print('  ❌ Error: hooks.json is not valid JSON')
+        sys.exit(1)
+
+hooks = doc.get('hooks', {})
+removed_count = 0
+
+for event, entries in list(hooks.items()):
+    surviving_hooks = []
+    for h in entries:
+        cmd = h.get('command', '')
+        if 'otel_hook' in cmd or 'otel-hook' in cmd:
+            removed_count += 1
+        else:
+            surviving_hooks.append(h)
+    
+    hooks[event] = surviving_hooks
+    if not hooks[event]:
+        del hooks[event]
+
+if removed_count > 0:
+    with open(hooks_path, 'w') as f:
+        json.dump(doc, f, indent=2)
+        f.write('\n')
+    print(f'  ✅ Uninstalled {removed_count} hook entries')
+else:
+    print('  ⏭️  No OTel hook entries found to uninstall')
+" "$hooks_json"
+}
+
+clean_cursor() {
+  local hooks_json
+  if [[ -n "$CURSOR_GLOBAL" ]]; then
+    hooks_json="$HOME/.cursor/hooks.json"
+    echo "🧹 Cursor IDE (global: $hooks_json)"
+  else
+    local repo_root
+    repo_root="$(find_repo_root)"
+    hooks_json="$repo_root/.cursor/hooks.json"
+    echo "🧹 Cursor IDE (project: $hooks_json)"
+  fi
+
+  if [ ! -f "$hooks_json" ]; then
+    echo "  ⏭️  Hooks file not found — nothing to clean"
+    return 0
+  fi
+
+  python3 -c "
+import json, sys, os
+
+hooks_path = sys.argv[1]
+with open(hooks_path, 'r') as f:
+    try:
+        doc = json.load(f)
+    except json.JSONDecodeError:
+        print('  ❌ Error: hooks.json is not valid JSON')
+        sys.exit(1)
+
+hooks = doc.get('hooks', {})
+removed_count = 0
+total_count = 0
+
+for event, entries in list(hooks.items()):
+    surviving_hooks = []
+    for h in entries:
+        cmd = h.get('command', '')
+        total_count += 1
+        if os.path.exists(cmd) or cmd.startswith('/usr/local'):
+            surviving_hooks.append(h)
+        else:
+            removed_count += 1
+    
+    hooks[event] = surviving_hooks
+    if not hooks[event]:
+        del hooks[event]
+
+if removed_count > 0:
+    with open(hooks_path, 'w') as f:
+        json.dump(doc, f, indent=2)
+        f.write('\n')
+    print(f'  ✅ Removed {removed_count} stale hook entries (out of {total_count} total)')
+else:
+    print(f'  ✅ No stale hook entries found (out of {total_count} total)')
+" "$hooks_json"
 }
 
 # ─── Cursor IDE setup ───────────────────────────────────────────────────────
@@ -308,6 +489,437 @@ if not added and not updated:
   fi
 }
 
+# ─── Gemini CLI cleanup ─────────────────────────────────────────────────────
+diagnose_gemini() {
+  local settings_json
+  if [[ -n "$GEMINI_GLOBAL" ]]; then
+    settings_json="$HOME/.gemini/settings.json"
+    echo "🔍 Gemini CLI (global: $settings_json)"
+  else
+    local repo_root
+    repo_root="$(find_repo_root)"
+    settings_json="$repo_root/.gemini/settings.json"
+    echo "🔍 Gemini CLI (project: $settings_json)"
+  fi
+
+  if [ ! -f "$settings_json" ]; then
+    echo "  ⏭️  Settings file not found"
+    return 0
+  fi
+
+  python3 -c "
+import json, sys, os
+
+settings_path = sys.argv[1]
+with open(settings_path, 'r') as f:
+    try:
+        settings = json.load(f)
+    except json.JSONDecodeError:
+        print('  ❌ Error: Settings file is not valid JSON')
+        sys.exit(1)
+
+hooks = settings.get('hooks', {})
+registered_count = 0
+stale_count = 0
+
+for event, entries in hooks.items():
+    for entry in entries:
+        for h in entry.get('hooks', []):
+            cmd = h.get('command', '')
+            if 'otel_hook' in cmd or 'otel-hook' in cmd:
+                registered_count += 1
+                if not (os.path.exists(cmd) or cmd.startswith('/usr/local')):
+                    stale_count += 1
+
+if registered_count > 0:
+    print(f'  ✅ {registered_count} OTel hook entries registered ({stale_count} stale)')
+else:
+    print('  ⏭️  No OTel hook entries found')
+" "$settings_json"
+}
+
+uninstall_gemini() {
+  local settings_json
+  if [[ -n "$GEMINI_GLOBAL" ]]; then
+    settings_json="$HOME/.gemini/settings.json"
+    echo "🗑️  Gemini CLI (global: $settings_json)"
+  else
+    local repo_root
+    repo_root="$(find_repo_root)"
+    settings_json="$repo_root/.gemini/settings.json"
+    echo "🗑️  Gemini CLI (project: $settings_json)"
+  fi
+
+  if [ ! -f "$settings_json" ]; then
+    echo "  ⏭️  Settings file not found — nothing to uninstall"
+    return 0
+  fi
+
+  python3 -c "
+import json, sys, os
+
+settings_path = sys.argv[1]
+with open(settings_path, 'r') as f:
+    try:
+        settings = json.load(f)
+    except json.JSONDecodeError:
+        print('  ❌ Error: Settings file is not valid JSON')
+        sys.exit(1)
+
+hooks = settings.get('hooks', {})
+removed_count = 0
+
+for event, entries in list(hooks.items()):
+    live = []
+    for entry in entries:
+        surviving_hooks = []
+        for h in entry.get('hooks', []):
+            cmd = h.get('command', '')
+            if 'otel_hook' in cmd or 'otel-hook' in cmd:
+                removed_count += 1
+            else:
+                surviving_hooks.append(h)
+        
+        if surviving_hooks:
+            entry['hooks'] = surviving_hooks
+            live.append(entry)
+    
+    hooks[event] = live
+    if not hooks[event]:
+        del hooks[event]
+
+if removed_count > 0:
+    with open(settings_path, 'w') as f:
+        json.dump(settings, f, indent=2)
+        f.write('\n')
+    print(f'  ✅ Uninstalled {removed_count} hook entries')
+else:
+    print('  ⏭️  No OTel hook entries found to uninstall')
+" "$settings_json"
+}
+
+clean_gemini() {
+  local settings_json
+  if [[ -n "$GEMINI_GLOBAL" ]]; then
+    settings_json="$HOME/.gemini/settings.json"
+    echo "🧹 Gemini CLI (global: $settings_json)"
+  else
+    local repo_root
+    repo_root="$(find_repo_root)"
+    settings_json="$repo_root/.gemini/settings.json"
+    echo "🧹 Gemini CLI (project: $settings_json)"
+  fi
+
+  if [ ! -f "$settings_json" ]; then
+    echo "  ⏭️  Settings file not found — nothing to clean"
+    return 0
+  fi
+
+  python3 -c "
+import json, sys, os
+
+settings_path = sys.argv[1]
+with open(settings_path, 'r') as f:
+    try:
+        settings = json.load(f)
+    except json.JSONDecodeError:
+        print('  ❌ Error: Settings file is not valid JSON')
+        sys.exit(1)
+
+hooks = settings.get('hooks', {})
+removed_count = 0
+total_count = 0
+
+for event, entries in list(hooks.items()):
+    live = []
+    for entry in entries:
+        surviving_hooks = []
+        for h in entry.get('hooks', []):
+            cmd = h.get('command', '')
+            total_count += 1
+            if os.path.exists(cmd) or cmd.startswith('/usr/local'):
+                surviving_hooks.append(h)
+            else:
+                removed_count += 1
+        
+        if surviving_hooks:
+            entry['hooks'] = surviving_hooks
+            live.append(entry)
+    
+    hooks[event] = live
+    if not hooks[event]:
+        del hooks[event]
+
+if removed_count > 0:
+    with open(settings_path, 'w') as f:
+        json.dump(settings, f, indent=2)
+        f.write('\n')
+    print(f'  ✅ Removed {removed_count} stale hook entries (out of {total_count} total)')
+else:
+    print(f'  ✅ No stale hook entries found (out of {total_count} total)')
+" "$settings_json"
+}
+
+# ─── Gemini CLI setup ───────────────────────────────────────────────────────
+setup_gemini() {
+  local settings_json
+
+  if [[ -n "$GEMINI_GLOBAL" ]]; then
+    settings_json="$HOME/.gemini/settings.json"
+    echo "📦 Gemini CLI (global: $settings_json)"
+  else
+    local repo_root
+    repo_root="$(find_repo_root)"
+    settings_json="$repo_root/.gemini/settings.json"
+    echo "📦 Gemini CLI (project: $settings_json)"
+  fi
+
+  mkdir -p "$(dirname "$settings_json")"
+
+  python3 -c "
+import json, sys, os
+
+settings_path = sys.argv[1]
+hook_cmd = sys.argv[2]
+events = sys.argv[3:]
+matcher_events = set('$GEMINI_MATCHER_EVENTS'.split())
+
+# Load existing settings or start fresh
+if os.path.exists(settings_path):
+    with open(settings_path, 'r') as f:
+        try:
+            settings = json.load(f)
+        except json.JSONDecodeError:
+            settings = {}
+else:
+    settings = {}
+
+hooks = settings.setdefault('hooks', {})
+added = []
+updated = []
+skipped = []
+
+for event in events:
+    event_list = hooks.setdefault(event, [])
+
+    # Check for existing otel-hook entries with any path
+    others = []
+    exact = []
+    for entry in event_list:
+        for h in entry.get('hooks', []):
+            cmd = h.get('command', '')
+            if 'otel_hook' in cmd or 'otel-hook' in cmd:
+                if cmd == hook_cmd:
+                    exact.append(h)
+                else:
+                    others.append(h)
+
+    if exact:
+        skipped.append(event)
+        continue
+
+    if others:
+        for hook in others:
+            hook['command'] = hook_cmd
+        updated.append(event)
+        continue
+
+    # Build the hook entry
+    hook_entry = {
+        'matcher': '*',
+        'hooks': [
+            {'type': 'command', 'command': hook_cmd, 'name': 'otel-hook'}
+        ]
+    }
+
+    event_list.append(hook_entry)
+    added.append(event)
+
+with open(settings_path, 'w') as f:
+    json.dump(settings, f, indent=2)
+    f.write('\n')
+
+if added:
+    print(f'  ✅ Added OTel hook to {len(added)} events: {\", \".join(added)}')
+if updated:
+    print(f'  ✅ Updated OTel hook path in {len(updated)} events: {\", \".join(updated)}')
+if skipped:
+    print(f'  ⏭️  Already registered in {len(skipped)} events (no changes)')
+" "$settings_json" "$HOOK_CMD" "${GEMINI_EVENTS[@]}"
+}
+
+# ─── Claude Code cleanup ────────────────────────────────────────────────────
+diagnose_claude() {
+  local settings_json
+  if [[ -n "$CLAUDE_GLOBAL" ]]; then
+    settings_json="$HOME/.claude/settings.json"
+    echo "🔍 Claude Code (global: $settings_json)"
+  else
+    local repo_root
+    repo_root="$(find_repo_root)"
+    settings_json="$repo_root/.claude/settings.json"
+    echo "🔍 Claude Code (project: $settings_json)"
+  fi
+
+  if [ ! -f "$settings_json" ]; then
+    echo "  ⏭️  Settings file not found"
+    return 0
+  fi
+
+  python3 -c "
+import json, sys, os
+
+settings_path = sys.argv[1]
+with open(settings_path, 'r') as f:
+    try:
+        settings = json.load(f)
+    except json.JSONDecodeError:
+        print('  ❌ Error: Settings file is not valid JSON')
+        sys.exit(1)
+
+hooks = settings.get('hooks', {})
+registered_count = 0
+stale_count = 0
+
+for event, entries in hooks.items():
+    for entry in entries:
+        for h in entry.get('hooks', []):
+            cmd = h.get('command', '')
+            if 'otel_hook' in cmd or 'otel-hook' in cmd:
+                registered_count += 1
+                if not (os.path.exists(cmd) or cmd.startswith('/usr/local')):
+                    stale_count += 1
+
+if registered_count > 0:
+    print(f'  ✅ {registered_count} OTel hook entries registered ({stale_count} stale)')
+else:
+    print('  ⏭️  No OTel hook entries found')
+" "$settings_json"
+}
+
+uninstall_claude() {
+  local settings_json
+  if [[ -n "$CLAUDE_GLOBAL" ]]; then
+    settings_json="$HOME/.claude/settings.json"
+    echo "🗑️  Claude Code (global: $settings_json)"
+  else
+    local repo_root
+    repo_root="$(find_repo_root)"
+    settings_json="$repo_root/.claude/settings.json"
+    echo "🗑️  Claude Code (project: $settings_json)"
+  fi
+
+  if [ ! -f "$settings_json" ]; then
+    echo "  ⏭️  Settings file not found — nothing to uninstall"
+    return 0
+  fi
+
+  python3 -c "
+import json, sys, os
+
+settings_path = sys.argv[1]
+with open(settings_path, 'r') as f:
+    try:
+        settings = json.load(f)
+    except json.JSONDecodeError:
+        print('  ❌ Error: Settings file is not valid JSON')
+        sys.exit(1)
+
+hooks = settings.get('hooks', {})
+removed_count = 0
+
+for event, entries in list(hooks.items()):
+    live = []
+    for entry in entries:
+        surviving_hooks = []
+        for h in entry.get('hooks', []):
+            cmd = h.get('command', '')
+            if 'otel_hook' in cmd or 'otel-hook' in cmd:
+                removed_count += 1
+            else:
+                surviving_hooks.append(h)
+        
+        if surviving_hooks:
+            entry['hooks'] = surviving_hooks
+            live.append(entry)
+    
+    hooks[event] = live
+    if not hooks[event]:
+        del hooks[event]
+
+if removed_count > 0:
+    with open(settings_path, 'w') as f:
+        json.dump(settings, f, indent=2)
+        f.write('\n')
+    print(f'  ✅ Uninstalled {removed_count} hook entries')
+else:
+    print('  ⏭️  No OTel hook entries found to uninstall')
+" "$settings_json"
+}
+
+clean_claude() {
+  local settings_json
+  if [[ -n "$CLAUDE_GLOBAL" ]]; then
+    settings_json="$HOME/.claude/settings.json"
+    echo "🧹 Claude Code (global: $settings_json)"
+  else
+    local repo_root
+    repo_root="$(find_repo_root)"
+    settings_json="$repo_root/.claude/settings.json"
+    echo "🧹 Claude Code (project: $settings_json)"
+  fi
+
+  if [ ! -f "$settings_json" ]; then
+    echo "  ⏭️  Settings file not found — nothing to clean"
+    return 0
+  fi
+
+  python3 -c "
+import json, sys, os
+
+settings_path = sys.argv[1]
+with open(settings_path, 'r') as f:
+    try:
+        settings = json.load(f)
+    except json.JSONDecodeError:
+        print('  ❌ Error: Settings file is not valid JSON')
+        sys.exit(1)
+
+hooks = settings.get('hooks', {})
+removed_count = 0
+total_count = 0
+
+for event, entries in list(hooks.items()):
+    live = []
+    for entry in entries:
+        surviving_hooks = []
+        for h in entry.get('hooks', []):
+            cmd = h.get('command', '')
+            total_count += 1
+            # Keep if command exists, or if it is the system-installed otel-hook (which may be a symlink)
+            if os.path.exists(cmd) or cmd.startswith('/usr/local'):
+                surviving_hooks.append(h)
+            else:
+                removed_count += 1
+        
+        if surviving_hooks:
+            entry['hooks'] = surviving_hooks
+            live.append(entry)
+    
+    hooks[event] = live
+    if not hooks[event]:
+        del hooks[event]
+
+if removed_count > 0:
+    with open(settings_path, 'w') as f:
+        json.dump(settings, f, indent=2)
+        f.write('\n')
+    print(f'  ✅ Removed {removed_count} stale hook entries (out of {total_count} total)')
+else:
+    print(f'  ✅ No stale hook entries found (out of {total_count} total)')
+" "$settings_json"
+}
+
 # ─── Claude Code setup ──────────────────────────────────────────────────────
 setup_claude() {
   local settings_json
@@ -351,16 +963,21 @@ skipped = []
 for event in events:
     event_list = hooks.setdefault(event, [])
 
-    # Check if otel-hook is already registered for this event
-    matches = []
+    # Check for existing otel-hook entries with any path
+    others = []
+    exact = []
     for entry in event_list:
         for h in entry.get('hooks', []):
-            if h.get('command') == hook_cmd:
-                matches.append(h)
+            cmd = h.get('command', '')
+            if 'otel_hook' in cmd or 'otel-hook' in cmd:
+                if cmd == hook_cmd:
+                    exact.append(h)
+                else:
+                    others.append(h)
 
-    if matches:
+    if exact:
         changed = False
-        for hook in matches:
+        for hook in exact:
             env = hook.get('env')
             if isinstance(env, dict) and 'IDE_OTEL_IDE_NAME' in env:
                 env = dict(env)
@@ -374,6 +991,22 @@ for event in events:
             updated.append(event)
         else:
             skipped.append(event)
+        continue
+
+    if others:
+        # Update existing otel-hook to new path (Fix #6)
+        for hook in others:
+            hook['command'] = hook_cmd
+            # Also clean up legacy env if present
+            env = hook.get('env')
+            if isinstance(env, dict) and 'IDE_OTEL_IDE_NAME' in env:
+                env = dict(env)
+                env.pop('IDE_OTEL_IDE_NAME', None)
+                if env:
+                    hook['env'] = env
+                else:
+                    hook.pop('env', None)
+        updated.append(event)
         continue
 
     # Build the hook entry in Claude Code format
@@ -403,6 +1036,152 @@ if skipped:
 if not added and not updated:
     print('  ✅ All hook events already registered — nothing to do')
 " "$settings_json" "$HOOK_CMD" "${CLAUDE_EVENTS[@]}"
+}
+
+# ─── GitHub Copilot cleanup ───────────────────────────────────────────────────
+diagnose_copilot() {
+  local hooks_json
+  local repo_root
+  repo_root="$(find_repo_root)"
+  hooks_json="$repo_root/.github/hooks/otel-hooks.json"
+
+  echo "🔍 GitHub Copilot (repo: $hooks_json)"
+  if [ ! -f "$hooks_json" ]; then
+    echo "  ⏭️  Hooks file not found"
+    return 0
+  fi
+
+  python3 -c "
+import json, sys, os
+
+hooks_path = sys.argv[1]
+with open(hooks_path, 'r') as f:
+    try:
+        doc = json.load(f)
+    except json.JSONDecodeError:
+        print('  ❌ Error: otel-hooks.json is not valid JSON')
+        sys.exit(1)
+
+hooks = doc.get('hooks', {})
+registered_count = 0
+stale_count = 0
+
+for event, entries in hooks.items():
+    for h in entries:
+        cmd = h.get('bash', '')
+        if 'otel_hook' in cmd or 'otel-hook' in cmd:
+            registered_count += 1
+            # Check for command path in the bash string
+            path_part = cmd.split(' ')[-1] if ' ' in cmd else cmd
+            if not (os.path.exists(path_part) or path_part.startswith('/usr/local')):
+                stale_count += 1
+
+if registered_count > 0:
+    print(f'  ✅ {registered_count} OTel hook entries registered ({stale_count} stale)')
+else:
+    print('  ⏭️  No OTel hook entries found')
+" "$hooks_json"
+}
+
+uninstall_copilot() {
+  local hooks_json
+  local repo_root
+  repo_root="$(find_repo_root)"
+  hooks_json="$repo_root/.github/hooks/otel-hooks.json"
+
+  echo "🗑️  GitHub Copilot (repo: $hooks_json)"
+  if [ ! -f "$hooks_json" ]; then
+    echo "  ⏭️  Hooks file not found — nothing to uninstall"
+    return 0
+  fi
+
+  python3 -c "
+import json, sys, os
+
+hooks_path = sys.argv[1]
+with open(hooks_path, 'r') as f:
+    try:
+        doc = json.load(f)
+    except json.JSONDecodeError:
+        print('  ❌ Error: otel-hooks.json is not valid JSON')
+        sys.exit(1)
+
+hooks = doc.get('hooks', {})
+removed_count = 0
+
+for event, entries in list(hooks.items()):
+    surviving_hooks = []
+    for h in entries:
+        cmd = h.get('bash', '')
+        if 'otel_hook' in cmd or 'otel-hook' in cmd:
+            removed_count += 1
+        else:
+            surviving_hooks.append(h)
+    
+    hooks[event] = surviving_hooks
+    if not hooks[event]:
+        del hooks[event]
+
+if removed_count > 0:
+    with open(hooks_path, 'w') as f:
+        json.dump(doc, f, indent=2)
+        f.write('\n')
+    print(f'  ✅ Uninstalled {removed_count} hook entries')
+else:
+    print('  ⏭️  No OTel hook entries found to uninstall')
+" "$hooks_json"
+}
+
+clean_copilot() {
+  local hooks_json
+  local repo_root
+  repo_root="$(find_repo_root)"
+  hooks_json="$repo_root/.github/hooks/otel-hooks.json"
+
+  echo "🧹 GitHub Copilot (repo: $hooks_json)"
+  if [ ! -f "$hooks_json" ]; then
+    echo "  ⏭️  Hooks file not found — nothing to clean"
+    return 0
+  fi
+
+  python3 -c "
+import json, sys, os
+
+hooks_path = sys.argv[1]
+with open(hooks_path, 'r') as f:
+    try:
+        doc = json.load(f)
+    except json.JSONDecodeError:
+        print('  ❌ Error: otel-hooks.json is not valid JSON')
+        sys.exit(1)
+
+hooks = doc.get('hooks', {})
+removed_count = 0
+total_count = 0
+
+for event, entries in list(hooks.items()):
+    surviving_hooks = []
+    for h in entries:
+        cmd = h.get('bash', '')
+        total_count += 1
+        path_part = cmd.split(' ')[-1] if ' ' in cmd else cmd
+        if os.path.exists(path_part) or path_part.startswith('/usr/local'):
+            surviving_hooks.append(h)
+        else:
+            removed_count += 1
+    
+    hooks[event] = surviving_hooks
+    if not hooks[event]:
+        del hooks[event]
+
+if removed_count > 0:
+    with open(hooks_path, 'w') as f:
+        json.dump(doc, f, indent=2)
+        f.write('\n')
+    print(f'  ✅ Removed {removed_count} stale hook entries (out of {total_count} total)')
+else:
+    print(f'  ✅ No stale hook entries found (out of {total_count} total)')
+" "$hooks_json"
 }
 
 # ─── GitHub Copilot setup ─────────────────────────────────────────────────────
@@ -531,6 +1310,35 @@ setup_opencode() {
 }
 
 # ─── Run setup for selected IDEs ────────────────────────────────────────────
+if [[ -n "$DO_DIAGNOSE" ]]; then
+  echo "🔍 Diagnosing OTel hook registrations ..."
+  [[ -n "$DO_CURSOR" ]] && diagnose_cursor
+  [[ -n "$DO_CLAUDE" ]] && diagnose_claude
+  [[ -n "$DO_COPILOT" ]] && diagnose_copilot
+  [[ -n "$DO_GEMINI" ]] && diagnose_gemini
+  exit 0
+fi
+
+if [[ -n "$DO_UNINSTALL" ]]; then
+  echo "🗑️  Uninstalling OTel hooks ..."
+  [[ -n "$DO_CURSOR" ]] && uninstall_cursor
+  [[ -n "$DO_CLAUDE" ]] && uninstall_claude
+  [[ -n "$DO_COPILOT" ]] && uninstall_copilot
+  [[ -n "$DO_GEMINI" ]] && uninstall_gemini
+  echo "✅ Uninstall complete!"
+  exit 0
+fi
+
+if [[ -n "$DO_CLEAN" ]]; then
+  echo "🧹 Cleaning stale OTel hook registrations ..."
+  [[ -n "$DO_CURSOR" ]] && clean_cursor
+  [[ -n "$DO_CLAUDE" ]] && clean_claude
+  [[ -n "$DO_COPILOT" ]] && clean_copilot
+  [[ -n "$DO_GEMINI" ]] && clean_gemini
+  echo "✅ Cleaning complete!"
+  exit 0
+fi
+
 if [[ -n "$DO_CURSOR" ]]; then
   setup_cursor
   echo ""
@@ -548,6 +1356,11 @@ fi
 
 if [[ -n "$DO_OPENCODE" ]]; then
   setup_opencode
+  echo ""
+fi
+
+if [[ -n "$DO_GEMINI" ]]; then
+  setup_gemini
   echo ""
 fi
 
