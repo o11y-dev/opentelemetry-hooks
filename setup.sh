@@ -117,8 +117,8 @@ if [[ -n "$WANT_GLOBAL" ]]; then
   [[ -n "$DO_GEMINI" ]]   && GEMINI_GLOBAL=1
 fi
 
-# Auto-detect if no flags given
-if [[ -z "$DO_CURSOR" && -z "$DO_COPILOT" && -z "$DO_CLAUDE" && -z "$DO_OPENCODE" && -z "$DO_GEMINI" && -z "$DO_CLEAN" && -z "$DO_UNINSTALL" && -z "$DO_DIAGNOSE" ]]; then
+# Auto-detect if no IDE flags given (applies both for setup and for operational commands)
+if [[ -z "$DO_CURSOR" && -z "$DO_COPILOT" && -z "$DO_CLAUDE" && -z "$DO_OPENCODE" && -z "$DO_GEMINI" ]]; then
   # Check for a .cursor workspace directory in the current or parent directories,
   # or fallback to cursor being installed on PATH or in $HOME.
   CURSOR_DIR_FOUND=""
@@ -159,7 +159,11 @@ if [[ -z "$DO_CURSOR" && -z "$DO_COPILOT" && -z "$DO_CLAUDE" && -z "$DO_OPENCODE
     GEMINI_GLOBAL=1
   fi
   if [[ -z "$DO_CURSOR" && -z "$DO_COPILOT" && -z "$DO_CLAUDE" && -z "$DO_OPENCODE" && -z "$DO_GEMINI" ]]; then
-    echo "No supported IDE detected. Use --cursor, --copilot, --claude, --gemini, or --opencode to force setup."
+    if [[ -n "$DO_CLEAN" || -n "$DO_UNINSTALL" || -n "$DO_DIAGNOSE" ]]; then
+      echo "No supported IDE detected. Use --cursor, --copilot, --claude, --gemini, or --opencode to target a specific IDE."
+    else
+      echo "No supported IDE detected. Use --cursor, --copilot, --claude, --gemini, or --opencode to force setup."
+    fi
     exit 1
   fi
 fi
@@ -169,7 +173,7 @@ echo "────────────────────────�
 
 # ─── Step 1: Check for python3 ──────────────────────────────────────────────
 if ! command -v python3 &>/dev/null; then
-  echo "❌ python3 not found. Install Python 3.8+ and re-run."
+  echo "❌ python3 not found. Install Python 3.9+ and re-run."
   exit 1
 fi
 echo "✅ python3 found: $(python3 --version 2>&1)"
@@ -263,7 +267,17 @@ diagnose_cursor() {
   fi
 
   python3 -c "
-import json, sys, os
+import json, sys, os, shlex
+
+def cmd_has_valid_path(cmd):
+    try:
+        parts = shlex.split(cmd)
+    except ValueError:
+        parts = [cmd]
+    abs_paths = [p for p in parts if p.startswith('/')]
+    if not abs_paths:
+        return True
+    return any(os.path.exists(p) or p.startswith('/usr/local') for p in abs_paths)
 
 hooks_path = sys.argv[1]
 with open(hooks_path, 'r') as f:
@@ -282,7 +296,7 @@ for event, entries in hooks.items():
         cmd = h.get('command', '')
         if 'otel_hook' in cmd or 'otel-hook' in cmd:
             registered_count += 1
-            if not (os.path.exists(cmd) or cmd.startswith('/usr/local')):
+            if not cmd_has_valid_path(cmd):
                 stale_count += 1
 
 if registered_count > 0:
@@ -364,7 +378,17 @@ clean_cursor() {
   fi
 
   python3 -c "
-import json, sys, os
+import json, sys, os, shlex
+
+def cmd_has_valid_path(cmd):
+    try:
+        parts = shlex.split(cmd)
+    except ValueError:
+        parts = [cmd]
+    abs_paths = [p for p in parts if p.startswith('/')]
+    if not abs_paths:
+        return True
+    return any(os.path.exists(p) or p.startswith('/usr/local') for p in abs_paths)
 
 hooks_path = sys.argv[1]
 with open(hooks_path, 'r') as f:
@@ -383,11 +407,11 @@ for event, entries in list(hooks.items()):
     for h in entries:
         cmd = h.get('command', '')
         total_count += 1
-        if os.path.exists(cmd) or cmd.startswith('/usr/local'):
+        if cmd_has_valid_path(cmd):
             surviving_hooks.append(h)
         else:
             removed_count += 1
-    
+
     hooks[event] = surviving_hooks
     if not hooks[event]:
         del hooks[event]
@@ -508,7 +532,17 @@ diagnose_gemini() {
   fi
 
   python3 -c "
-import json, sys, os
+import json, sys, os, shlex
+
+def cmd_has_valid_path(cmd):
+    try:
+        parts = shlex.split(cmd)
+    except ValueError:
+        parts = [cmd]
+    abs_paths = [p for p in parts if p.startswith('/')]
+    if not abs_paths:
+        return True
+    return any(os.path.exists(p) or p.startswith('/usr/local') for p in abs_paths)
 
 settings_path = sys.argv[1]
 with open(settings_path, 'r') as f:
@@ -528,7 +562,7 @@ for event, entries in hooks.items():
             cmd = h.get('command', '')
             if 'otel_hook' in cmd or 'otel-hook' in cmd:
                 registered_count += 1
-                if not (os.path.exists(cmd) or cmd.startswith('/usr/local')):
+                if not cmd_has_valid_path(cmd):
                     stale_count += 1
 
 if registered_count > 0:
@@ -616,7 +650,17 @@ clean_gemini() {
   fi
 
   python3 -c "
-import json, sys, os
+import json, sys, os, shlex
+
+def cmd_has_valid_path(cmd):
+    try:
+        parts = shlex.split(cmd)
+    except ValueError:
+        parts = [cmd]
+    abs_paths = [p for p in parts if p.startswith('/')]
+    if not abs_paths:
+        return True
+    return any(os.path.exists(p) or p.startswith('/usr/local') for p in abs_paths)
 
 settings_path = sys.argv[1]
 with open(settings_path, 'r') as f:
@@ -637,15 +681,15 @@ for event, entries in list(hooks.items()):
         for h in entry.get('hooks', []):
             cmd = h.get('command', '')
             total_count += 1
-            if os.path.exists(cmd) or cmd.startswith('/usr/local'):
+            if cmd_has_valid_path(cmd):
                 surviving_hooks.append(h)
             else:
                 removed_count += 1
-        
+
         if surviving_hooks:
             entry['hooks'] = surviving_hooks
             live.append(entry)
-    
+
     hooks[event] = live
     if not hooks[event]:
         del hooks[event]
@@ -726,11 +770,14 @@ for event in events:
 
     # Build the hook entry
     hook_entry = {
-        'matcher': '*',
         'hooks': [
             {'type': 'command', 'command': hook_cmd, 'name': 'otel-hook'}
         ]
     }
+
+    # Add matcher for events that require it
+    if event in matcher_events:
+        hook_entry['matcher'] = '*'
 
     event_list.append(hook_entry)
     added.append(event)
@@ -767,7 +814,17 @@ diagnose_claude() {
   fi
 
   python3 -c "
-import json, sys, os
+import json, sys, os, shlex
+
+def cmd_has_valid_path(cmd):
+    try:
+        parts = shlex.split(cmd)
+    except ValueError:
+        parts = [cmd]
+    abs_paths = [p for p in parts if p.startswith('/')]
+    if not abs_paths:
+        return True
+    return any(os.path.exists(p) or p.startswith('/usr/local') for p in abs_paths)
 
 settings_path = sys.argv[1]
 with open(settings_path, 'r') as f:
@@ -787,7 +844,7 @@ for event, entries in hooks.items():
             cmd = h.get('command', '')
             if 'otel_hook' in cmd or 'otel-hook' in cmd:
                 registered_count += 1
-                if not (os.path.exists(cmd) or cmd.startswith('/usr/local')):
+                if not cmd_has_valid_path(cmd):
                     stale_count += 1
 
 if registered_count > 0:
@@ -875,7 +932,17 @@ clean_claude() {
   fi
 
   python3 -c "
-import json, sys, os
+import json, sys, os, shlex
+
+def cmd_has_valid_path(cmd):
+    try:
+        parts = shlex.split(cmd)
+    except ValueError:
+        parts = [cmd]
+    abs_paths = [p for p in parts if p.startswith('/')]
+    if not abs_paths:
+        return True
+    return any(os.path.exists(p) or p.startswith('/usr/local') for p in abs_paths)
 
 settings_path = sys.argv[1]
 with open(settings_path, 'r') as f:
@@ -896,16 +963,16 @@ for event, entries in list(hooks.items()):
         for h in entry.get('hooks', []):
             cmd = h.get('command', '')
             total_count += 1
-            # Keep if command exists, or if it is the system-installed otel-hook (which may be a symlink)
-            if os.path.exists(cmd) or cmd.startswith('/usr/local'):
+            # Keep if command path(s) exist, or if it is the system-installed otel-hook (which may be a symlink)
+            if cmd_has_valid_path(cmd):
                 surviving_hooks.append(h)
             else:
                 removed_count += 1
-        
+
         if surviving_hooks:
             entry['hooks'] = surviving_hooks
             live.append(entry)
-    
+
     hooks[event] = live
     if not hooks[event]:
         del hooks[event]

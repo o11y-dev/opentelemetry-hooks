@@ -50,6 +50,45 @@ def _make_repo_root(tmp_root: str) -> str:
     return tmp_root
 
 
+def _make_clean_dir(tmp_root: str) -> str:
+    """Create a clean directory (no .cursor/.claude/.gemini/.github) with setup.sh inside.
+
+    Unlike _make_hook_dir, this places setup.sh directly in a plain subdirectory
+    so that auto-detect cannot find any IDE markers in the directory tree.
+    Returns the directory path containing setup.sh.
+    """
+    clean_dir = os.path.join(tmp_root, "clean-setup")
+    os.makedirs(clean_dir, exist_ok=True)
+    shutil.copy(SETUP_SH, os.path.join(clean_dir, "setup.sh"))
+    shutil.copy(OTEL_HOOK_PY, os.path.join(clean_dir, "otel_hook.py"))
+    shutil.copy(OTEL_CONFIG_EXAMPLE, os.path.join(clean_dir, "otel_config.example.json"))
+    if os.path.exists(PLUGIN_SRC):
+        plugin_dir = os.path.join(clean_dir, "plugin")
+        os.makedirs(plugin_dir, exist_ok=True)
+        shutil.copy(PLUGIN_SRC, os.path.join(plugin_dir, "opencode.ts"))
+    return clean_dir
+
+
+def _run_setup_from_clean_dir(clean_dir: str, home_dir: str, args: Optional[List[str]] = None, env: Optional[Dict[str, str]] = None) -> subprocess.CompletedProcess:
+    """Run setup.sh from *clean_dir* (no IDE markers in the tree) with controlled HOME."""
+    python3_bin = shutil.which("python3") or "/usr/bin/python3"
+    python3_dir = os.path.dirname(python3_bin)
+    full_env = {
+        "HOME": home_dir,
+        "PATH": f"{python3_dir}:/usr/bin:/bin",
+    }
+    if env:
+        full_env.update(env)
+    cmd = ["bash", os.path.join(clean_dir, "setup.sh")] + (args or [])
+    return subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        cwd=clean_dir,
+        env=full_env,
+    )
+
+
 def _run_setup(hook_dir: str, args: Optional[List[str]] = None, env: Optional[Dict[str, str]] = None) -> subprocess.CompletedProcess:
     """Run setup.sh from *hook_dir* with optional extra *args*, capturing stdout/stderr.
 
@@ -98,6 +137,12 @@ def _hooks_json_doc(tmp_root: str) -> dict:
 
 def _claude_settings_doc(tmp_root: str) -> dict:
     settings_json = os.path.join(tmp_root, ".claude", "settings.json")
+    with open(settings_json) as f:
+        return json.load(f)
+
+
+def _gemini_settings_doc(tmp_root: str) -> dict:
+    settings_json = os.path.join(tmp_root, ".gemini", "settings.json")
     with open(settings_json) as f:
         return json.load(f)
 
@@ -544,3 +589,274 @@ class TestProcessDiscoveryExamples:
         for event_hooks in doc["hooks"].values():
             for hook in event_hooks:
                 assert hook["bash"] == "{{SCRIPT_PATH}}"
+
+
+class TestGeminiSetup:
+    """Tests for Gemini CLI hook setup and operational commands."""
+
+    def _minimal_env(self, tmp_path) -> dict:
+        python3_bin = shutil.which("python3") or "/usr/bin/python3"
+        python3_dir = os.path.dirname(python3_bin)
+        return {
+            "HOME": str(tmp_path),
+            "PATH": f"{python3_dir}:/usr/bin:/bin",
+        }
+
+    def test_gemini_global_creates_settings_json(self, tmp_path):
+        """setup.sh --gemini --global must create ~/.gemini/settings.json with correct shape."""
+        hook_dir = _make_hook_dir(str(tmp_path))
+        env = self._minimal_env(tmp_path)
+
+        result = _run_setup(hook_dir, args=["--gemini", "--global"], env=env)
+        assert result.returncode == 0, result.stderr
+
+        settings_path = tmp_path / ".gemini" / "settings.json"
+        assert settings_path.exists(), "Expected ~/.gemini/settings.json to be created"
+
+        doc = _gemini_settings_doc(str(tmp_path))
+        assert "hooks" in doc, "settings.json must have a 'hooks' key"
+
+        # Every event must have a list of hook entries
+        for event, entries in doc["hooks"].items():
+            assert isinstance(entries, list), f"hooks[{event!r}] must be a list"
+            for entry in entries:
+                assert "hooks" in entry, f"Each hook entry must have a nested 'hooks' key"
+                for h in entry["hooks"]:
+                    assert "command" in h, "Each inner hook must have a 'command'"
+                    assert "otel" in h["command"].lower() or "otel-hook" in h["command"]
+
+    def test_gemini_matcher_only_for_matcher_events(self, tmp_path):
+        """Gemini hook entries must include 'matcher' only for matcher events."""
+        hook_dir = _make_hook_dir(str(tmp_path))
+        env = self._minimal_env(tmp_path)
+
+        result = _run_setup(hook_dir, args=["--gemini", "--global"], env=env)
+        assert result.returncode == 0, result.stderr
+
+        doc = _gemini_settings_doc(str(tmp_path))
+        # GEMINI_MATCHER_EVENTS includes agent/model/tool events but NOT SessionStart/SessionEnd
+        matcher_events = {"BeforeAgent", "AfterAgent", "BeforeModel", "AfterModel", "BeforeTool", "AfterTool"}
+        non_matcher_events = {"SessionStart", "SessionEnd"}
+
+        for event, entries in doc["hooks"].items():
+            for entry in entries:
+                if event in matcher_events:
+                    assert "matcher" in entry, f"Event {event!r} should have a matcher field"
+                elif event in non_matcher_events:
+                    assert "matcher" not in entry, f"Event {event!r} should NOT have a matcher field"
+
+    def test_gemini_diagnose_composite_command(self, tmp_path):
+        """--diagnose --gemini must correctly handle composite commands like 'python3 /path/otel_hook.py'."""
+        hook_dir = _make_hook_dir(str(tmp_path))
+        env = self._minimal_env(tmp_path)
+
+        # First set up gemini
+        result = _run_setup(hook_dir, args=["--gemini", "--global"], env=env)
+        assert result.returncode == 0, result.stderr
+
+        # Verify the settings.json was written with a composite command (python3 + script path)
+        doc = _gemini_settings_doc(str(tmp_path))
+        all_cmds = [
+            h["command"]
+            for entries in doc["hooks"].values()
+            for entry in entries
+            for h in entry.get("hooks", [])
+        ]
+        assert all_cmds, "Expected at least one command in hooks"
+
+        # Run diagnose — should report registered hooks, not spuriously mark them stale
+        result = _run_setup(hook_dir, args=["--diagnose", "--gemini", "--global"], env=env)
+        assert result.returncode == 0, result.stderr
+        output = result.stdout + result.stderr
+        assert "OTel hook entries registered" in output, (
+            f"Expected diagnose to find registered hooks, got:\n{output}"
+        )
+        # Stale count should be 0 because the script path exists
+        assert "(0 stale)" in output, (
+            f"Expected 0 stale hooks for a freshly installed config, got:\n{output}"
+        )
+
+    def test_gemini_clean_keeps_valid_composite_commands(self, tmp_path):
+        """--clean --gemini must keep hooks whose script path exists (composite commands)."""
+        hook_dir = _make_hook_dir(str(tmp_path))
+        env = self._minimal_env(tmp_path)
+
+        # Set up gemini hooks
+        result = _run_setup(hook_dir, args=["--gemini", "--global"], env=env)
+        assert result.returncode == 0, result.stderr
+
+        doc_before = _gemini_settings_doc(str(tmp_path))
+        hooks_before = sum(len(entries) for entries in doc_before["hooks"].values())
+
+        # Run clean — should NOT remove valid hooks
+        result = _run_setup(hook_dir, args=["--clean", "--gemini", "--global"], env=env)
+        assert result.returncode == 0, result.stderr
+
+        doc_after = _gemini_settings_doc(str(tmp_path))
+        hooks_after = sum(len(entries) for entries in doc_after["hooks"].values())
+        assert hooks_after == hooks_before, (
+            f"--clean removed valid composite-command hooks: before={hooks_before}, after={hooks_after}"
+        )
+        output = result.stdout + result.stderr
+        assert "No stale hook entries found" in output, (
+            f"Expected no stale entries to be cleaned, got:\n{output}"
+        )
+
+    def test_gemini_uninstall_removes_all_otel_hooks(self, tmp_path):
+        """--uninstall --gemini must remove all OTel hook entries."""
+        hook_dir = _make_hook_dir(str(tmp_path))
+        env = self._minimal_env(tmp_path)
+
+        result = _run_setup(hook_dir, args=["--gemini", "--global"], env=env)
+        assert result.returncode == 0, result.stderr
+
+        result = _run_setup(hook_dir, args=["--uninstall", "--gemini", "--global"], env=env)
+        assert result.returncode == 0, result.stderr
+        output = result.stdout + result.stderr
+        assert "Uninstalled" in output or "hook entries" in output.lower(), (
+            f"Expected uninstall confirmation, got:\n{output}"
+        )
+
+        doc = _gemini_settings_doc(str(tmp_path))
+        for event, entries in doc.get("hooks", {}).items():
+            for entry in entries:
+                for h in entry.get("hooks", []):
+                    cmd = h.get("command", "")
+                    assert "otel_hook" not in cmd and "otel-hook" not in cmd, (
+                        f"OTel hook was not removed for event {event!r}: {cmd!r}"
+                    )
+
+    def test_diagnose_auto_detects_gemini_when_dir_exists(self, tmp_path):
+        """--diagnose without an IDE flag must auto-detect gemini when ~/.gemini exists."""
+        hook_dir = _make_hook_dir(str(tmp_path))
+        env = self._minimal_env(tmp_path)
+
+        # Set up gemini first
+        result = _run_setup(hook_dir, args=["--gemini", "--global"], env=env)
+        assert result.returncode == 0, result.stderr
+
+        # Run --diagnose with NO IDE flag; ~/.gemini exists so gemini should be auto-detected
+        result = _run_setup(hook_dir, args=["--diagnose"], env=env)
+        assert result.returncode == 0, result.stderr
+        output = result.stdout + result.stderr
+        assert "Gemini CLI" in output, (
+            f"Expected Gemini CLI to be auto-detected for --diagnose, got:\n{output}"
+        )
+
+
+class TestOperationalFlags:
+    """Tests for --diagnose, --clean, --uninstall auto-detection and behavior."""
+
+    def _minimal_env(self, tmp_path) -> dict:
+        python3_bin = shutil.which("python3") or "/usr/bin/python3"
+        python3_dir = os.path.dirname(python3_bin)
+        return {
+            "HOME": str(tmp_path),
+            "PATH": f"{python3_dir}:/usr/bin:/bin",
+        }
+
+    def test_diagnose_without_ide_flag_errors_when_no_ide_detected(self, tmp_path):
+        """--diagnose with no IDE flag and no IDE detected must exit non-zero."""
+        # Use a clean directory (no .cursor/.claude/.gemini anywhere in path)
+        # so that auto-detect finds nothing.
+        clean_dir = _make_clean_dir(str(tmp_path))
+        home_dir = str(tmp_path / "home")
+        os.makedirs(home_dir, exist_ok=True)
+
+        result = _run_setup_from_clean_dir(clean_dir, home_dir, args=["--diagnose"])
+        assert result.returncode != 0, (
+            f"Expected non-zero exit when no IDE detected, got:\n{result.stdout}"
+        )
+        output = result.stdout + result.stderr
+        assert "No supported IDE detected" in output, (
+            f"Expected 'No supported IDE detected' error, got:\n{output}"
+        )
+
+    def test_clean_without_ide_flag_errors_when_no_ide_detected(self, tmp_path):
+        """--clean with no IDE flag and no IDE detected must exit non-zero."""
+        clean_dir = _make_clean_dir(str(tmp_path))
+        home_dir = str(tmp_path / "home")
+        os.makedirs(home_dir, exist_ok=True)
+
+        result = _run_setup_from_clean_dir(clean_dir, home_dir, args=["--clean"])
+        assert result.returncode != 0, (
+            f"Expected non-zero exit when no IDE detected, got:\n{result.stdout}"
+        )
+        output = result.stdout + result.stderr
+        assert "No supported IDE detected" in output
+
+    def test_uninstall_without_ide_flag_errors_when_no_ide_detected(self, tmp_path):
+        """--uninstall with no IDE flag and no IDE detected must exit non-zero."""
+        clean_dir = _make_clean_dir(str(tmp_path))
+        home_dir = str(tmp_path / "home")
+        os.makedirs(home_dir, exist_ok=True)
+
+        result = _run_setup_from_clean_dir(clean_dir, home_dir, args=["--uninstall"])
+        assert result.returncode != 0, (
+            f"Expected non-zero exit when no IDE detected, got:\n{result.stdout}"
+        )
+        output = result.stdout + result.stderr
+        assert "No supported IDE detected" in output
+
+    def test_diagnose_cursor_reports_registered_hooks(self, tmp_path):
+        """--diagnose --cursor must report that OTel hooks are registered."""
+        hook_dir = _make_hook_dir(str(tmp_path))
+        env = self._minimal_env(tmp_path)
+
+        # Set up cursor first
+        result = _run_setup(hook_dir, args=["--cursor"], env=env)
+        assert result.returncode == 0, result.stderr
+
+        result = _run_setup(hook_dir, args=["--diagnose", "--cursor"], env=env)
+        assert result.returncode == 0, result.stderr
+        output = result.stdout + result.stderr
+        assert "OTel hook entries registered" in output, (
+            f"Expected registered hooks report, got:\n{output}"
+        )
+        assert "(0 stale)" in output, (
+            f"Expected 0 stale hooks, got:\n{output}"
+        )
+
+    def test_clean_cursor_keeps_valid_hooks(self, tmp_path):
+        """--clean --cursor must preserve valid (non-stale) hook entries."""
+        hook_dir = _make_hook_dir(str(tmp_path))
+        env = self._minimal_env(tmp_path)
+
+        result = _run_setup(hook_dir, args=["--cursor"], env=env)
+        assert result.returncode == 0, result.stderr
+
+        doc_before = _hooks_json_doc(str(tmp_path))
+        total_before = sum(len(v) for v in doc_before["hooks"].values())
+
+        result = _run_setup(hook_dir, args=["--clean", "--cursor"], env=env)
+        assert result.returncode == 0, result.stderr
+
+        doc_after = _hooks_json_doc(str(tmp_path))
+        total_after = sum(len(v) for v in doc_after["hooks"].values())
+        assert total_after == total_before, (
+            f"--clean removed valid hooks: before={total_before}, after={total_after}"
+        )
+        output = result.stdout + result.stderr
+        assert "No stale hook entries found" in output
+
+    def test_uninstall_cursor_removes_otel_hooks(self, tmp_path):
+        """--uninstall --cursor must remove all OTel hook entries."""
+        hook_dir = _make_hook_dir(str(tmp_path))
+        env = self._minimal_env(tmp_path)
+
+        result = _run_setup(hook_dir, args=["--cursor"], env=env)
+        assert result.returncode == 0, result.stderr
+
+        result = _run_setup(hook_dir, args=["--uninstall", "--cursor"], env=env)
+        assert result.returncode == 0, result.stderr
+        output = result.stdout + result.stderr
+        assert "Uninstalled" in output
+
+        hooks_json = str(tmp_path / ".cursor" / "hooks.json")
+        with open(hooks_json) as f:
+            doc = json.load(f)
+        for event, entries in doc.get("hooks", {}).items():
+            for h in entries:
+                cmd = h.get("command", "")
+                assert "otel_hook" not in cmd and "otel-hook" not in cmd
+
