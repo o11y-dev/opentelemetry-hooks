@@ -8,7 +8,7 @@ dynamic = ["version"]
 description = "OpenTelemetry integration for AI coding agents (Cursor IDE/CLI, GitHub Copilot, Claude Code, Antigravity, OpenCode-compatible runners)"
 readme = "README.md"
 license = {text = "MIT"}
-requires-python = ">=3.9"
+requires-python = ">=3.12"
 dependencies = [
     "opentelemetry-sdk",
     "opentelemetry-exporter-otlp-proto-grpc",
@@ -39,7 +39,7 @@ fallback_version = "0.1.0"
 
 [tool.ruff]
 line-length = 120
-target-version = "py39"
+target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "W"]
