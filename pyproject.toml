@@ -43,6 +43,7 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "W"]
+ignore = ["E501"]
 
 [tool.semantic_release]
 version_toml = []
