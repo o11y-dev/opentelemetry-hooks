@@ -8,7 +8,7 @@
 
   "_comment_2": "=== Hook Behavior ===",
   "IDE_OTEL_BATCH_ON_STOP": "true",
-  "IDE_OTEL_LOCAL_SPANS": null,
+  "IDE_OTEL_LOCAL_SPANS": "true",
   "IDE_OTEL_CAPTURE_TEXT": "false",
   "IDE_OTEL_MASK_PROMPTS": "false",
   "IDE_OTEL_TEXT_MAX_CHARS": "4000",
