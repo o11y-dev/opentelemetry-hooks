@@ -620,7 +620,7 @@ class TestGeminiSetup:
         for event, entries in doc["hooks"].items():
             assert isinstance(entries, list), f"hooks[{event!r}] must be a list"
             for entry in entries:
-                assert "hooks" in entry, f"Each hook entry must have a nested 'hooks' key"
+                assert "hooks" in entry, "Each hook entry must have a nested 'hooks' key"
                 for h in entry["hooks"]:
                     assert "command" in h, "Each inner hook must have a 'command'"
                     assert "otel" in h["command"].lower() or "otel-hook" in h["command"]

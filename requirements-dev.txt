@@ -1,4 +1,5 @@
 pytest>=7.0
+ruff>=0.4
 opentelemetry-sdk
 opentelemetry-exporter-otlp-proto-grpc
 opentelemetry-exporter-otlp-proto-http
