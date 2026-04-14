@@ -46,6 +46,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    outputs:
+      version: ${{ steps.semver.outputs.version }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -122,6 +124,12 @@ jobs:
           SETUPTOOLS_SCM_PRETEND_VERSION: ${{ steps.semver.outputs.version }}
         run: python -m build
 
+      - name: Verify package
+        if: steps.semver.outputs.version != ''
+        run: |
+          pip install twine
+          twine check dist/*
+
       - name: Create GitHub Release
         if: steps.semver.outputs.version != ''
         uses: softprops/action-gh-release@v2
@@ -146,3 +154,32 @@ jobs:
               gh api -X DELETE "repos/${{ github.repository }}/git/refs/heads/${branch}" 2>/dev/null || true
             fi
           done
+
+  publish:
+    needs: release
+    if: needs.release.outputs.version != ''
+    runs-on: ubuntu-latest
+    environment: CD
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: v${{ needs.release.outputs.version }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build tools
+        run: pip install build setuptools-scm
+
+      - name: Build package
+        env:
+          SETUPTOOLS_SCM_PRETEND_VERSION: ${{ needs.release.outputs.version }}
+        run: python -m build
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI }}

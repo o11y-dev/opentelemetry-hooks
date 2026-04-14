@@ -356,6 +356,14 @@ _EVENT_ATTR_MAP = {
 # I/O helpers
 # ---------------------------------------------------------------------------
 def _load_input() -> dict:
+    if sys.stdin.isatty():
+        print("IDE Agent OpenTelemetry Hook — pure OpenTelemetry SDK.", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("Usage:", file=sys.stderr)
+        print("    echo '{\"hook_event_name\":\"sessionStart\",\"session_id\":\"abc\"}' | python3 otel_hook.py", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("This hook is intended to be called by an IDE (Cursor, Copilot, Claude Code) with JSON on stdin.", file=sys.stderr)
+        raise SystemExit(0)
     raw = sys.stdin.read()
     if not raw.strip():
         return {}
@@ -685,6 +693,7 @@ def _flush_stale_sessions(tracer) -> None:
         return
 
     cutoff = time.time() - ttl
+    flushed_any = False
     for name in os.listdir(_SESSION_DIR):
         path = os.path.join(_SESSION_DIR, name)
         try:
@@ -700,12 +709,15 @@ def _flush_stale_sessions(tracer) -> None:
             # Flush any dangling generation (Fix for Bug 4)
             pending_gen = ctx.get("current_generation")
             if pending_gen:
-                _flush_generation(tracer, pending_gen, ctx, ide)
-            _flush_session(tracer, session_key, ctx, ide)
+                _flush_generation(tracer, pending_gen, ctx, ide, flush=False)
+            _flush_session(tracer, session_key, ctx, ide, flush=False)
             os.remove(path)
+            flushed_any = True
             _LOGGER.info("Flushed stale session %s", session_key)
         except Exception:
             continue
+    if flushed_any:
+        _force_flush_provider()
 
 
 # ---------------------------------------------------------------------------
@@ -885,6 +897,8 @@ def _load_mdm_config() -> dict:
 
     Returns a dict of key/value pairs (may be empty).  Never raises.
     """
+    if _safe_bool(os.getenv("IDE_OTEL_SKIP_MDM", "")):
+        return {}
     if sys.platform == "darwin":
         return _load_mdm_config_macos()
     if sys.platform == "win32":
@@ -1272,8 +1286,12 @@ def _enable_file_exporter(path: str) -> None:
         _FILE_EXPORTER_PATHS.add(path)
 
 
-def _force_flush_provider(timeout_millis: int = 5000) -> None:
-    """Flush the SDK TracerProvider and LoggerProvider to push pending data."""
+def _force_flush_provider(timeout_millis: int = 500) -> None:
+    """Flush the SDK TracerProvider and LoggerProvider to push pending data.
+
+    Default timeout is short (500ms) to avoid hanging the IDE hook when the
+    OTLP collector is unreachable.
+    """
     try:
         provider = trace.get_tracer_provider()
         if hasattr(provider, "force_flush"):
@@ -1968,7 +1986,7 @@ def _make_trace_context(trace_id_hex: str, span_id_hex: str):
     if not tid or not sid:
         return None
     ctx = SpanContext(
-        trace_id=tid, span_id=sid, is_remote=False,
+        trace_id=tid, span_id=sid, is_remote=True,
         trace_flags=TraceFlags(TraceFlags.SAMPLED), trace_state=TraceState(),
     )
     return trace.set_span_in_context(NonRecordingSpan(ctx))
@@ -2167,7 +2185,7 @@ def _flatten(out: dict, prefix: str, data: dict) -> None:
 # ---------------------------------------------------------------------------
 # Flush helpers (session-level batching)
 # ---------------------------------------------------------------------------
-def _flush_generation(tracer, gen_key: str, session_ctx: Optional[dict], ide: str) -> None:
+def _flush_generation(tracer, gen_key: str, session_ctx: Optional[dict], ide: str, flush: bool = True) -> None:
     """Flush buffered generation events as a subtree under the session trace."""
     batch = sorted(
         _load_batch_events(gen_key),
@@ -2225,11 +2243,12 @@ def _flush_generation(tracer, gen_key: str, session_ctx: Optional[dict], ide: st
         gen_span.end(end_time=last_ts)
         _clear_batch_events(gen_key)
 
-    _force_flush_provider()
+    if flush:
+        _force_flush_provider()
     _LOGGER.info("Flushed generation %s (%d events)", gen_key, len(batch))
 
 
-def _flush_session(tracer, session_key: str, session_ctx: dict, ide: str) -> None:
+def _flush_session(tracer, session_key: str, session_ctx: dict, ide: str, flush: bool = True) -> None:
     """Emit the root session span covering the full session duration."""
     start_ns = session_ctx.get("start_time_ns") or time.time_ns()
     end_ns = time.time_ns()
@@ -2251,7 +2270,8 @@ def _flush_session(tracer, session_key: str, session_ctx: dict, ide: str) -> Non
         _log_with_span(_LOGGER, logging.INFO, session_span, "Session span: session=%s", session_key)
         session_span.end(end_time=end_ns)
 
-    _force_flush_provider()
+    if flush:
+        _force_flush_provider()
     trace_id = session_ctx.get("trace_id", "unknown")
     _LOGGER.info("Flushed session %s (trace_id=%s)", session_key, trace_id)
 
@@ -2260,6 +2280,9 @@ def _flush_session(tracer, session_key: str, session_ctx: dict, ide: str) -> Non
 # Main
 # ---------------------------------------------------------------------------
 def main() -> int:
+    if _safe_bool(os.getenv("IDE_OTEL_LOG_EVENTS", "")):
+        # Very early log to stderr to show the hook is alive
+        sys.stderr.write(f"Hook starting (pid={os.getpid()})\n")
     _apply_config_env(_load_config())
     _configure_logging()
     _cleanup_state()

@@ -176,7 +176,12 @@ if ! command -v python3 &>/dev/null; then
   echo "❌ python3 not found. Install Python 3.12+ and re-run."
   exit 1
 fi
-echo "✅ python3 found: $(python3 --version 2>&1)"
+PYTHON3_VERSION="$(python3 --version 2>&1)"
+if ! python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 12) else 1)'; then
+  echo "❌ Unsupported python3 version: $PYTHON3_VERSION. Install Python 3.12+ and re-run."
+  exit 1
+fi
+echo "✅ python3 found: $PYTHON3_VERSION"
 echo "✅ hook command: $HOOK_CMD"
 echo ""
 
