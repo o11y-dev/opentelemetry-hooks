@@ -22,6 +22,7 @@ classifiers = [
     "Topic :: System :: Logging",
 ]
 dependencies = [
+    "click>=8.0",
     "opentelemetry-sdk",
     "opentelemetry-exporter-otlp-proto-grpc",
     "opentelemetry-exporter-otlp-proto-http",
@@ -34,7 +35,7 @@ Documentation = "https://github.com/o11y-dev/opentelemetry-hooks#readme"
 Issues = "https://github.com/o11y-dev/opentelemetry-hooks/issues"
 
 [project.scripts]
-otel-hook = "otel_hook:main"
+otel-hook = "otel_hook:cli"
 
 [tool.setuptools]
 py-modules = ["otel_hook"]
