@@ -4,7 +4,6 @@ import hashlib
 import json
 import os
 import sys
-import tempfile
 import time
 from unittest import mock
 
@@ -536,8 +535,7 @@ class TestLoadMdmConfigWindows:
             raise OSError("no more values")
         fake_winreg.EnumValue.side_effect = enum_side_effect
         with mock.patch.dict("sys.modules", {"winreg": fake_winreg}):
-            # Need to re-import to pick up mock
-            import importlib
+            # Patching sys.modules is sufficient for the local import in _load_mdm_config_windows().
             result = otel_hook._load_mdm_config_windows()
         assert result.get("OTEL_SERVICE_NAME") == "mdm-service"
         assert result.get("IDE_OTEL_CAPTURE_TEXT") == "false"

@@ -173,7 +173,7 @@ echo "────────────────────────�
 
 # ─── Step 1: Check for python3 ──────────────────────────────────────────────
 if ! command -v python3 &>/dev/null; then
-  echo "❌ python3 not found. Install Python 3.9+ and re-run."
+  echo "❌ python3 not found. Install Python 3.12+ and re-run."
   exit 1
 fi
 echo "✅ python3 found: $(python3 --version 2>&1)"
