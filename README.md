@@ -1,5 +1,6 @@
 # OpenTelemetry Hook for AI Coding Agents
 
+[![PyPI](https://img.shields.io/pypi/v/opentelemetry-hooks)](https://pypi.org/project/opentelemetry-hooks/)
 [![Release](https://img.shields.io/github/v/release/o11y-dev/opentelemetry-hooks?display_name=tag)](https://github.com/o11y-dev/opentelemetry-hooks/releases)
 [![Tests](https://img.shields.io/github/actions/workflow/status/o11y-dev/opentelemetry-hooks/ci.yml?branch=main&label=tests)](https://github.com/o11y-dev/opentelemetry-hooks/actions/workflows/ci.yml)
 [![OpenTelemetry GenAI SemConv](https://img.shields.io/badge/OpenTelemetry-GenAI%20SemConv-425CC7?logo=opentelemetry)](https://opentelemetry.io/docs/specs/semconv/gen-ai/)
@@ -83,10 +84,16 @@ gen_ai.client.session (root)
 
 ```bash
 # Recommended: pipx keeps otel-hook on PATH in an isolated venv
-pipx install git+https://github.com/o11y-dev/opentelemetry-hooks.git@v0.10.0
+pipx install opentelemetry-hooks
 
 # Or with pip
-pip install git+https://github.com/o11y-dev/opentelemetry-hooks.git@v0.10.0
+pip install opentelemetry-hooks
+```
+
+To pin a specific version or install directly from a tag:
+
+```bash
+pipx install git+https://github.com/o11y-dev/opentelemetry-hooks.git@v0.10.0
 ```
 
 Or install from a pre-built wheel from the [Releases](https://github.com/o11y-dev/opentelemetry-hooks/releases) page:
