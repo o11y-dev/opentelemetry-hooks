@@ -102,11 +102,56 @@ Or install from a pre-built wheel from the [Releases](https://github.com/o11y-de
 pipx install opentelemetry_hooks-*.whl
 ```
 
-Once installed, `setup.sh` will automatically use the global `otel-hook` command.
+Once installed, run `otel-hook setup` to wire your agents.
 
 ## Quick Start
 
-### One-Command Setup (Cursor IDE)
+### One-Command Setup (pip/pipx install)
+
+After installing the package, configure your agents with the built-in CLI:
+
+```bash
+# Auto-detect all installed agents and configure globally
+otel-hook setup
+
+# Configure a specific agent
+otel-hook setup --agent claude
+otel-hook setup --agent cursor
+otel-hook setup --agent copilot --no-global   # project-scoped (run from repo root)
+otel-hook setup --agent gemini
+
+# Project-scoped instead of global
+otel-hook setup --agent cursor --no-global
+
+# Check registration status
+otel-hook diagnose
+
+# Remove hooks
+otel-hook uninstall --agent claude
+```
+
+Setup is idempotent — safe to re-run. Then configure your OTLP endpoint:
+
+```bash
+vim ~/.local/share/opentelemetry-hooks/otel_config.json
+```
+
+### Python API (importable)
+
+The setup functions are importable for programmatic use:
+
+```python
+from otel_hook import setup_agent, setup_claude, setup_cursor
+
+setup_claude(global_=True)   # ~/.claude/settings.json
+setup_cursor(global_=True)   # ~/.cursor/hooks.json
+setup_agent("gemini", global_=True)
+```
+
+### Source Checkout / Cursor Project Setup
+
+If you're working from a source checkout rather than a pip install, use the
+bundled `setup.sh`:
 
 ```bash
 # Project-level — hooks.json in the current repo (.cursor/hooks.json)
@@ -116,18 +161,9 @@ bash .cursor/hooks/opentelemetry-hook/setup.sh
 bash .cursor/hooks/opentelemetry-hook/setup.sh --cursor --global
 ```
 
-That's it. The script will:
-
-1. Create or **merge into** your existing `hooks.json` (safe to re-run)
-2. Create `otel_config.json` from the example template (if missing)
-3. Bootstrap the Python venv in the background (~30s on first run)
-
-Generated Cursor hook entries invoke `otel-hook` directly. The runtime now prefers parent-process discovery for the outer IDE and separately records any distinct inner engine as `gen_ai.client.agent_engine`.
-
 Then edit your endpoint config and restart Cursor:
 
 ```bash
-# Edit the OTLP endpoint + auth
 vim .cursor/hooks/opentelemetry-hook/otel_config.json
 ```
 

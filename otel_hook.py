@@ -26,12 +26,15 @@ import os
 import platform
 import random
 import re
+import shutil
 import subprocess
 import sys
 import time
 import urllib.parse
 from datetime import datetime, timezone
 from typing import Optional, Tuple
+
+import click
 
 # Whether to attach OS/host attributes to every span in addition to resource attributes.
 # Defaults to False to avoid duplicate data and hot-path overhead.
@@ -231,6 +234,36 @@ _CANONICAL_EVENT = {
     "BeforeAgent": "SubagentStart",
     "AfterAgent": "SubagentStop",
 }
+
+# ---------------------------------------------------------------------------
+# Setup CLI: per-agent event lists
+# ---------------------------------------------------------------------------
+_CURSOR_EVENTS = [
+    "sessionStart", "sessionEnd", "subagentStart", "subagentStop",
+    "preToolUse", "postToolUse", "postToolUseFailure",
+    "beforeShellExecution", "afterShellExecution",
+    "beforeMCPExecution", "afterMCPExecution",
+    "beforeReadFile", "afterFileEdit",
+    "beforeSubmitPrompt", "stop",
+]
+
+_CLAUDE_EVENTS = [
+    "SessionStart", "SessionEnd", "SubagentStart", "SubagentStop",
+    "PreToolUse", "PostToolUse", "PostToolUseFailure",
+    "UserPromptSubmit", "Stop",
+]
+_CLAUDE_MATCHER_EVENTS = {"PreToolUse", "PostToolUse", "PostToolUseFailure"}
+
+_COPILOT_EVENTS = [
+    "sessionStart", "sessionEnd", "userPromptSubmitted",
+    "preToolUse", "postToolUse", "errorOccurred",
+]
+
+_GEMINI_EVENTS = [
+    "SessionStart", "SessionEnd", "BeforeAgent", "AfterAgent",
+    "BeforeModel", "AfterModel", "BeforeTool", "AfterTool",
+]
+_GEMINI_MATCHER_EVENTS = {"BeforeAgent", "AfterAgent", "BeforeModel", "AfterModel", "BeforeTool", "AfterTool"}
 
 # Common camelCase -> snake_case aliases used by compatible hook runners.
 # Claude Code's documented hook payloads are already snake_case, but generic
@@ -2437,5 +2470,467 @@ def main() -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# Setup CLI: helpers
+# ---------------------------------------------------------------------------
+
+_REPO_MARKERS = (".git", ".github", ".cursor", ".claude", ".gemini", ".opencode")
+
+
+def _find_repo_root(cwd: str) -> str:
+    """Walk up from cwd to find the nearest repo/project root.
+
+    Tries `git rev-parse --show-toplevel` first (handles worktrees where .git
+    is a file rather than a directory), then falls back to marker detection.
+    """
+    # Fast path: ask git (works for worktrees too)
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=os.path.abspath(cwd),
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        # git not installed, timed out, or environment error — non-fatal, use marker walk
+        pass
+    # Fallback: walk up looking for well-known markers (os.path.exists handles
+    # both regular dirs and file-form .git used by worktrees/submodules)
+    current = os.path.abspath(cwd)
+    while True:
+        for marker in _REPO_MARKERS:
+            if os.path.exists(os.path.join(current, marker)):
+                return current
+        parent = os.path.dirname(current)
+        if parent == current:
+            return os.path.abspath(cwd)
+        current = parent
+
+
+def _resolve_hook_cmd() -> str:
+    return shutil.which("otel-hook") or "otel-hook"
+
+
+def _load_json_file(path: str) -> dict:
+    if os.path.exists(path):
+        with open(path) as f:
+            try:
+                return json.load(f)
+            except json.JSONDecodeError as exc:
+                raise click.ClickException(f"Invalid JSON in {path}: {exc}") from exc
+    return {}
+
+
+def _write_json_file(path: str, data: dict) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+
+
+def _detect_available_agents() -> list:
+    """Return list of agent names whose home dirs or commands exist."""
+    found = []
+    home = os.path.expanduser("~")
+    if os.path.isdir(os.path.join(home, ".cursor")) or shutil.which("cursor"):
+        found.append("cursor")
+    if os.path.isdir(os.path.join(home, ".claude")) or shutil.which("claude"):
+        found.append("claude")
+    # Copilot: detect via gh CLI or a .github dir in the current working directory
+    if shutil.which("gh") or os.path.isdir(os.path.join(os.getcwd(), ".github")):
+        found.append("copilot")
+    if os.path.isdir(os.path.join(home, ".gemini")) or shutil.which("gemini"):
+        found.append("gemini")
+    return found
+
+
+# ---------------------------------------------------------------------------
+# Setup CLI: per-agent setup functions (public API, importable)
+# ---------------------------------------------------------------------------
+
+def setup_cursor(global_: bool = True, cwd: str = ".") -> None:
+    """Register otel-hook in Cursor's hooks.json."""
+    hook_cmd = _resolve_hook_cmd()
+    if global_:
+        hooks_path = os.path.join(os.path.expanduser("~"), ".cursor", "hooks.json")
+    else:
+        repo = _find_repo_root(cwd)
+        hooks_path = os.path.join(repo, ".cursor", "hooks.json")
+
+    doc = _load_json_file(hooks_path)
+    doc.setdefault("version", 1)
+    hooks = doc.setdefault("hooks", {})
+    added, updated, skipped = [], [], []
+
+    for event in _CURSOR_EVENTS:
+        event_hooks = hooks.setdefault(event, [])
+        matches = [h for h in event_hooks if "otel-hook" in h.get("command", "") or "otel_hook" in h.get("command", "")]
+        if matches:
+            changed = False
+            for hook in matches:
+                env = hook.get("env")
+                if isinstance(env, dict) and "IDE_OTEL_IDE_NAME" in env:
+                    env = dict(env)
+                    env.pop("IDE_OTEL_IDE_NAME", None)
+                    if env:
+                        hook["env"] = env
+                    else:
+                        hook.pop("env", None)
+                    changed = True
+            (updated if changed else skipped).append(event)
+        else:
+            event_hooks.append({"command": hook_cmd})
+            added.append(event)
+
+    _write_json_file(hooks_path, doc)
+    _log_setup_result("cursor", hooks_path, added, updated, skipped)
+
+
+def setup_claude(global_: bool = True, cwd: str = ".") -> None:
+    """Register otel-hook in Claude Code's settings.json."""
+    hook_cmd = _resolve_hook_cmd()
+    if global_:
+        settings_path = os.path.join(os.path.expanduser("~"), ".claude", "settings.json")
+    else:
+        repo = _find_repo_root(cwd)
+        settings_path = os.path.join(repo, ".claude", "settings.json")
+
+    settings = _load_json_file(settings_path)
+    hooks = settings.setdefault("hooks", {})
+    added, updated, skipped = [], [], []
+
+    for event in _CLAUDE_EVENTS:
+        event_list = hooks.setdefault(event, [])
+        others, exact = [], []
+        for entry in event_list:
+            for h in entry.get("hooks", []):
+                cmd = h.get("command", "")
+                if "otel_hook" in cmd or "otel-hook" in cmd:
+                    (exact if cmd == hook_cmd else others).append(h)
+
+        if exact:
+            changed = False
+            for hook in exact:
+                env = hook.get("env")
+                if isinstance(env, dict) and "IDE_OTEL_IDE_NAME" in env:
+                    env = dict(env)
+                    env.pop("IDE_OTEL_IDE_NAME", None)
+                    if env:
+                        hook["env"] = env
+                    else:
+                        hook.pop("env", None)
+                    changed = True
+            (updated if changed else skipped).append(event)
+            continue
+
+        if others:
+            for hook in others:
+                hook["command"] = hook_cmd
+                env = hook.get("env")
+                if isinstance(env, dict) and "IDE_OTEL_IDE_NAME" in env:
+                    env = dict(env)
+                    env.pop("IDE_OTEL_IDE_NAME", None)
+                    if env:
+                        hook["env"] = env
+                    else:
+                        hook.pop("env", None)
+            updated.append(event)
+            continue
+
+        hook_entry: dict = {"hooks": [{"type": "command", "command": hook_cmd}]}
+        if event in _CLAUDE_MATCHER_EVENTS:
+            hook_entry["matcher"] = "*"
+        event_list.append(hook_entry)
+        added.append(event)
+
+    _write_json_file(settings_path, settings)
+    _log_setup_result("claude", settings_path, added, updated, skipped)
+
+
+def setup_copilot(cwd: str = ".") -> None:
+    """Register otel-hook in GitHub Copilot's otel-hooks.json."""
+    hook_cmd = _resolve_hook_cmd()
+    repo = _find_repo_root(cwd)
+    hooks_path = os.path.join(repo, ".github", "hooks", "otel-hooks.json")
+
+    doc = _load_json_file(hooks_path)
+    doc.setdefault("version", 1)
+    hooks = doc.setdefault("hooks", {})
+    added, updated, skipped = [], [], []
+
+    for event in _COPILOT_EVENTS:
+        event_hooks = hooks.setdefault(event, [])
+        plain = [h for h in event_hooks if "otel-hook" in h.get("bash", "") or "otel_hook" in h.get("bash", "")]
+        if plain:
+            changed = any("timeoutSec" not in h for h in plain)
+            for h in plain:
+                h.setdefault("timeoutSec", 30)
+            (updated if changed else skipped).append(event)
+            continue
+
+        legacy = [h for h in event_hooks if h not in plain and ("otel-hook" in h.get("bash", "") or "otel_hook" in h.get("bash", "")) and h.get("bash") != hook_cmd]
+        if legacy:
+            for h in legacy:
+                h["bash"] = hook_cmd
+                h.setdefault("timeoutSec", 30)
+            updated.append(event)
+            continue
+
+        event_hooks.append({"type": "command", "bash": hook_cmd, "timeoutSec": 30})
+        added.append(event)
+
+    _write_json_file(hooks_path, doc)
+    _log_setup_result("copilot", hooks_path, added, updated, skipped)
+
+
+def setup_gemini(global_: bool = True, cwd: str = ".") -> None:
+    """Register otel-hook in Gemini CLI's settings.json."""
+    hook_cmd = _resolve_hook_cmd()
+    if global_:
+        settings_path = os.path.join(os.path.expanduser("~"), ".gemini", "settings.json")
+    else:
+        repo = _find_repo_root(cwd)
+        settings_path = os.path.join(repo, ".gemini", "settings.json")
+
+    settings = _load_json_file(settings_path)
+    hooks = settings.setdefault("hooks", {})
+    added, updated, skipped = [], [], []
+
+    for event in _GEMINI_EVENTS:
+        event_list = hooks.setdefault(event, [])
+        others, exact = [], []
+        for entry in event_list:
+            for h in entry.get("hooks", []):
+                cmd = h.get("command", "")
+                if "otel_hook" in cmd or "otel-hook" in cmd:
+                    (exact if cmd == hook_cmd else others).append(h)
+
+        if exact:
+            skipped.append(event)
+            continue
+
+        if others:
+            for hook in others:
+                hook["command"] = hook_cmd
+            updated.append(event)
+            continue
+
+        hook_entry: dict = {"hooks": [{"type": "command", "command": hook_cmd, "name": "otel-hook"}]}
+        if event in _GEMINI_MATCHER_EVENTS:
+            hook_entry["matcher"] = "*"
+        event_list.append(hook_entry)
+        added.append(event)
+
+    _write_json_file(settings_path, settings)
+    _log_setup_result("gemini", settings_path, added, updated, skipped)
+
+
+def setup_agent(agent: str, global_: bool = True, cwd: str = ".") -> None:
+    """Dispatcher: configure hooks for a single agent by name."""
+    if agent == "cursor":
+        setup_cursor(global_=global_, cwd=cwd)
+    elif agent == "claude":
+        setup_claude(global_=global_, cwd=cwd)
+    elif agent == "copilot":
+        setup_copilot(cwd=cwd)
+    elif agent == "gemini":
+        setup_gemini(global_=global_, cwd=cwd)
+    else:
+        raise ValueError(f"Unknown agent: {agent}")
+
+
+def _log_setup_result(agent: str, path: str, added: list, updated: list, skipped: list) -> None:
+    if added:
+        click.echo(f"  ✓ [{agent}] Added {len(added)} events ({path})")
+    if updated:
+        click.echo(f"  ✓ [{agent}] Updated {len(updated)} events")
+    if not added and not updated:
+        click.echo(f"  · [{agent}] Already up to date ({path})")
+
+
+# ---------------------------------------------------------------------------
+# CLI entry point
+# ---------------------------------------------------------------------------
+
+@click.group(invoke_without_command=True)
+@click.pass_context
+def cli(ctx: click.Context) -> None:
+    """otel-hook — OpenTelemetry hook runner and setup CLI for AI coding agents.
+
+    When called with no subcommand and piped stdin, runs as the hook runner
+    (IDE event JSON → OTel spans). Use subcommands to configure agent hooks.
+    """
+    if ctx.invoked_subcommand is None:
+        if not sys.stdin.isatty():
+            raise SystemExit(main())
+        else:
+            click.echo(ctx.get_help())
+
+
+@cli.command("setup")
+@click.option(
+    "--agent", "agents",
+    type=click.Choice(["cursor", "claude", "copilot", "gemini"]),
+    multiple=True,
+    help="Agent to configure. Omit to auto-detect all available agents.",
+)
+@click.option("--global/--no-global", "global_", default=True, show_default=True,
+              help="Install to global agent config (~/.claude, ~/.cursor, etc.)")
+@click.option("--cwd", default=".", show_default=True,
+              help="Project root for project-scoped installs.")
+def setup_cmd(agents: tuple, global_: bool, cwd: str) -> None:
+    """Register otel-hook in one or more AI agent configs."""
+    targets = list(agents) or _detect_available_agents()
+    if not targets:
+        click.echo("No agents detected. Use --agent cursor|claude|copilot|gemini to specify one.", err=True)
+        raise SystemExit(1)
+    errors = []
+    for agent in targets:
+        try:
+            if agent == "copilot" and global_:
+                click.echo("  · [copilot] Skipping --global (Copilot hooks are repo-scoped; run without --global from your repo root)")
+                continue
+            setup_agent(agent, global_=global_, cwd=cwd)
+        except Exception as exc:
+            click.echo(f"  ✗ [{agent}] {exc}", err=True)
+            errors.append(agent)
+    if errors:
+        raise SystemExit(1)
+
+
+@cli.command("diagnose")
+@click.option(
+    "--agent", "agents",
+    type=click.Choice(["cursor", "claude", "copilot", "gemini"]),
+    multiple=True,
+    help="Agent to check. Omit to check all.",
+)
+@click.option("--global/--no-global", "global_", default=True)
+@click.option("--cwd", default=".")
+def diagnose_cmd(agents: tuple, global_: bool, cwd: str) -> None:
+    """Show hook registration status for each agent."""
+    targets = list(agents) or ["cursor", "claude", "copilot", "gemini"]
+    home = os.path.expanduser("~")
+
+    paths = {
+        "cursor": os.path.join(home, ".cursor", "hooks.json") if global_ else os.path.join(_find_repo_root(cwd), ".cursor", "hooks.json"),
+        "claude": os.path.join(home, ".claude", "settings.json") if global_ else os.path.join(_find_repo_root(cwd), ".claude", "settings.json"),
+        "copilot": os.path.join(_find_repo_root(cwd), ".github", "hooks", "otel-hooks.json"),
+        "gemini": os.path.join(home, ".gemini", "settings.json") if global_ else os.path.join(_find_repo_root(cwd), ".gemini", "settings.json"),
+    }
+
+    for agent in targets:
+        path = paths[agent]
+        if not os.path.exists(path):
+            click.echo(f"  · [{agent}] Not found ({path})")
+            continue
+        doc = _load_json_file(path)
+        hooks = doc.get("hooks", {})
+        count = 0
+        for entries in hooks.values():
+            for entry in (entries if isinstance(entries, list) else []):
+                # cursor: {"command": "otel-hook"}
+                if "otel-hook" in entry.get("command", "") or "otel_hook" in entry.get("command", ""):
+                    count += 1
+                # copilot: {"bash": "otel-hook"}
+                if "otel-hook" in entry.get("bash", "") or "otel_hook" in entry.get("bash", ""):
+                    count += 1
+                # claude/gemini: {"hooks": [{"command": "otel-hook"}]}
+                for h in entry.get("hooks", []):
+                    if "otel-hook" in h.get("command", "") or "otel_hook" in h.get("command", ""):
+                        count += 1
+        status = f"{count} events registered" if count else "not registered"
+        click.echo(f"  {'✓' if count else '·'} [{agent}] {status} ({path})")
+
+
+@cli.command("uninstall")
+@click.option(
+    "--agent", "agents",
+    type=click.Choice(["cursor", "claude", "copilot", "gemini"]),
+    multiple=True,
+    required=True,
+)
+@click.option("--global/--no-global", "global_", default=True)
+@click.option("--cwd", default=".")
+def uninstall_cmd(agents: tuple, global_: bool, cwd: str) -> None:
+    """Remove otel-hook entries from agent configs."""
+    home = os.path.expanduser("~")
+    for agent in agents:
+        if agent == "cursor":
+            path = os.path.join(home, ".cursor", "hooks.json") if global_ else os.path.join(_find_repo_root(cwd), ".cursor", "hooks.json")
+            doc = _load_json_file(path)
+            hooks = doc.get("hooks", {})
+            removed = 0
+            for event in list(hooks.keys()):
+                before = len(hooks[event])
+                hooks[event] = [h for h in hooks[event] if "otel-hook" not in h.get("command", "") and "otel_hook" not in h.get("command", "")]
+                removed += before - len(hooks[event])
+                if not hooks[event]:
+                    del hooks[event]
+            if removed:
+                _write_json_file(path, doc)
+            click.echo(f"  {'✓' if removed else '·'} [cursor] Removed {removed} entries ({path})")
+
+        elif agent == "claude":
+            path = os.path.join(home, ".claude", "settings.json") if global_ else os.path.join(_find_repo_root(cwd), ".claude", "settings.json")
+            settings = _load_json_file(path)
+            hooks = settings.get("hooks", {})
+            removed = 0
+            for event in list(hooks.keys()):
+                new_list = []
+                for entry in hooks[event]:
+                    surviving = [h for h in entry.get("hooks", []) if "otel-hook" not in h.get("command", "") and "otel_hook" not in h.get("command", "")]
+                    if surviving:
+                        entry["hooks"] = surviving
+                        new_list.append(entry)
+                    else:
+                        removed += 1
+                hooks[event] = new_list
+                if not hooks[event]:
+                    del hooks[event]
+            if removed:
+                _write_json_file(path, settings)
+            click.echo(f"  {'✓' if removed else '·'} [claude] Removed {removed} entries ({path})")
+
+        elif agent == "copilot":
+            path = os.path.join(_find_repo_root(cwd), ".github", "hooks", "otel-hooks.json")
+            doc = _load_json_file(path)
+            hooks = doc.get("hooks", {})
+            removed = 0
+            for event in list(hooks.keys()):
+                before = len(hooks[event])
+                hooks[event] = [h for h in hooks[event] if "otel-hook" not in h.get("bash", "") and "otel_hook" not in h.get("bash", "")]
+                removed += before - len(hooks[event])
+                if not hooks[event]:
+                    del hooks[event]
+            if removed:
+                _write_json_file(path, doc)
+            click.echo(f"  {'✓' if removed else '·'} [copilot] Removed {removed} entries ({path})")
+
+        elif agent == "gemini":
+            path = os.path.join(home, ".gemini", "settings.json") if global_ else os.path.join(_find_repo_root(cwd), ".gemini", "settings.json")
+            settings = _load_json_file(path)
+            hooks = settings.get("hooks", {})
+            removed = 0
+            for event in list(hooks.keys()):
+                new_list = []
+                for entry in hooks[event]:
+                    surviving = [h for h in entry.get("hooks", []) if "otel-hook" not in h.get("command", "") and "otel_hook" not in h.get("command", "")]
+                    if surviving:
+                        entry["hooks"] = surviving
+                        new_list.append(entry)
+                    else:
+                        removed += 1
+                hooks[event] = new_list
+                if not hooks[event]:
+                    del hooks[event]
+            if removed:
+                _write_json_file(path, settings)
+            click.echo(f"  {'✓' if removed else '·'} [gemini] Removed {removed} entries ({path})")
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    cli()
