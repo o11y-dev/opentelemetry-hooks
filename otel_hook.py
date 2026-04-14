@@ -2478,11 +2478,30 @@ _REPO_MARKERS = (".git", ".github", ".cursor", ".claude", ".gemini", ".opencode"
 
 
 def _find_repo_root(cwd: str) -> str:
-    """Walk up from cwd to find the nearest repo/project root."""
+    """Walk up from cwd to find the nearest repo/project root.
+
+    Tries `git rev-parse --show-toplevel` first (handles worktrees where .git
+    is a file rather than a directory), then falls back to marker detection.
+    """
+    # Fast path: ask git (works for worktrees too)
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=os.path.abspath(cwd),
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except Exception:
+        pass
+    # Fallback: walk up looking for well-known markers (os.path.exists handles
+    # both regular dirs and file-form .git used by worktrees/submodules)
     current = os.path.abspath(cwd)
     while True:
         for marker in _REPO_MARKERS:
-            if os.path.isdir(os.path.join(current, marker)):
+            if os.path.exists(os.path.join(current, marker)):
                 return current
         parent = os.path.dirname(current)
         if parent == current:
@@ -2499,8 +2518,8 @@ def _load_json_file(path: str) -> dict:
         with open(path) as f:
             try:
                 return json.load(f)
-            except json.JSONDecodeError:
-                return {}
+            except json.JSONDecodeError as exc:
+                raise click.ClickException(f"Invalid JSON in {path}: {exc}") from exc
     return {}
 
 
@@ -2519,6 +2538,9 @@ def _detect_available_agents() -> list:
         found.append("cursor")
     if os.path.isdir(os.path.join(home, ".claude")) or shutil.which("claude"):
         found.append("claude")
+    # Copilot: detect via gh CLI or a .github dir in the current working directory
+    if shutil.which("gh") or os.path.isdir(os.path.join(os.getcwd(), ".github")):
+        found.append("copilot")
     if os.path.isdir(os.path.join(home, ".gemini")) or shutil.which("gemini"):
         found.append("gemini")
     return found
@@ -2544,7 +2566,7 @@ def setup_cursor(global_: bool = True, cwd: str = ".") -> None:
 
     for event in _CURSOR_EVENTS:
         event_hooks = hooks.setdefault(event, [])
-        matches = [h for h in event_hooks if h.get("command") == hook_cmd]
+        matches = [h for h in event_hooks if "otel-hook" in h.get("command", "") or "otel_hook" in h.get("command", "")]
         if matches:
             changed = False
             for hook in matches:
@@ -2638,14 +2660,9 @@ def setup_copilot(cwd: str = ".") -> None:
     hooks = doc.setdefault("hooks", {})
     added, updated, skipped = [], [], []
 
-    legacy_cmds = [
-        f"env IDE_OTEL_IDE_NAME=copilot {hook_cmd}",
-        f"env IDE_OTEL_IDE_NAME=GitHub Copilot {hook_cmd}",
-    ]
-
     for event in _COPILOT_EVENTS:
         event_hooks = hooks.setdefault(event, [])
-        plain = [h for h in event_hooks if h.get("type") == "command" and h.get("bash") == hook_cmd]
+        plain = [h for h in event_hooks if "otel-hook" in h.get("bash", "") or "otel_hook" in h.get("bash", "")]
         if plain:
             changed = any("timeoutSec" not in h for h in plain)
             for h in plain:
@@ -2653,7 +2670,7 @@ def setup_copilot(cwd: str = ".") -> None:
             (updated if changed else skipped).append(event)
             continue
 
-        legacy = [h for h in event_hooks if h.get("type") == "command" and h.get("bash") in legacy_cmds]
+        legacy = [h for h in event_hooks if h not in plain and ("otel-hook" in h.get("bash", "") or "otel_hook" in h.get("bash", "")) and h.get("bash") != hook_cmd]
         if legacy:
             for h in legacy:
                 h["bash"] = hook_cmd
@@ -2915,4 +2932,4 @@ def uninstall_cmd(agents: tuple, global_: bool, cwd: str) -> None:
 
 
 if __name__ == "__main__":
-    raise SystemExit(cli(standalone_mode=False) or 0)
+    cli()

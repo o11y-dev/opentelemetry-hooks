@@ -35,7 +35,7 @@ class TestHookRunnerBackwardCompat:
         result = runner.invoke(cli, [], input='{"hook_event_name":"Stop","session_id":"test-bc"}')
         # main() exits 0 and prints the continue response
         assert result.exit_code == 0
-        assert '"continue"' in result.output or result.exit_code == 0
+        assert '"continue"' in result.output
 
     def test_tty_shows_help(self):
         """When called with no subcommand and no piped input, help is shown."""
