@@ -2494,7 +2494,8 @@ def _find_repo_root(cwd: str) -> str:
         )
         if result.returncode == 0:
             return result.stdout.strip()
-    except Exception:
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        # git not installed, timed out, or environment error — non-fatal, use marker walk
         pass
     # Fallback: walk up looking for well-known markers (os.path.exists handles
     # both regular dirs and file-form .git used by worktrees/submodules)

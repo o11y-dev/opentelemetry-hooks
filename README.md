@@ -117,7 +117,7 @@ otel-hook setup
 # Configure a specific agent
 otel-hook setup --agent claude
 otel-hook setup --agent cursor
-otel-hook setup --agent copilot   # project-scoped (run from repo root)
+otel-hook setup --agent copilot --no-global   # project-scoped (run from repo root)
 otel-hook setup --agent gemini
 
 # Project-scoped instead of global
