@@ -145,7 +145,7 @@ rm -rf /tmp/otel-hook-source
 
 ### Prerequisites
 
-- Python 3.8+ (the setup script checks for this)
+- Python 3.11+ (the setup script checks for this)
 - An OTLP-compatible backend (Jaeger, Coralogix, Datadog, Grafana, Honeycomb, etc.)
 
 ### Other IDEs
