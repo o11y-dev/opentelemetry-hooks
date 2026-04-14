@@ -2,7 +2,6 @@
 import json
 import os
 
-import pytest
 from click.testing import CliRunner
 
 import otel_hook
@@ -40,9 +39,7 @@ class TestHookRunnerBackwardCompat:
 
     def test_tty_shows_help(self):
         """When called with no subcommand and no piped input, help is shown."""
-        runner = CliRunner(mix_stderr=False)
-        # Pass empty input so isatty() returns False in CliRunner — we just
-        # check that the setup/diagnose/uninstall commands appear in help output.
+        runner = CliRunner()
         result = runner.invoke(cli, ["--help"])
         assert result.exit_code == 0
         assert "setup" in result.output
