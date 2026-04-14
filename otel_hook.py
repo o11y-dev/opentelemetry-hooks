@@ -357,14 +357,13 @@ _EVENT_ATTR_MAP = {
 # ---------------------------------------------------------------------------
 def _load_input() -> dict:
     if sys.stdin.isatty():
-        # Help message when run interactively from a terminal
-        print("IDE Agent OpenTelemetry Hook — pure OpenTelemetry SDK.")
-        print("")
-        print("Usage:")
-        print("    echo '{\"hook_event_name\":\"sessionStart\",\"session_id\":\"abc\"}' | python3 otel_hook.py")
-        print("")
-        print("This hook is intended to be called by an IDE (Cursor, Copilot, Claude Code) with JSON on stdin.")
-        return {}
+        print("IDE Agent OpenTelemetry Hook — pure OpenTelemetry SDK.", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("Usage:", file=sys.stderr)
+        print("    echo '{\"hook_event_name\":\"sessionStart\",\"session_id\":\"abc\"}' | python3 otel_hook.py", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("This hook is intended to be called by an IDE (Cursor, Copilot, Claude Code) with JSON on stdin.", file=sys.stderr)
+        raise SystemExit(0)
     raw = sys.stdin.read()
     if not raw.strip():
         return {}
@@ -1289,7 +1288,7 @@ def _enable_file_exporter(path: str) -> None:
 
 def _force_flush_provider(timeout_millis: int = 500) -> None:
     """Flush the SDK TracerProvider and LoggerProvider to push pending data.
-    
+
     Default timeout is short (500ms) to avoid hanging the IDE hook when the
     OTLP collector is unreachable.
     """
