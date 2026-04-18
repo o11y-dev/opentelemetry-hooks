@@ -5,13 +5,13 @@
 [![Tests](https://img.shields.io/github/actions/workflow/status/o11y-dev/opentelemetry-hooks/ci.yml?branch=main&label=tests)](https://github.com/o11y-dev/opentelemetry-hooks/actions/workflows/ci.yml)
 [![OpenTelemetry GenAI SemConv](https://img.shields.io/badge/OpenTelemetry-GenAI%20SemConv-425CC7?logo=opentelemetry)](https://opentelemetry.io/docs/specs/semconv/gen-ai/)
 
-> Observability for your AI pair-programmer — know what your agent is doing, one trace at a time.
+> Observability for AI coding agents — any OTLP-compatible backend.
 
-An open-source OpenTelemetry integration that captures all AI coding agent activity as structured **traces and logs** and exports them to any OTLP-compliant backend. Works with **Cursor IDE / Cursor CLI**, **GitHub Copilot**, **Claude Code**, **Antigravity**, and compatible hook runners such as **OpenCode** using [OpenTelemetry GenAI semantic conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/).
+An open-source OpenTelemetry integration that captures AI coding agent activity as structured **traces and logs** and exports them to any OTLP-compatible backend. Works with **any AI coding agent** — today: **Antigravity**, **Claude Code**, **Cursor IDE / Cursor CLI**, **Gemini CLI**, **GitHub Copilot**, and **OpenCode** — using [OpenTelemetry GenAI semantic conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/).
 
 Every hook event — prompt submissions, tool calls, shell commands, MCP interactions, file edits, subagent orchestration — becomes an OpenTelemetry span you can query, alert on, and visualize in Jaeger, Grafana, Datadog, Honeycomb, Coralogix, or any OTLP-compatible backend.
 
-> **Note**: Claude Code has [native OpenTelemetry support](https://docs.claude.com/en/docs/claude-code/monitoring-usage), but this repo can also be used as a hook target when you want the same hook-based pipeline across IDEs.
+> **Note**: Claude Code has [native OpenTelemetry support](https://docs.claude.com/en/docs/claude-code/monitoring-usage), but this repo can also be used as a hook target when you want the same hook-based pipeline across all agents.
 
 ## How It Works
 
@@ -58,27 +58,28 @@ gen_ai.client.session (root)
 
 ## Supported Events
 
-| Canonical Name | Cursor IDE / CLI | Copilot | Claude Code / Antigravity | OpenCode (plugin) |
-|---|---|---|---|---|
-| `SessionStart` | `sessionStart` | `sessionStart` | `SessionStart` | `session.created` |
-| `SessionEnd` | `sessionEnd` | `sessionEnd` | `SessionEnd` | `session.deleted`, `session.error` |
-| `UserPromptSubmit` | `beforeSubmitPrompt` | `userPromptSubmitted` | `UserPromptSubmit` | `message.updated` (role=user) |
-| `PreToolUse` | `preToolUse` | `preToolUse` | `PreToolUse` | `tool.execute.before` ¹ |
-| `PostToolUse` | `postToolUse` | `postToolUse` | `PostToolUse` | `tool.execute.after` (exit=0) |
-| `PostToolUseFailure` | `postToolUseFailure` | — | `PostToolUseFailure` | `tool.execute.after` (exit≠0) |
-| `Stop` | `stop` | — | `Stop` | `session.idle` |
-| `SubagentStart` | `subagentStart` | — | `SubagentStart` | — ² |
-| `SubagentStop` | `subagentStop` | — | `SubagentStop` | — ² |
-| `ErrorOccurred` | — | `errorOccurred` | — | — |
-| `BeforeShellExecution` | `beforeShellExecution` | — | — | — ¹ |
-| `AfterShellExecution` | `afterShellExecution` | — | — | — ¹ |
-| `BeforeMCPExecution` | `beforeMCPExecution` | — | — | — ¹ |
-| `AfterMCPExecution` | `afterMCPExecution` | — | — | — ¹ |
-| `BeforeReadFile` | `beforeReadFile` | — | — | — ¹ |
-| `AfterFileEdit` | `afterFileEdit` | — | — | `file.edited` |
+| Canonical Name | Antigravity / Claude Code | Cursor IDE / CLI | Gemini CLI | GitHub Copilot | OpenCode (plugin) |
+|---|---|---|---|---|---|
+| `SessionStart` | `SessionStart` | `sessionStart` | `SessionStart` | `sessionStart` | `session.created` |
+| `SessionEnd` | `SessionEnd` | `sessionEnd` | `SessionEnd` | `sessionEnd` | `session.deleted`, `session.error` |
+| `UserPromptSubmit` | `UserPromptSubmit` | `beforeSubmitPrompt` | `BeforeModel` ¹ | `userPromptSubmitted` | `message.updated` (role=user) |
+| `PreToolUse` | `PreToolUse` | `preToolUse` | `BeforeTool` | `preToolUse` | `tool.execute.before` ² |
+| `PostToolUse` | `PostToolUse` | `postToolUse` | `AfterTool` | `postToolUse` | `tool.execute.after` (exit=0) |
+| `PostToolUseFailure` | `PostToolUseFailure` | `postToolUseFailure` | — | — | `tool.execute.after` (exit≠0) |
+| `Stop` | `Stop` | `stop` | `AfterModel` ¹ | — | `session.idle` |
+| `SubagentStart` | `SubagentStart` | `subagentStart` | `BeforeAgent` | — | — ³ |
+| `SubagentStop` | `SubagentStop` | `subagentStop` | `AfterAgent` | — | — ³ |
+| `ErrorOccurred` | — | — | — | `errorOccurred` | — |
+| `BeforeShellExecution` | — | `beforeShellExecution` | — | — | — ² |
+| `AfterShellExecution` | — | `afterShellExecution` | — | — | — ² |
+| `BeforeMCPExecution` | — | `beforeMCPExecution` | — | — | — ² |
+| `AfterMCPExecution` | — | `afterMCPExecution` | — | — | — ² |
+| `BeforeReadFile` | — | `beforeReadFile` | — | — | — ² |
+| `AfterFileEdit` | — | `afterFileEdit` | — | — | `file.edited` |
 
-¹ OpenCode routes bash, read, write, MCP, and all other tools through the universal `tool.execute.before/after` hooks, so these events are observable as `PreToolUse`/`PostToolUse` with the appropriate `tool_name`.<br>
-² Subagent invocations surface as `PreToolUse`/`PostToolUse` with `tool_name=task` — there are no dedicated subagent hook events in OpenCode.
+¹ Gemini CLI uses `BeforeModel`/`AfterModel` where other agents use `UserPromptSubmit`/`Stop`; the hook normalizes both to canonical span names.<br>
+² OpenCode routes bash, read, write, MCP, and all other tools through the universal `tool.execute.before/after` hooks, so these events are observable as `PreToolUse`/`PostToolUse` with the appropriate `tool_name`.<br>
+³ Subagent invocations surface as `PreToolUse`/`PostToolUse` with `tool_name=task` — there are no dedicated subagent hook events in OpenCode.
 
 ## Installation
 
