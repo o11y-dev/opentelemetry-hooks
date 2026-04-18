@@ -7,7 +7,7 @@
 
 > Observability for AI coding agents — any OTLP-compatible backend.
 
-An open-source OpenTelemetry integration that captures AI coding agent activity as structured **traces and logs** and exports them to any OTLP-compliant backend. Works with **any AI coding agent** — today: **Antigravity**, **Claude Code**, **Cursor IDE / Cursor CLI**, **Gemini CLI**, **GitHub Copilot**, and **OpenCode** — using [OpenTelemetry GenAI semantic conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/).
+An open-source OpenTelemetry integration that captures AI coding agent activity as structured **traces and logs** and exports them to any OTLP-compatible backend. Works with **any AI coding agent** — today: **Antigravity**, **Claude Code**, **Cursor IDE / Cursor CLI**, **Gemini CLI**, **GitHub Copilot**, and **OpenCode** — using [OpenTelemetry GenAI semantic conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/).
 
 Every hook event — prompt submissions, tool calls, shell commands, MCP interactions, file edits, subagent orchestration — becomes an OpenTelemetry span you can query, alert on, and visualize in Jaeger, Grafana, Datadog, Honeycomb, Coralogix, or any OTLP-compatible backend.
 
