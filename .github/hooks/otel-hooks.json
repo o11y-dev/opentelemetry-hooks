@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "type": "command",
+        "bash": "/usr/local/bin/otel-hook",
+        "timeoutSec": 30
+      }
+    ],
+    "sessionEnd": [
+      {
+        "type": "command",
+        "bash": "/usr/local/bin/otel-hook",
+        "timeoutSec": 30
+      }
+    ],
+    "userPromptSubmitted": [
+      {
+        "type": "command",
+        "bash": "/usr/local/bin/otel-hook",
+        "timeoutSec": 30
+      }
+    ],
+    "preToolUse": [
+      {
+        "type": "command",
+        "bash": "/usr/local/bin/otel-hook",
+        "timeoutSec": 30
+      }
+    ],
+    "postToolUse": [
+      {
+        "type": "command",
+        "bash": "/usr/local/bin/otel-hook",
+        "timeoutSec": 30
+      }
+    ],
+    "errorOccurred": [
+      {
+        "type": "command",
+        "bash": "/usr/local/bin/otel-hook",
+        "timeoutSec": 30
+      }
+    ]
+  }
+}
