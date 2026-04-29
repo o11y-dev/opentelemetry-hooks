@@ -1554,7 +1554,7 @@ class TestSetupOpencode:
     def test_global_install_creates_plugin_file(self, tmp_path, monkeypatch):
         config_dir = tmp_path / ".config" / "opencode" / "plugins"
         monkeypatch.setenv("HOME", str(tmp_path))
-        monkeypatch.setattr(otel_hook, "_find_opencode_plugin_source", lambda: self._plugin_source())
+        monkeypatch.setattr(otel_hook, "_find_opencode_plugin_source", self._plugin_source)
         otel_hook.setup_opencode(global_=True)
         dest = config_dir / "otel-hook.ts"
         assert dest.is_file()
@@ -1564,7 +1564,7 @@ class TestSetupOpencode:
         # Set up a fake git repo root
         (tmp_path / ".git").mkdir()
         plugins_dir = tmp_path / ".opencode" / "plugins"
-        monkeypatch.setattr(otel_hook, "_find_opencode_plugin_source", lambda: self._plugin_source())
+        monkeypatch.setattr(otel_hook, "_find_opencode_plugin_source", self._plugin_source)
         otel_hook.setup_opencode(global_=False, cwd=str(tmp_path))
         dest = plugins_dir / "otel-hook.ts"
         assert dest.is_file()
