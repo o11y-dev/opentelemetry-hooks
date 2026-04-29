@@ -5,6 +5,7 @@ import json
 import os
 import sys
 import time
+from pathlib import Path
 from unittest import mock
 
 import pytest
@@ -1557,7 +1558,7 @@ class TestSetupOpencode:
         otel_hook.setup_opencode(global_=True)
         dest = config_dir / "otel-hook.ts"
         assert dest.is_file()
-        assert dest.read_text() == open(self._plugin_source()).read()
+        assert dest.read_text() == Path(self._plugin_source()).read_text()
 
     def test_project_install_creates_plugin_in_opencode_dir(self, tmp_path, monkeypatch):
         # Set up a fake git repo root
@@ -1589,7 +1590,7 @@ class TestSetupOpencode:
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.setattr(otel_hook, "_find_opencode_plugin_source", lambda: self._plugin_source())
         otel_hook.setup_opencode(global_=True)
-        assert dest.read_text() == open(self._plugin_source()).read()
+        assert dest.read_text() == Path(self._plugin_source()).read_text()
         captured = capsys.readouterr()
         assert "Updated" in captured.out
 

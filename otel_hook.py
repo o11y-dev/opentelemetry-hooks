@@ -2798,17 +2798,17 @@ def setup_opencode(global_: bool = True, cwd: str = ".") -> None:
         with open(dest) as f:
             dest_content = f.read()
         if src_content == dest_content:
-            _log_setup_result("opencode", dest, [], [], [_OPENCODE_PLUGIN_FILENAME])
+            click.echo(f"  · [opencode] Already up to date ({dest})")
             return
         # Content differs — update
         os.makedirs(plugins_dir, exist_ok=True)
         shutil.copy2(src, dest)
-        _log_setup_result("opencode", dest, [], [_OPENCODE_PLUGIN_FILENAME], [])
+        click.echo(f"  ✓ [opencode] Updated plugin ({dest})")
         return
 
     os.makedirs(plugins_dir, exist_ok=True)
     shutil.copy2(src, dest)
-    _log_setup_result("opencode", dest, [_OPENCODE_PLUGIN_FILENAME], [], [])
+    click.echo(f"  ✓ [opencode] Installed plugin ({dest})")
 
 
 def setup_agent(agent: str, global_: bool = True, cwd: str = ".") -> None:
