@@ -265,6 +265,10 @@ _GEMINI_EVENTS = [
 ]
 _GEMINI_MATCHER_EVENTS = {"BeforeAgent", "AfterAgent", "BeforeModel", "AfterModel", "BeforeTool", "AfterTool"}
 
+# OpenCode plugin — source filename (in plugin/) and destination filename (in plugins/).
+_OPENCODE_PLUGIN_SOURCE_FILENAME = "opencode.ts"
+_OPENCODE_PLUGIN_FILENAME = "otel-hook.ts"
+
 # Common camelCase -> snake_case aliases used by compatible hook runners.
 # Claude Code's documented hook payloads are already snake_case, but generic
 # runners and workflow adapters that forward Claude- or Antigravity-style
@@ -2544,7 +2548,44 @@ def _detect_available_agents() -> list:
         found.append("copilot")
     if os.path.isdir(os.path.join(home, ".gemini")) or shutil.which("gemini"):
         found.append("gemini")
+    if shutil.which("opencode") or os.path.isdir(os.path.join(home, ".config", "opencode")):
+        found.append("opencode")
     return found
+
+
+def _find_opencode_plugin_source() -> Optional[str]:
+    """Return the absolute path to the bundled plugin/opencode.ts source file.
+
+    Looks next to otel_hook.py first (source checkout), then in the installed
+    package data location (pipx / pip install).
+    """
+    # Source checkout: plugin/ lives next to otel_hook.py
+    candidate = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plugin", _OPENCODE_PLUGIN_SOURCE_FILENAME)
+    if os.path.isfile(candidate):
+        return candidate
+    # Installed package data: setuptools places data files under <prefix>/share/
+    # Check the venv that contains this very module (handles pipx venvs correctly),
+    # then sys.prefix, then ~/.local as a last-resort fallback.
+    import sys
+    module_file = os.path.abspath(__file__)
+    # Walk up from the module file to find a share/ sibling (handles any venv layout)
+    check = os.path.dirname(module_file)
+    for _ in range(6):  # at most 6 levels up
+        share_candidate = os.path.join(check, "share", "opentelemetry-hooks", "plugin", _OPENCODE_PLUGIN_SOURCE_FILENAME)
+        if os.path.isfile(share_candidate):
+            return share_candidate
+        parent = os.path.dirname(check)
+        if parent == check:
+            break
+        check = parent
+    # Fallbacks: sys.prefix, sys.real_prefix, ~/.local
+    for prefix in (sys.prefix, getattr(sys, "real_prefix", None), os.path.expanduser("~/.local")):
+        if not prefix:
+            continue
+        data_candidate = os.path.join(prefix, "share", "opentelemetry-hooks", "plugin", _OPENCODE_PLUGIN_SOURCE_FILENAME)
+        if os.path.isfile(data_candidate):
+            return data_candidate
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -2728,6 +2769,48 @@ def setup_gemini(global_: bool = True, cwd: str = ".") -> None:
     _log_setup_result("gemini", settings_path, added, updated, skipped)
 
 
+def setup_opencode(global_: bool = True, cwd: str = ".") -> None:
+    """Install the otel-hook TypeScript plugin into OpenCode's plugins directory.
+
+    Global install (default): ~/.config/opencode/plugins/otel-hook.ts
+    Project install:           <repo>/.opencode/plugins/otel-hook.ts
+    """
+    src = _find_opencode_plugin_source()
+    if src is None:
+        raise click.ClickException(
+            "Cannot find plugin/opencode.ts — ensure the opentelemetry-hooks package "
+            "is installed correctly (pip install opentelemetry-hooks)."
+        )
+
+    home = os.path.expanduser("~")
+    if global_:
+        plugins_dir = os.path.join(home, ".config", "opencode", "plugins")
+    else:
+        repo = _find_repo_root(cwd)
+        plugins_dir = os.path.join(repo, ".opencode", "plugins")
+
+    dest = os.path.join(plugins_dir, _OPENCODE_PLUGIN_FILENAME)
+
+    # Check if already installed and identical
+    if os.path.isfile(dest):
+        with open(src) as f:
+            src_content = f.read()
+        with open(dest) as f:
+            dest_content = f.read()
+        if src_content == dest_content:
+            click.echo(f"  · [opencode] Already up to date ({dest})")
+            return
+        # Content differs — update
+        os.makedirs(plugins_dir, exist_ok=True)
+        shutil.copy2(src, dest)
+        click.echo(f"  ✓ [opencode] Updated plugin ({dest})")
+        return
+
+    os.makedirs(plugins_dir, exist_ok=True)
+    shutil.copy2(src, dest)
+    click.echo(f"  ✓ [opencode] Installed plugin ({dest})")
+
+
 def setup_agent(agent: str, global_: bool = True, cwd: str = ".") -> None:
     """Dispatcher: configure hooks for a single agent by name."""
     if agent == "cursor":
@@ -2738,6 +2821,8 @@ def setup_agent(agent: str, global_: bool = True, cwd: str = ".") -> None:
         setup_copilot(cwd=cwd)
     elif agent == "gemini":
         setup_gemini(global_=global_, cwd=cwd)
+    elif agent == "opencode":
+        setup_opencode(global_=global_, cwd=cwd)
     else:
         raise ValueError(f"Unknown agent: {agent}")
 
@@ -2773,7 +2858,7 @@ def cli(ctx: click.Context) -> None:
 @cli.command("setup")
 @click.option(
     "--agent", "agents",
-    type=click.Choice(["cursor", "claude", "copilot", "gemini"]),
+    type=click.Choice(["cursor", "claude", "copilot", "gemini", "opencode"]),
     multiple=True,
     help="Agent to configure. Omit to auto-detect all available agents.",
 )
@@ -2785,7 +2870,7 @@ def setup_cmd(agents: tuple, global_: bool, cwd: str) -> None:
     """Register otel-hook in one or more AI agent configs."""
     targets = list(agents) or _detect_available_agents()
     if not targets:
-        click.echo("No agents detected. Use --agent cursor|claude|copilot|gemini to specify one.", err=True)
+        click.echo("No agents detected. Use --agent cursor|claude|copilot|gemini|opencode to specify one.", err=True)
         raise SystemExit(1)
     errors = []
     for agent in targets:
@@ -2804,7 +2889,7 @@ def setup_cmd(agents: tuple, global_: bool, cwd: str) -> None:
 @cli.command("diagnose")
 @click.option(
     "--agent", "agents",
-    type=click.Choice(["cursor", "claude", "copilot", "gemini"]),
+    type=click.Choice(["cursor", "claude", "copilot", "gemini", "opencode"]),
     multiple=True,
     help="Agent to check. Omit to check all.",
 )
@@ -2812,7 +2897,7 @@ def setup_cmd(agents: tuple, global_: bool, cwd: str) -> None:
 @click.option("--cwd", default=".")
 def diagnose_cmd(agents: tuple, global_: bool, cwd: str) -> None:
     """Show hook registration status for each agent."""
-    targets = list(agents) or ["cursor", "claude", "copilot", "gemini"]
+    targets = list(agents) or ["cursor", "claude", "copilot", "gemini", "opencode"]
     home = os.path.expanduser("~")
 
     paths = {
@@ -2820,10 +2905,21 @@ def diagnose_cmd(agents: tuple, global_: bool, cwd: str) -> None:
         "claude": os.path.join(home, ".claude", "settings.json") if global_ else os.path.join(_find_repo_root(cwd), ".claude", "settings.json"),
         "copilot": os.path.join(_find_repo_root(cwd), ".github", "hooks", "otel-hooks.json"),
         "gemini": os.path.join(home, ".gemini", "settings.json") if global_ else os.path.join(_find_repo_root(cwd), ".gemini", "settings.json"),
+        "opencode": (
+            os.path.join(home, ".config", "opencode", "plugins", _OPENCODE_PLUGIN_FILENAME)
+            if global_ else
+            os.path.join(_find_repo_root(cwd), ".opencode", "plugins", _OPENCODE_PLUGIN_FILENAME)
+        ),
     }
 
     for agent in targets:
         path = paths[agent]
+        if agent == "opencode":
+            if os.path.isfile(path):
+                click.echo(f"  ✓ [opencode] Plugin installed ({path})")
+            else:
+                click.echo(f"  · [opencode] Not installed ({path})")
+            continue
         if not os.path.exists(path):
             click.echo(f"  · [{agent}] Not found ({path})")
             continue
@@ -2849,7 +2945,7 @@ def diagnose_cmd(agents: tuple, global_: bool, cwd: str) -> None:
 @cli.command("uninstall")
 @click.option(
     "--agent", "agents",
-    type=click.Choice(["cursor", "claude", "copilot", "gemini"]),
+    type=click.Choice(["cursor", "claude", "copilot", "gemini", "opencode"]),
     multiple=True,
     required=True,
 )
@@ -2859,7 +2955,20 @@ def uninstall_cmd(agents: tuple, global_: bool, cwd: str) -> None:
     """Remove otel-hook entries from agent configs."""
     home = os.path.expanduser("~")
     for agent in agents:
-        if agent == "cursor":
+        if agent == "opencode":
+            path = (
+                os.path.join(home, ".config", "opencode", "plugins", _OPENCODE_PLUGIN_FILENAME)
+                if global_ else
+                os.path.join(_find_repo_root(cwd), ".opencode", "plugins", _OPENCODE_PLUGIN_FILENAME)
+            )
+            if os.path.isfile(path):
+                os.remove(path)
+                click.echo(f"  ✓ [opencode] Removed plugin ({path})")
+            else:
+                click.echo(f"  · [opencode] Not installed ({path})")
+            continue
+
+        elif agent == "cursor":
             path = os.path.join(home, ".cursor", "hooks.json") if global_ else os.path.join(_find_repo_root(cwd), ".cursor", "hooks.json")
             doc = _load_json_file(path)
             hooks = doc.get("hooks", {})
