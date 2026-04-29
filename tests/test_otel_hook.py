@@ -1609,7 +1609,6 @@ class TestSetupOpencode:
 
     def test_detect_available_agents_includes_opencode_when_binary_exists(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HOME", str(tmp_path))
-        original_which = otel_hook.shutil.which
         monkeypatch.setattr(otel_hook.shutil, "which", lambda cmd: "/usr/local/bin/opencode" if cmd == "opencode" else None)
         found = otel_hook._detect_available_agents()
         assert "opencode" in found
