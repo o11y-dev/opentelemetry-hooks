@@ -1588,7 +1588,7 @@ class TestSetupOpencode:
         dest = config_dir / "otel-hook.ts"
         dest.write_text("// old content")
         monkeypatch.setenv("HOME", str(tmp_path))
-        monkeypatch.setattr(otel_hook, "_find_opencode_plugin_source", lambda: self._plugin_source())
+        monkeypatch.setattr(otel_hook, "_find_opencode_plugin_source", self._plugin_source)
         otel_hook.setup_opencode(global_=True)
         assert dest.read_text() == Path(self._plugin_source()).read_text()
         captured = capsys.readouterr()
