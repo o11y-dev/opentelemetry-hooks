@@ -14,6 +14,7 @@ import pytest
 # Import the module under test
 # ---------------------------------------------------------------------------
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import enrichment_connectors
 import otel_hook
 
 
@@ -79,6 +80,42 @@ class TestFloatOrNone:
     def test_invalid(self):
         assert otel_hook._float_or_none("xyz") is None
 
+
+class TestMemoryAggregation:
+    def test_extract_event_memory_facts(self):
+        facts = otel_hook._extract_event_memory_facts("AfterFileEdit", {
+            "file_path": "src/main.py",
+            "tool_name": "edit",
+            "agent_name": "planner",
+            "command": "pytest -q",
+        })
+        assert facts["files"] == ["src/main.py"]
+        assert facts["tools"] == ["edit"]
+        assert "planner" in facts["entities"]
+        assert facts["commands"] == ["pytest -q"]
+
+    def test_aggregate_generation_memory_dedupes_and_counts(self):
+        batch = [
+            {"event": "PreToolUse", "data": {"tool_name": "read", "file_path": "README.md"}},
+            {"event": "PostToolUse", "data": {"tool_name": "read", "file_path": "README.md"}},
+            {"event": "AfterFileEdit", "data": {"file_path": "otel_hook.py", "tool_name": "edit"}},
+        ]
+        summary = otel_hook._aggregate_generation_memory(batch)
+        assert summary["files"] == ["README.md", "otel_hook.py"]
+        assert summary["tools"] == ["read", "edit"]
+        assert summary["tool_counts"] == {"read": 2, "edit": 1}
+
+    def test_connector_aggregation_and_merge(self):
+        batch = [
+            {"event": "PreToolUse", "data": {"tool_name": "read", "file_path": "README.md"}},
+            {"event": "AfterShellExecution", "data": {"command": "pytest -q"}},
+        ]
+        summary = enrichment_connectors.aggregate_generation_memory(batch)
+        session = {"files": ["existing.md"], "tool_counts": {"read": 1}}
+        enrichment_connectors.merge_memory_summaries(session, summary)
+        assert session["files"] == ["existing.md", "README.md"]
+        assert session["commands"] == ["pytest -q"]
+        assert session["tool_counts"]["read"] == 2
 
 # ── Event normalization ───────────────────────────────────────────────────
 
@@ -1090,6 +1127,35 @@ class TestMainFlow:
         monkeypatch.setattr("builtins.print", lambda s: captured.append(s))
         result = otel_hook.main()
         assert result == 0
+
+    def test_batch_buffered_event_skips_tracing_init(self, monkeypatch):
+        monkeypatch.setenv("IDE_OTEL_BATCH_ON_STOP", "true")
+        monkeypatch.setattr("sys.stdin", __import__("io").StringIO('{"hook_event_name":"preToolUse","session_id":"s1"}'))
+        monkeypatch.setattr(otel_hook, "_configure_logging", lambda: None)
+        monkeypatch.setattr(otel_hook, "_cleanup_state", lambda: None)
+        monkeypatch.setattr(otel_hook, "_load_config", lambda: {})
+        monkeypatch.setattr(otel_hook, "_load_session_context", lambda _sk: {"current_generation": "g1"})
+        appended = []
+        monkeypatch.setattr(otel_hook, "_append_batch_event", lambda key, evt, data: appended.append((key, evt)))
+        called = {"init": 0}
+        monkeypatch.setattr(otel_hook, "_init_tracing", lambda ide: called.__setitem__("init", called["init"] + 1) or True)
+        captured = []
+        monkeypatch.setattr("builtins.print", lambda s: captured.append(s))
+        result = otel_hook.main()
+        assert result == 0
+        assert appended == [("g1", "PreToolUse")]
+        assert called["init"] == 0
+
+
+class TestFastJsonLoads:
+    def test_fast_json_loads_orjson_path(self, monkeypatch):
+        class FakeOrjson:
+            @staticmethod
+            def loads(raw):
+                return {"x": 1} if raw == '{"x":1}' else {}
+
+        monkeypatch.setattr(otel_hook, "_ORJSON", FakeOrjson)
+        assert otel_hook._fast_json_loads('{"x":1}') == {"x": 1}
 
 
 # ── Atomic write ──────────────────────────────────────────────────────────

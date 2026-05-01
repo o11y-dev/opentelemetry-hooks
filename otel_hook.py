@@ -20,6 +20,8 @@ Usage:
 import glob
 import contextlib
 import hashlib
+import importlib
+import importlib.util
 import json
 import logging
 import os
@@ -35,6 +37,11 @@ from datetime import datetime, timezone
 from typing import Optional, Tuple
 
 import click
+from enrichment_connectors import (
+    aggregate_generation_memory,
+    extract_event_memory_facts,
+    merge_memory_summaries,
+)
 
 # Whether to attach OS/host attributes to every span in addition to resource attributes.
 # Defaults to False to avoid duplicate data and hot-path overhead.
@@ -144,35 +151,89 @@ for _sp in _VENV_SP:
     if _sp not in sys.path:
         sys.path.insert(0, _sp)
 
-try:
-    from opentelemetry import trace
-    from opentelemetry.trace import (
-        NonRecordingSpan,
-        SpanContext,
-        SpanKind,
-        Status,
-        StatusCode,
-        TraceFlags,
-        TraceState,
-        use_span,
-    )
-except Exception:
-    trace = None
-    NonRecordingSpan = None
-    SpanContext = None
-    SpanKind = None
-    Status = None
-    StatusCode = None
-    TraceFlags = None
-    TraceState = None
-    use_span = None
+class _TraceShim:
+    """Small shim so tests can monkeypatch trace methods before lazy load."""
 
-try:
-    from opentelemetry.sdk.trace.export import SpanExportResult
-except ImportError:
-    class SpanExportResult:  # minimal shim for SDK-unavailable environments
-        SUCCESS = 0
-        FAILURE = 1
+    def set_tracer_provider(self, _provider) -> None:
+        if _REAL_TRACE is not None:
+            return _REAL_TRACE.set_tracer_provider(_provider)
+        return None
+
+    def get_tracer_provider(self):
+        if _REAL_TRACE is not None:
+            return _REAL_TRACE.get_tracer_provider()
+        return None
+
+    def get_tracer(self, _name: str):
+        if _REAL_TRACE is not None:
+            return _REAL_TRACE.get_tracer(_name)
+        return None
+
+    def get_current_span(self):
+        if _REAL_TRACE is not None:
+            return _REAL_TRACE.get_current_span()
+        return None
+
+    def set_span_in_context(self, _span):
+        if _REAL_TRACE is not None:
+            return _REAL_TRACE.set_span_in_context(_span)
+        return None
+
+
+# Lazy-loaded OpenTelemetry symbols (loaded only when tracing/logging is needed).
+trace = _TraceShim()
+_OTEL_MODULES_LOADED = False
+_REAL_TRACE = None
+NonRecordingSpan = None
+SpanContext = None
+SpanKind = None
+Status = None
+StatusCode = None
+TraceFlags = None
+TraceState = None
+use_span = None
+
+
+class SpanExportResult:  # minimal shim for SDK-unavailable environments
+    SUCCESS = 0
+    FAILURE = 1
+
+
+def _load_otel_modules() -> bool:
+    """Load OpenTelemetry modules lazily; return False when unavailable."""
+    global _OTEL_MODULES_LOADED
+    global _REAL_TRACE
+    global NonRecordingSpan, SpanContext, SpanKind, Status, StatusCode, TraceFlags, TraceState, use_span
+    global SpanExportResult
+    if _OTEL_MODULES_LOADED:
+        return True
+
+    otel_spec = importlib.util.find_spec("opentelemetry")
+    if otel_spec is None:
+        return False
+    sdk_spec = importlib.util.find_spec("opentelemetry.sdk.trace.export")
+    if sdk_spec is None:
+        return False
+    otel_api = importlib.import_module("opentelemetry")
+    _REAL_TRACE = otel_api.trace
+    otel_trace = importlib.import_module("opentelemetry.trace")
+    NonRecordingSpan = otel_trace.NonRecordingSpan
+    SpanContext = otel_trace.SpanContext
+    SpanKind = otel_trace.SpanKind
+    Status = otel_trace.Status
+    StatusCode = otel_trace.StatusCode
+    TraceFlags = otel_trace.TraceFlags
+    TraceState = otel_trace.TraceState
+    use_span = otel_trace.use_span
+    sdk_export = importlib.import_module("opentelemetry.sdk.trace.export")
+    SpanExportResult = sdk_export.SpanExportResult
+    _OTEL_MODULES_LOADED = True
+    return True
+
+
+_ORJSON = None
+if importlib.util.find_spec("orjson") is not None:
+    _ORJSON = importlib.import_module("orjson")
 
 
 # ---------------------------------------------------------------------------
@@ -404,6 +465,15 @@ def _load_input() -> dict:
     raw = sys.stdin.read()
     if not raw.strip():
         return {}
+    return _fast_json_loads(raw)
+
+
+def _fast_json_loads(raw: str):
+    if _ORJSON is not None:
+        try:
+            return _ORJSON.loads(raw)
+        except Exception:
+            return {}
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
@@ -1107,6 +1177,10 @@ def _init_sdk_tracer_provider(resource_attrs: dict, disable_batch: bool) -> bool
     creates a bare TracerProvider (no OTLP exporter) so the file exporter
     can be attached later without wasted network calls.
     """
+    if not _load_otel_modules():
+        _LOGGER.error("opentelemetry-sdk not importable")
+        return False
+
     try:
         from opentelemetry.sdk.resources import Resource
         from opentelemetry.sdk.trace import TracerProvider as SDKTracerProvider
@@ -1348,7 +1422,7 @@ def _init_tracing(ide: str = "cursor") -> bool:
     global _TRACING_INITIALIZED
     if _TRACING_INITIALIZED:
         return True
-    if trace is None:
+    if not _load_otel_modules():
         _LOGGER.error("opentelemetry-sdk not installed; tracing disabled.")
         return False
 
@@ -2220,6 +2294,44 @@ def _flatten(out: dict, prefix: str, data: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Memory enrichment (generation/session summaries)
+# ---------------------------------------------------------------------------
+def _extract_event_memory_facts(event_name: str, data: dict) -> dict:
+    """Backward-compatible wrapper for connector-based enrichment."""
+    return extract_event_memory_facts(event_name, data)
+
+
+def _aggregate_generation_memory(batch: list) -> dict:
+    """Backward-compatible wrapper for connector-based enrichment."""
+    return aggregate_generation_memory(batch)
+
+
+def _apply_memory_summary_attrs(span, prefix: str, summary: dict) -> None:
+    """Attach memory summary attributes to a span."""
+    files = summary.get("files") or []
+    tools = summary.get("tools") or []
+    entities = summary.get("entities") or []
+    commands = summary.get("commands") or []
+    tool_counts = summary.get("tool_counts") or {}
+
+    span.set_attribute(f"{prefix}.files_touched_count", len(files))
+    span.set_attribute(f"{prefix}.tools_used_count", len(tools))
+    span.set_attribute(f"{prefix}.entities_count", len(entities))
+    span.set_attribute(f"{prefix}.commands_count", len(commands))
+
+    if files:
+        span.set_attribute(f"{prefix}.files_touched", files)
+    if tools:
+        span.set_attribute(f"{prefix}.tools_used", tools)
+    if entities:
+        span.set_attribute(f"{prefix}.entities", entities)
+    if commands:
+        span.set_attribute(f"{prefix}.commands", commands)
+    if tool_counts:
+        span.set_attribute(f"{prefix}.tool_counts", json.dumps(tool_counts, ensure_ascii=True, sort_keys=True))
+
+
+# ---------------------------------------------------------------------------
 # Flush helpers (session-level batching)
 # ---------------------------------------------------------------------------
 def _flush_generation(tracer, gen_key: str, session_ctx: Optional[dict], ide: str, flush: bool = True) -> None:
@@ -2250,9 +2362,11 @@ def _flush_generation(tracer, gen_key: str, session_ctx: Optional[dict], ide: st
          if _first_present(e["data"], ("request_model", "model", "model_name"))),
         None
     )
+    memory_summary = _aggregate_generation_memory(batch)
 
+    span_kind = SpanKind.INTERNAL if SpanKind is not None else None
     gen_span = tracer.start_span(
-        "gen_ai.client.generation", kind=SpanKind.INTERNAL,
+        "gen_ai.client.generation", kind=span_kind,
         context=parent_ctx, start_time=first_ts,
     )
     gen_ctx = trace.set_span_in_context(gen_span)
@@ -2260,6 +2374,7 @@ def _flush_generation(tracer, gen_key: str, session_ctx: Optional[dict], ide: st
         gen_span.set_attribute("gen_ai.client.generation_id", gen_key)
         gen_span.set_attribute("gen_ai.client.event.count", len(batch))
         _set_if_present(gen_span, "gen_ai.request.model", batch_model)
+        _apply_memory_summary_attrs(gen_span, "gen_ai.client.memory", memory_summary)
         _set_client_identity_attributes(gen_span, ide, agent_engine=(session_ctx or {}).get("agent_engine"))
         _log_with_span(_LOGGER, logging.INFO, gen_span, "Generation span: gen_key=%s events=%d", gen_key, len(batch))
 
@@ -2270,7 +2385,7 @@ def _flush_generation(tracer, gen_key: str, session_ctx: Optional[dict], ide: st
             next_ts = batch[idx + 1].get("timestamp_ns") if idx + 1 < len(batch) else ts + 1_000_000
 
             span = tracer.start_span(
-                f"gen_ai.client.hook.{evt}", kind=SpanKind.INTERNAL,
+                f"gen_ai.client.hook.{evt}", kind=span_kind,
                 context=gen_ctx, start_time=ts,
             )
             with _span_context(span):
@@ -2279,6 +2394,10 @@ def _flush_generation(tracer, gen_key: str, session_ctx: Optional[dict], ide: st
 
         gen_span.end(end_time=last_ts)
         _clear_batch_events(gen_key)
+
+    if session_ctx is not None:
+        session_memory = session_ctx.setdefault("memory", {})
+        merge_memory_summaries(session_memory, memory_summary)
 
     if flush:
         _force_flush_provider()
@@ -2295,8 +2414,9 @@ def _flush_session(tracer, session_key: str, session_ctx: dict, ide: str, flush:
         session_ctx.get("phantom_parent_id", "0"),
     )
 
+    span_kind = SpanKind.INTERNAL if SpanKind is not None else None
     session_span = tracer.start_span(
-        "gen_ai.client.session", kind=SpanKind.INTERNAL,
+        "gen_ai.client.session", kind=span_kind,
         context=parent_ctx, start_time=start_ns,
     )
     with _span_context(session_span):
@@ -2304,6 +2424,7 @@ def _flush_session(tracer, session_key: str, session_ctx: dict, ide: str, flush:
         _set_client_identity_attributes(session_span, ide, agent_engine=session_ctx.get("agent_engine"))
         session_span.set_attribute("gen_ai.client.generation_count", session_ctx.get("generation_count", 0))
         session_span.set_attribute("gen_ai.client.session.duration_ms", (end_ns - start_ns) // 1_000_000)
+        _apply_memory_summary_attrs(session_span, "gen_ai.client.memory", session_ctx.get("memory", {}))
         _log_with_span(_LOGGER, logging.INFO, session_span, "Session span: session=%s", session_key)
         session_span.end(end_time=end_ns)
 
@@ -2331,12 +2452,41 @@ def main() -> int:
     raw_event = _get_event_name(data)
     event_name = _normalize_event(raw_event)
     ide = _detect_ide(data)
+    sk = _session_key(data)
 
     if _safe_bool(os.getenv("IDE_OTEL_LOG_EVENTS", "")):
         _LOGGER.info(
             "Hook: %s (raw=%s) | ide=%s | python=%s",
             event_name, raw_event, ide, sys.executable,
         )
+
+    # Fast path for buffered batch events (no span emission yet):
+    # avoid loading OpenTelemetry SDK for events that only append to batch files.
+    if _batch_enabled():
+        session_ctx = _load_session_context(sk)
+
+        if event_name in _SESSION_START_EVENTS:
+            if sk:
+                _create_session_context(sk, data, ide)
+                _append_batch_event(f"{sk}_session", event_name, data)
+            print(_continue_response_json())
+            return 0
+
+        if event_name in _GENERATION_START_EVENTS:
+            gen_key = _generation_key_from_data(data)
+            if not gen_key and sk and session_ctx:
+                gen_key = _advance_generation(sk, session_ctx)
+            if gen_key:
+                _append_batch_event(gen_key, event_name, data)
+            print(_continue_response_json())
+            return 0
+
+        if event_name not in _GENERATION_END_EVENTS and event_name not in _SESSION_END_EVENTS:
+            gen_key = _resolve_generation_key(data, session_ctx)
+            if gen_key:
+                _append_batch_event(gen_key, event_name, data)
+                print(_continue_response_json())
+                return 0
 
     if not _init_tracing(ide):
         print(_continue_response_json())
@@ -2349,7 +2499,6 @@ def main() -> int:
     _flush_stale_sessions(tracer)
 
     try:
-        sk = _session_key(data)
         session_ctx = _load_session_context(sk)
         agent_engine = _detect_agent_engine(data)
         if sk and session_ctx and agent_engine and agent_engine != ide and session_ctx.get("agent_engine") != agent_engine:

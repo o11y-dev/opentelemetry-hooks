@@ -38,7 +38,7 @@ Issues = "https://github.com/o11y-dev/opentelemetry-hooks/issues"
 otel-hook = "otel_hook:cli"
 
 [tool.setuptools]
-py-modules = ["otel_hook"]
+py-modules = ["otel_hook", "enrichment_connectors"]
 
 [tool.setuptools.data-files]
 "share/opentelemetry-hooks" = ["otel_config.example.json"]
