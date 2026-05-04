@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=64", "setuptools-scm>=8"]
+requires = ["setuptools>=64"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "opentelemetry-hooks"
-dynamic = ["version"]
+version = "0.13.0"
 description = "OpenTelemetry integration for AI coding agents (Cursor IDE/CLI, GitHub Copilot, Claude Code, Gemini CLI, Antigravity, OpenCode-compatible runners)"
 readme = "README.md"
 license = {text = "MIT"}
@@ -33,6 +33,7 @@ Homepage = "https://github.com/o11y-dev/opentelemetry-hooks"
 Repository = "https://github.com/o11y-dev/opentelemetry-hooks"
 Documentation = "https://github.com/o11y-dev/opentelemetry-hooks#readme"
 Issues = "https://github.com/o11y-dev/opentelemetry-hooks/issues"
+Changelog = "https://github.com/o11y-dev/opentelemetry-hooks/blob/main/CHANGELOG.md"
 
 [project.scripts]
 otel-hook = "otel_hook:cli"
@@ -52,9 +53,6 @@ py-modules = ["otel_hook", "enrichment_connectors"]
     "examples/opencode-plugin.example.ts",
 ]
 
-[tool.setuptools_scm]
-fallback_version = "0.13.0"
-
 [tool.ruff]
 line-length = 120
 target-version = "py312"
@@ -64,7 +62,7 @@ select = ["E", "F", "W"]
 ignore = ["E501"]
 
 [tool.semantic_release]
-version_toml = []
+version_toml = ["pyproject.toml:project.version"]
 version_variables = []
 major_on_zero = false
 allow_zero_version = true
