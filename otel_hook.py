@@ -294,6 +294,8 @@ _CANONICAL_EVENT = {
     "AfterTool": "PostToolUse",
     "BeforeAgent": "SubagentStart",
     "AfterAgent": "SubagentStop",
+    # Codex
+    "PermissionRequest": "PermissionRequest",
 }
 
 # ---------------------------------------------------------------------------
@@ -326,6 +328,17 @@ _GEMINI_EVENTS = [
 ]
 _GEMINI_MATCHER_EVENTS = {"BeforeAgent", "AfterAgent", "BeforeModel", "AfterModel", "BeforeTool", "AfterTool"}
 
+_CODEX_EVENTS = [
+    "SessionStart", "PreToolUse", "PermissionRequest", "PostToolUse",
+    "UserPromptSubmit", "Stop",
+]
+_CODEX_MATCHERS = {
+    "SessionStart": "startup|resume|clear",
+    "PreToolUse": "*",
+    "PermissionRequest": "*",
+    "PostToolUse": "*",
+}
+
 # OpenCode plugin — source filename (in plugin/) and destination filename (in plugins/).
 _OPENCODE_PLUGIN_SOURCE_FILENAME = "opencode.ts"
 _OPENCODE_PLUGIN_FILENAME = "otel-hook.ts"
@@ -350,6 +363,9 @@ _INPUT_ALIASES = {
     "toolDefinitions": "tool_definitions",
     "toolUseId": "tool_use_id",
     "toolId": "tool_id",
+    "turnId": "turn_id",
+    "toolResponse": "tool_response",
+    "lastAssistantMessage": "last_assistant_message",
     "agentId": "agent_id",
     "agentName": "agent_name",
     "agentVersion": "agent_version",
@@ -380,8 +396,10 @@ _INPUT_ALIASES = {
 
 # Canonical gen_ai.client.name values accepted directly from IDE_OTEL_IDE_NAME or
 # self-reported payload metadata before alias fallback.
-_CANONICAL_IDE_NAMES = {"cursor", "copilot", "claude", "antigravity", "opencode", "windsurf", "zed", "vscode", "gemini"}
+_CANONICAL_IDE_NAMES = {"cursor", "copilot", "claude", "antigravity", "opencode", "windsurf", "zed", "vscode", "gemini", "codex"}
 _IDE_NAME_ALIASES = {
+    "openai codex": "codex",
+    "codex cli": "codex",
     "github copilot": "copilot",
     "github copilot chat": "copilot",
     "copilot chat": "copilot",
@@ -411,6 +429,7 @@ _GENERATION_END_EVENTS = {"Stop"}
 # GenAI operation mapping (canonical PascalCase)
 _OP_TOOL_EVENTS = {
     "PreToolUse", "PostToolUse", "PostToolUseFailure",
+    "PermissionRequest",
     "BeforeShellExecution", "AfterShellExecution",
     "BeforeMCPExecution", "AfterMCPExecution",
     "BeforeReadFile", "AfterFileEdit",
@@ -435,6 +454,7 @@ _EVENT_ATTR_MAP = {
     "PreToolUse": {"tool_name": "gen_ai.client.tool_name", "tool_id": "gen_ai.client.tool_id", "tool_use_id": "gen_ai.client.tool_use_id"},
     "PostToolUse": {"tool_name": "gen_ai.client.tool_name", "tool_id": "gen_ai.client.tool_id", "tool_use_id": "gen_ai.client.tool_use_id", "duration_ms": "gen_ai.client.duration_ms"},
     "PostToolUseFailure": {"tool_name": "gen_ai.client.tool_name", "tool_id": "gen_ai.client.tool_id", "tool_use_id": "gen_ai.client.tool_use_id", "error": "gen_ai.client.error", "is_interrupt": "gen_ai.client.is_interrupt"},
+    "PermissionRequest": {"tool_name": "gen_ai.client.tool_name", "tool_id": "gen_ai.client.tool_id", "tool_use_id": "gen_ai.client.tool_use_id", "turn_id": "gen_ai.client.turn_id"},
     "SubagentStart": {"subagent_type": "gen_ai.client.subagent_type", "subagent_task": "gen_ai.client.subagent_task", "agent_id": "gen_ai.client.agent_id", "agent_type": "gen_ai.client.agent_type"},
     "SubagentStop": {"subagent_type": "gen_ai.client.subagent_type", "subagent_task": "gen_ai.client.subagent_task", "status": "gen_ai.client.status", "agent_id": "gen_ai.client.agent_id", "agent_type": "gen_ai.client.agent_type"},
     "Stop": {"status": "gen_ai.client.status", "loop_count": "gen_ai.client.loop_count", "stop_hook_active": "gen_ai.client.stop_hook_active"},
@@ -591,8 +611,13 @@ def _get_os_info() -> dict:
 # ---------------------------------------------------------------------------
 # Client (IDE) version detection
 # ---------------------------------------------------------------------------
+_CODEX_VERSION_CACHE: Optional[str] = None  # cached result; None means not yet detected or not found
+_CODEX_VERSION_DETECTED: bool = False  # True once detection has been attempted
+
+
 def _detect_client_version(data: dict, ide: str) -> Optional[str]:
     """Extract client/IDE version from environment variables or input payload."""
+    global _CODEX_VERSION_CACHE, _CODEX_VERSION_DETECTED
     # Check input payload first
     version = _first_present(data, ("client_version", "ide_version", "app_version"))
     if version:
@@ -610,6 +635,25 @@ def _detect_client_version(data: dict, ide: str) -> Optional[str]:
         v = os.getenv("COPILOT_VERSION")
         if v:
             return v
+    if ide == "codex":
+        v = os.getenv("CODEX_VERSION")
+        if v:
+            return v
+        if not _CODEX_VERSION_DETECTED:
+            _CODEX_VERSION_DETECTED = True
+            try:
+                result = subprocess.run(
+                    ["codex", "--version"],
+                    capture_output=True,
+                    text=True,
+                    timeout=2,
+                )
+                if result.returncode == 0:
+                    _CODEX_VERSION_CACHE = result.stdout.strip()
+            except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+                pass
+        if _CODEX_VERSION_CACHE:
+            return _CODEX_VERSION_CACHE
     # Generic fallback
     v = os.getenv("IDE_OTEL_CLIENT_VERSION")
     if v:
@@ -629,13 +673,16 @@ def _detect_agent_engine(data: dict) -> Optional[str]:
     if data.get("transcript_path") or data.get("permission_mode") or data.get("notification_type"):
         return "claude"
 
-    raw_event = _first_present(data, ("hook_event_name", "hook_event_type", "event"))
-    if isinstance(raw_event, str) and raw_event and raw_event[0].isupper():
-        return "claude"
+    if data.get("turn_id") or data.get("last_assistant_message") is not None or data.get("tool_response") is not None:
+        return "codex"
 
     reported = _normalize_ide_name(_first_present(data, ("ide_name", "ide", "client", "source_app")))
     if reported:
         return reported
+
+    raw_event = _first_present(data, ("hook_event_name", "hook_event_type", "event"))
+    if isinstance(raw_event, str) and raw_event and raw_event[0].isupper():
+        return "claude"
 
     return None
 
@@ -1506,7 +1553,7 @@ def _maybe_attach_text(span, label: str, text: str) -> None:
 # ---------------------------------------------------------------------------
 _MCP_EVENTS = {"BeforeMCPExecution", "AfterMCPExecution"}
 _SHELL_EVENTS = {"BeforeShellExecution", "AfterShellExecution"}
-_TOOL_EVENTS = {"PreToolUse", "PostToolUse", "PostToolUseFailure"}
+_TOOL_EVENTS = {"PreToolUse", "PostToolUse", "PostToolUseFailure", "PermissionRequest"}
 
 
 def _get_otel_logger(name: str) -> logging.Logger:
@@ -1781,6 +1828,8 @@ def _detect_ide_from_process_tree() -> Optional[str]:
                 return "cursor"
             if "opencode" in comm:
                 return "opencode"
+            if comm.endswith("codex") or comm.endswith("/codex") or "codex" in comm:
+                return "codex"
             if ("code helper" in comm or comm.endswith("/code") or
                     "visual studio code" in comm):
                 return "copilot"
@@ -1825,6 +1874,9 @@ def _detect_ide(data: dict) -> str:
 
     if data.get("transcript_path") or data.get("permission_mode") or data.get("notification_type"):
         return "claude"
+
+    if data.get("turn_id") or data.get("last_assistant_message") is not None or data.get("tool_response") is not None:
+        return "codex"
 
     raw_event = _first_present(data, ("hook_event_name", "hook_event_type", "event"))
     if isinstance(raw_event, str) and raw_event and raw_event[0].isupper():
@@ -2249,6 +2301,7 @@ def _populate_span(span, event_name: str, data: dict, ide: str, session_ctx: Opt
     _emit_event_log(event_name, data)
     _set_if_present(span, "gen_ai.client.session_id", data.get("session_id") or data.get("conversation_id"))
     _set_if_present(span, "gen_ai.client.generation_id", data.get("generation_id"))
+    _set_if_present(span, "gen_ai.client.turn_id", data.get("turn_id"))
     span.set_attribute("gen_ai.client.timestamp", datetime.now(timezone.utc).isoformat())
     span.set_attribute("gen_ai.client.workspace", data.get("cwd") or os.getcwd())
 
@@ -2267,6 +2320,7 @@ def _populate_span(span, event_name: str, data: dict, ide: str, session_ctx: Opt
     mapping = _EVENT_ATTR_MAP.get(event_name, {})
     for key, attr in mapping.items():
         _set_if_present(span, attr, data.get(key))
+    _set_codex_tool_attrs(span, event_name, data)
 
     # Text fields
     for label in ("prompt", "response"):
@@ -2278,6 +2332,63 @@ def _populate_span(span, event_name: str, data: dict, ide: str, session_ctx: Opt
         value = data.get(label)
         if value is not None and not isinstance(value, dict):
             _maybe_attach_text(span, label, _stringify(value))
+
+
+def _set_codex_tool_attrs(span, event_name: str, data: dict) -> None:
+    """Attach useful attributes from Codex's structured tool hook payloads."""
+    if event_name not in {"PreToolUse", "PermissionRequest", "PostToolUse"}:
+        return
+
+    tool_input = data.get("tool_input")
+    if isinstance(tool_input, dict):
+        command = tool_input.get("command")
+        if isinstance(command, str):
+            span.set_attribute("gen_ai.client.command", command)
+        description = tool_input.get("description")
+        if isinstance(description, str):
+            span.set_attribute("gen_ai.client.approval.description", description)
+        # Flatten full input only when explicitly opted in (IDE_OTEL_CAPTURE_TOOL_INPUT_CONTENT
+        # gates both tool input and tool response content — consistent with _emit_tool_log).
+        if _safe_bool(os.getenv("IDE_OTEL_CAPTURE_TOOL_INPUT_CONTENT", "")):
+            mask = _safe_bool(os.getenv("IDE_OTEL_MASK_PROMPTS", ""))
+            max_chars = int(os.getenv("IDE_OTEL_TEXT_MAX_CHARS", "4000"))
+            flat_input: dict = {}
+            _flatten(flat_input, "gen_ai.client.tool.input", tool_input)
+            for key, value in flat_input.items():
+                if isinstance(value, str):
+                    if mask:
+                        value = _mask_text(value)
+                    _set_if_present(span, key, value[:max_chars])
+                else:
+                    _set_if_present(span, key, value)
+        else:
+            # Always emit length+digest for cardinality-safe observability
+            text = _stringify(tool_input)
+            span.set_attribute("gen_ai.client.tool.input.length", len(text))
+            span.set_attribute("gen_ai.client.tool.input.sha256", _hash_text(text))
+
+    tool_response = data.get("tool_response")
+    if isinstance(tool_response, dict):
+        # Flatten full response only when explicitly opted in (same gate as tool input above)
+        if _safe_bool(os.getenv("IDE_OTEL_CAPTURE_TOOL_INPUT_CONTENT", "")):
+            mask = _safe_bool(os.getenv("IDE_OTEL_MASK_PROMPTS", ""))
+            max_chars = int(os.getenv("IDE_OTEL_TEXT_MAX_CHARS", "4000"))
+            flat_response: dict = {}
+            _flatten(flat_response, "gen_ai.client.tool.response", tool_response)
+            for key, value in flat_response.items():
+                if isinstance(value, str):
+                    if mask:
+                        value = _mask_text(value)
+                    _set_if_present(span, key, value[:max_chars])
+                else:
+                    _set_if_present(span, key, value)
+        else:
+            # Always emit length+digest for cardinality-safe observability
+            text = _stringify(tool_response)
+            span.set_attribute("gen_ai.client.tool.response.length", len(text))
+            span.set_attribute("gen_ai.client.tool.response.sha256", _hash_text(text))
+    elif tool_response is not None:
+        _maybe_attach_text(span, "tool_response", _stringify(tool_response))
 
 
 def _flatten(out: dict, prefix: str, data: dict) -> None:
@@ -2627,7 +2738,7 @@ def main() -> int:
 # Setup CLI: helpers
 # ---------------------------------------------------------------------------
 
-_REPO_MARKERS = (".git", ".github", ".cursor", ".claude", ".gemini", ".opencode")
+_REPO_MARKERS = (".git", ".github", ".cursor", ".claude", ".gemini", ".codex", ".opencode")
 
 
 def _find_repo_root(cwd: str) -> str:
@@ -2684,6 +2795,50 @@ def _write_json_file(path: str, data: dict) -> None:
         f.write("\n")
 
 
+def _ensure_toml_bool(path: str, section: str, key: str, value: bool) -> None:
+    """Set a boolean in a simple TOML section while preserving unrelated text."""
+    desired = "true" if value else "false"
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    if os.path.exists(path):
+        with open(path) as f:
+            lines = f.readlines()
+    else:
+        lines = []
+
+    section_header = f"[{section}]"
+    section_start = None
+    section_end = len(lines)
+    section_re = re.compile(r"^\s*\[.*\]\s*$")
+    for index, line in enumerate(lines):
+        if line.strip() == section_header:
+            section_start = index
+            section_end = len(lines)
+            for probe in range(index + 1, len(lines)):
+                if section_re.match(lines[probe]):
+                    section_end = probe
+                    break
+            break
+
+    new_line = f"{key} = {desired}\n"
+    if section_start is None:
+        if lines and lines[-1].strip():
+            lines.append("\n")
+        lines.extend([f"{section_header}\n", new_line])
+    else:
+        key_re = re.compile(rf"^\s*{re.escape(key)}\s*=")
+        for index in range(section_start + 1, section_end):
+            if key_re.match(lines[index]):
+                if lines[index] == new_line:
+                    return
+                lines[index] = new_line
+                break
+        else:
+            lines.insert(section_end, new_line)
+
+    with open(path, "w") as f:
+        f.writelines(lines)
+
+
 def _detect_available_agents() -> list:
     """Return list of agent names whose home dirs or commands exist."""
     found = []
@@ -2699,6 +2854,8 @@ def _detect_available_agents() -> list:
         found.append("gemini")
     if shutil.which("opencode") or os.path.isdir(os.path.join(home, ".config", "opencode")):
         found.append("opencode")
+    if os.path.isdir(os.path.join(home, ".codex")) or shutil.which("codex"):
+        found.append("codex")
     return found
 
 
@@ -2918,6 +3075,75 @@ def setup_gemini(global_: bool = True, cwd: str = ".") -> None:
     _log_setup_result("gemini", settings_path, added, updated, skipped)
 
 
+def setup_codex(global_: bool = True, cwd: str = ".") -> None:
+    """Register otel-hook in Codex's hooks.json and enable Codex hooks."""
+    hook_cmd = _resolve_hook_cmd()
+    if global_:
+        codex_dir = os.path.join(os.path.expanduser("~"), ".codex")
+    else:
+        repo = _find_repo_root(cwd)
+        codex_dir = os.path.join(repo, ".codex")
+
+    hooks_path = os.path.join(codex_dir, "hooks.json")
+    config_path = os.path.join(codex_dir, "config.toml")
+    _ensure_toml_bool(config_path, "features", "codex_hooks", True)
+
+    doc = _load_json_file(hooks_path)
+    hooks = doc.setdefault("hooks", {})
+    added, updated, skipped = [], [], []
+
+    for event in _CODEX_EVENTS:
+        event_list = hooks.setdefault(event, [])
+        matcher = _CODEX_MATCHERS.get(event)
+        matches = []
+        for entry in event_list:
+            if matcher is not None and entry.get("matcher", "") != matcher:
+                continue
+            if matcher is None and "matcher" in entry:
+                continue
+            for h in entry.get("hooks", []):
+                cmd = h.get("command", "")
+                if "otel_hook" in cmd or "otel-hook" in cmd:
+                    matches.append(h)
+
+        if matches:
+            changed = False
+            for hook in matches:
+                if hook.get("command") != hook_cmd:
+                    hook["command"] = hook_cmd
+                    changed = True
+                if hook.get("type") != "command":
+                    hook["type"] = "command"
+                    changed = True
+                if "timeout" not in hook:
+                    hook["timeout"] = 30
+                    changed = True
+                env = hook.get("env")
+                if isinstance(env, dict) and "IDE_OTEL_IDE_NAME" in env:
+                    env = dict(env)
+                    env.pop("IDE_OTEL_IDE_NAME", None)
+                    if env:
+                        hook["env"] = env
+                    else:
+                        hook.pop("env", None)
+                    changed = True
+            (updated if changed else skipped).append(event)
+            continue
+
+        hook_entry: dict = {
+            "hooks": [{"type": "command", "command": hook_cmd, "timeout": 30}]
+        }
+        if matcher is not None:
+            hook_entry["matcher"] = matcher
+        event_list.append(hook_entry)
+        added.append(event)
+
+    _write_json_file(hooks_path, doc)
+    if added or updated:
+        click.echo(f"  ✓ [codex] Enabled hooks feature ({config_path})")
+    _log_setup_result("codex", hooks_path, added, updated, skipped)
+
+
 def setup_opencode(global_: bool = True, cwd: str = ".") -> None:
     """Install the otel-hook TypeScript plugin into OpenCode's plugins directory.
 
@@ -2970,6 +3196,8 @@ def setup_agent(agent: str, global_: bool = True, cwd: str = ".") -> None:
         setup_copilot(cwd=cwd)
     elif agent == "gemini":
         setup_gemini(global_=global_, cwd=cwd)
+    elif agent == "codex":
+        setup_codex(global_=global_, cwd=cwd)
     elif agent == "opencode":
         setup_opencode(global_=global_, cwd=cwd)
     else:
@@ -3007,7 +3235,7 @@ def cli(ctx: click.Context) -> None:
 @cli.command("setup")
 @click.option(
     "--agent", "agents",
-    type=click.Choice(["cursor", "claude", "copilot", "gemini", "opencode"]),
+    type=click.Choice(["cursor", "claude", "copilot", "gemini", "codex", "opencode"]),
     multiple=True,
     help="Agent to configure. Omit to auto-detect all available agents.",
 )
@@ -3019,7 +3247,7 @@ def setup_cmd(agents: tuple, global_: bool, cwd: str) -> None:
     """Register otel-hook in one or more AI agent configs."""
     targets = list(agents) or _detect_available_agents()
     if not targets:
-        click.echo("No agents detected. Use --agent cursor|claude|copilot|gemini|opencode to specify one.", err=True)
+        click.echo("No agents detected. Use --agent cursor|claude|copilot|gemini|codex|opencode to specify one.", err=True)
         raise SystemExit(1)
     errors = []
     for agent in targets:
@@ -3038,7 +3266,7 @@ def setup_cmd(agents: tuple, global_: bool, cwd: str) -> None:
 @cli.command("diagnose")
 @click.option(
     "--agent", "agents",
-    type=click.Choice(["cursor", "claude", "copilot", "gemini", "opencode"]),
+    type=click.Choice(["cursor", "claude", "copilot", "gemini", "codex", "opencode"]),
     multiple=True,
     help="Agent to check. Omit to check all.",
 )
@@ -3046,7 +3274,7 @@ def setup_cmd(agents: tuple, global_: bool, cwd: str) -> None:
 @click.option("--cwd", default=".")
 def diagnose_cmd(agents: tuple, global_: bool, cwd: str) -> None:
     """Show hook registration status for each agent."""
-    targets = list(agents) or ["cursor", "claude", "copilot", "gemini", "opencode"]
+    targets = list(agents) or ["cursor", "claude", "copilot", "gemini", "codex", "opencode"]
     home = os.path.expanduser("~")
 
     paths = {
@@ -3054,6 +3282,7 @@ def diagnose_cmd(agents: tuple, global_: bool, cwd: str) -> None:
         "claude": os.path.join(home, ".claude", "settings.json") if global_ else os.path.join(_find_repo_root(cwd), ".claude", "settings.json"),
         "copilot": os.path.join(_find_repo_root(cwd), ".github", "hooks", "otel-hooks.json"),
         "gemini": os.path.join(home, ".gemini", "settings.json") if global_ else os.path.join(_find_repo_root(cwd), ".gemini", "settings.json"),
+        "codex": os.path.join(home, ".codex", "hooks.json") if global_ else os.path.join(_find_repo_root(cwd), ".codex", "hooks.json"),
         "opencode": (
             os.path.join(home, ".config", "opencode", "plugins", _OPENCODE_PLUGIN_FILENAME)
             if global_ else
@@ -3094,7 +3323,7 @@ def diagnose_cmd(agents: tuple, global_: bool, cwd: str) -> None:
 @cli.command("uninstall")
 @click.option(
     "--agent", "agents",
-    type=click.Choice(["cursor", "claude", "copilot", "gemini", "opencode"]),
+    type=click.Choice(["cursor", "claude", "copilot", "gemini", "codex", "opencode"]),
     multiple=True,
     required=True,
 )
@@ -3188,6 +3417,30 @@ def uninstall_cmd(agents: tuple, global_: bool, cwd: str) -> None:
             if removed:
                 _write_json_file(path, settings)
             click.echo(f"  {'✓' if removed else '·'} [gemini] Removed {removed} entries ({path})")
+
+        elif agent == "codex":
+            path = os.path.join(home, ".codex", "hooks.json") if global_ else os.path.join(_find_repo_root(cwd), ".codex", "hooks.json")
+            doc = _load_json_file(path)
+            hooks = doc.get("hooks", {})
+            removed = 0
+            for event in list(hooks.keys()):
+                new_list = []
+                for entry in hooks[event]:
+                    before = len(entry.get("hooks", []))
+                    surviving = [
+                        h for h in entry.get("hooks", [])
+                        if "otel-hook" not in h.get("command", "") and "otel_hook" not in h.get("command", "")
+                    ]
+                    removed += before - len(surviving)
+                    if surviving:
+                        entry["hooks"] = surviving
+                        new_list.append(entry)
+                hooks[event] = new_list
+                if not hooks[event]:
+                    del hooks[event]
+            if removed:
+                _write_json_file(path, doc)
+            click.echo(f"  {'✓' if removed else '·'} [codex] Removed {removed} entries ({path})")
 
 
 if __name__ == "__main__":

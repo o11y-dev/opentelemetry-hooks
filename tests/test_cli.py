@@ -5,7 +5,7 @@ import os
 from click.testing import CliRunner
 
 import otel_hook
-from otel_hook import cli, setup_cursor, setup_claude, setup_copilot, setup_gemini
+from otel_hook import cli, setup_cursor, setup_claude, setup_copilot, setup_gemini, setup_codex
 
 
 # ---------------------------------------------------------------------------
@@ -229,6 +229,43 @@ class TestSetupGemini:
 
 
 # ---------------------------------------------------------------------------
+# setup_codex
+# ---------------------------------------------------------------------------
+
+class TestSetupCodex:
+    def test_creates_hooks_and_config(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(otel_hook, "_resolve_hook_cmd", lambda: "otel-hook")
+        setup_codex(global_=False, cwd=str(tmp_path))
+        hooks_path = tmp_path / ".codex" / "hooks.json"
+        config_path = tmp_path / ".codex" / "config.toml"
+        assert hooks_path.exists()
+        assert config_path.exists()
+        doc = _read(str(hooks_path))
+        assert "PermissionRequest" in doc["hooks"]
+        assert "codex_hooks = true" in config_path.read_text()
+
+    def test_matchers_only_where_supported(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(otel_hook, "_resolve_hook_cmd", lambda: "otel-hook")
+        setup_codex(global_=False, cwd=str(tmp_path))
+        doc = _read(str(tmp_path / ".codex" / "hooks.json"))
+        assert doc["hooks"]["SessionStart"][0]["matcher"] == "startup|resume|clear"
+        assert doc["hooks"]["PreToolUse"][0]["matcher"] == "*"
+        assert "matcher" not in doc["hooks"]["UserPromptSubmit"][0]
+        assert "matcher" not in doc["hooks"]["Stop"][0]
+
+    def test_preserves_existing_config(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(otel_hook, "_resolve_hook_cmd", lambda: "otel-hook")
+        config_path = tmp_path / ".codex" / "config.toml"
+        os.makedirs(str(config_path.parent))
+        config_path.write_text('model = "gpt-5.5"\n\n[features]\nmemories = true\n')
+        setup_codex(global_=False, cwd=str(tmp_path))
+        text = config_path.read_text()
+        assert 'model = "gpt-5.5"' in text
+        assert "memories = true" in text
+        assert "codex_hooks = true" in text
+
+
+# ---------------------------------------------------------------------------
 # CLI setup command
 # ---------------------------------------------------------------------------
 
@@ -284,6 +321,14 @@ class TestDiagnoseCmd:
         assert result.exit_code == 0
         assert "events registered" in result.output
 
+    def test_codex_registered(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(otel_hook, "_resolve_hook_cmd", lambda: "otel-hook")
+        setup_codex(global_=False, cwd=str(tmp_path))
+        runner = CliRunner()
+        result = runner.invoke(cli, ["diagnose", "--agent", "codex", "--no-global", "--cwd", str(tmp_path)])
+        assert result.exit_code == 0
+        assert "events registered" in result.output
+
 
 # ---------------------------------------------------------------------------
 # CLI uninstall command
@@ -305,3 +350,12 @@ class TestUninstallCmd:
         runner = CliRunner()
         result = runner.invoke(cli, ["uninstall", "--agent", "cursor", "--no-global", "--cwd", str(tmp_path)])
         assert result.exit_code == 0
+
+    def test_uninstall_codex(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(otel_hook, "_resolve_hook_cmd", lambda: "otel-hook")
+        setup_codex(global_=False, cwd=str(tmp_path))
+        runner = CliRunner()
+        result = runner.invoke(cli, ["uninstall", "--agent", "codex", "--no-global", "--cwd", str(tmp_path)])
+        assert result.exit_code == 0
+        doc = _read(str(tmp_path / ".codex" / "hooks.json"))
+        assert doc.get("hooks", {}) == {}
