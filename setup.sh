@@ -13,6 +13,8 @@
 #   bash setup.sh --copilot          # GitHub Copilot (.github/hooks/otel-hooks.json)
 #   bash setup.sh --claude           # Claude Code only
 #   bash setup.sh --claude --global  # Claude Code global (~/.claude/settings.json)
+#   bash setup.sh --codex            # Codex project-level (.codex/hooks.json)
+#   bash setup.sh --codex --global   # Codex global (~/.codex/hooks.json)
 #   bash setup.sh --opencode         # OpenCode project-level (.opencode/plugins/)
 #   bash setup.sh --opencode --global # OpenCode global (~/.config/opencode/plugins/)
 #   bash setup.sh --reinstall        # pipx install --force . then register hooks
@@ -61,7 +63,12 @@ COPILOT_EVENTS=(
   errorOccurred
 )
 
-REPO_MARKERS=(.git .github .cursor .claude .opencode .gemini)
+CODEX_EVENTS=(
+  SessionStart PreToolUse PermissionRequest
+  PostToolUse UserPromptSubmit Stop
+)
+
+REPO_MARKERS=(.git .github .cursor .claude .opencode .gemini .codex)
 
 # Events that require a matcher (Claude Code tool-related hooks)
 CLAUDE_MATCHER_EVENTS="PreToolUse PostToolUse PostToolUseFailure"
@@ -73,10 +80,12 @@ DO_COPILOT=""
 DO_CLAUDE=""
 DO_OPENCODE=""
 DO_GEMINI=""
+DO_CODEX=""
 CURSOR_GLOBAL=""
 CLAUDE_GLOBAL=""
 OPENCODE_GLOBAL=""
 GEMINI_GLOBAL=""
+CODEX_GLOBAL=""
 WANT_GLOBAL=""
 DO_REINSTALL=""
 DO_CLEAN=""
@@ -90,6 +99,7 @@ while [[ $# -gt 0 ]]; do
     --claude)    DO_CLAUDE=1; shift ;;
     --opencode)  DO_OPENCODE=1; shift ;;
     --gemini)    DO_GEMINI=1; shift ;;
+    --codex)      DO_CODEX=1; shift ;;
     --global)    WANT_GLOBAL=1; shift ;;
     --reinstall) DO_REINSTALL=1; shift ;;
     --clean)     DO_CLEAN=1; shift ;;
@@ -103,8 +113,8 @@ done
 # Requiring an explicit IDE flag avoids accidentally installing global hooks
 # for IDEs the user did not intend to configure.
 if [[ -n "$WANT_GLOBAL" ]]; then
-  if [[ -z "$DO_CURSOR" && -z "$DO_COPILOT" && -z "$DO_CLAUDE" && -z "$DO_OPENCODE" && -z "$DO_GEMINI" ]]; then
-    echo "Error: --global requires an explicit IDE flag (--cursor, --copilot, --claude, --gemini, or --opencode)."
+  if [[ -z "$DO_CURSOR" && -z "$DO_COPILOT" && -z "$DO_CLAUDE" && -z "$DO_OPENCODE" && -z "$DO_GEMINI" && -z "$DO_CODEX" ]]; then
+    echo "Error: --global requires an explicit IDE flag (--cursor, --copilot, --claude, --gemini, --codex, or --opencode)."
     exit 1
   fi
   if [[ -n "$DO_COPILOT" ]]; then
@@ -115,10 +125,11 @@ if [[ -n "$WANT_GLOBAL" ]]; then
   [[ -n "$DO_CLAUDE" ]]   && CLAUDE_GLOBAL=1
   [[ -n "$DO_OPENCODE" ]] && OPENCODE_GLOBAL=1
   [[ -n "$DO_GEMINI" ]]   && GEMINI_GLOBAL=1
+  [[ -n "$DO_CODEX" ]]    && CODEX_GLOBAL=1
 fi
 
 # Auto-detect if no IDE flags given (applies both for setup and for operational commands)
-if [[ -z "$DO_CURSOR" && -z "$DO_COPILOT" && -z "$DO_CLAUDE" && -z "$DO_OPENCODE" && -z "$DO_GEMINI" ]]; then
+if [[ -z "$DO_CURSOR" && -z "$DO_COPILOT" && -z "$DO_CLAUDE" && -z "$DO_OPENCODE" && -z "$DO_GEMINI" && -z "$DO_CODEX" ]]; then
   # Check for a .cursor workspace directory in the current or parent directories,
   # or fallback to cursor being installed on PATH or in $HOME.
   CURSOR_DIR_FOUND=""
@@ -158,11 +169,16 @@ if [[ -z "$DO_CURSOR" && -z "$DO_COPILOT" && -z "$DO_CLAUDE" && -z "$DO_OPENCODE
     DO_GEMINI=1
     GEMINI_GLOBAL=1
   fi
-  if [[ -z "$DO_CURSOR" && -z "$DO_COPILOT" && -z "$DO_CLAUDE" && -z "$DO_OPENCODE" && -z "$DO_GEMINI" ]]; then
+  # Check if Codex is installed
+  if command -v codex &>/dev/null || [ -d "$HOME/.codex" ]; then
+    DO_CODEX=1
+    CODEX_GLOBAL=1
+  fi
+  if [[ -z "$DO_CURSOR" && -z "$DO_COPILOT" && -z "$DO_CLAUDE" && -z "$DO_OPENCODE" && -z "$DO_GEMINI" && -z "$DO_CODEX" ]]; then
     if [[ -n "$DO_CLEAN" || -n "$DO_UNINSTALL" || -n "$DO_DIAGNOSE" ]]; then
-      echo "No supported IDE detected. Use --cursor, --copilot, --claude, --gemini, or --opencode to target a specific IDE."
+      echo "No supported IDE detected. Use --cursor, --copilot, --claude, --gemini, --codex, or --opencode to target a specific IDE."
     else
-      echo "No supported IDE detected. Use --cursor, --copilot, --claude, --gemini, or --opencode to force setup."
+      echo "No supported IDE detected. Use --cursor, --copilot, --claude, --gemini, --codex, or --opencode to force setup."
     fi
     exit 1
   fi
@@ -800,6 +816,197 @@ if skipped:
 " "$settings_json" "$HOOK_CMD" "${GEMINI_EVENTS[@]}"
 }
 
+# ─── Codex setup / cleanup ──────────────────────────────────────────────────
+setup_codex() {
+  local hooks_json
+  local config_toml
+  if [[ -n "$CODEX_GLOBAL" ]]; then
+    hooks_json="$HOME/.codex/hooks.json"
+    config_toml="$HOME/.codex/config.toml"
+    echo "📦 Codex (global: $hooks_json)"
+  else
+    local repo_root
+    repo_root="$(find_repo_root)"
+    hooks_json="$repo_root/.codex/hooks.json"
+    config_toml="$repo_root/.codex/config.toml"
+    echo "📦 Codex (project: $hooks_json)"
+  fi
+  mkdir -p "$(dirname "$hooks_json")"
+
+  python3 -c "
+import json, os, re, sys
+
+hooks_path, config_path, hook_cmd = sys.argv[1:4]
+events = sys.argv[4:]
+matchers = {
+    'SessionStart': 'startup|resume|clear',
+    'PreToolUse': '*',
+    'PermissionRequest': '*',
+    'PostToolUse': '*',
+}
+
+os.makedirs(os.path.dirname(config_path), exist_ok=True)
+lines = []
+if os.path.exists(config_path):
+    with open(config_path) as f:
+        lines = f.readlines()
+section_start = None
+section_end = len(lines)
+section_re = re.compile(r'^\s*\[.*\]\s*$')
+for index, line in enumerate(lines):
+    if line.strip() == '[features]':
+        section_start = index
+        for probe in range(index + 1, len(lines)):
+            if section_re.match(lines[probe]):
+                section_end = probe
+                break
+        break
+if section_start is None:
+    if lines and lines[-1].strip():
+        lines.append('\n')
+    lines.extend(['[features]\n', 'codex_hooks = true\n'])
+else:
+    key_re = re.compile(r'^\s*codex_hooks\s*=')
+    for index in range(section_start + 1, section_end):
+        if key_re.match(lines[index]):
+            lines[index] = 'codex_hooks = true\n'
+            break
+    else:
+        lines.insert(section_end, 'codex_hooks = true\n')
+with open(config_path, 'w') as f:
+    f.writelines(lines)
+
+if os.path.exists(hooks_path):
+    with open(hooks_path) as f:
+        try:
+            doc = json.load(f)
+        except json.JSONDecodeError:
+            doc = {}
+else:
+    doc = {}
+hooks = doc.setdefault('hooks', {})
+added, updated, skipped = [], [], []
+for event in events:
+    event_list = hooks.setdefault(event, [])
+    matcher = matchers.get(event)
+    matches = []
+    for entry in event_list:
+        if matcher is not None and entry.get('matcher', '') != matcher:
+            continue
+        if matcher is None and 'matcher' in entry:
+            continue
+        for h in entry.get('hooks', []):
+            cmd = h.get('command', '')
+            if 'otel_hook' in cmd or 'otel-hook' in cmd:
+                matches.append(h)
+    if matches:
+        changed = False
+        for hook in matches:
+            if hook.get('command') != hook_cmd:
+                hook['command'] = hook_cmd
+                changed = True
+            if hook.get('type') != 'command':
+                hook['type'] = 'command'
+                changed = True
+            if 'timeout' not in hook:
+                hook['timeout'] = 30
+                changed = True
+        (updated if changed else skipped).append(event)
+        continue
+    entry = {'hooks': [{'type': 'command', 'command': hook_cmd, 'timeout': 30}]}
+    if matcher is not None:
+        entry['matcher'] = matcher
+    event_list.append(entry)
+    added.append(event)
+with open(hooks_path, 'w') as f:
+    json.dump(doc, f, indent=2)
+    f.write('\n')
+print(f'  ✅ Enabled Codex hooks feature ({config_path})')
+if added:
+    print(f'  ✅ Added OTel hook to {len(added)} events: {\", \".join(added)}')
+if updated:
+    print(f'  ✅ Updated OTel hook path in {len(updated)} events: {\", \".join(updated)}')
+if skipped:
+    print(f'  ⏭️  Already registered in {len(skipped)} events (no changes)')
+" "$hooks_json" "$config_toml" "$HOOK_CMD" "${CODEX_EVENTS[@]}"
+}
+
+diagnose_codex() {
+  local hooks_json
+  if [[ -n "$CODEX_GLOBAL" ]]; then
+    hooks_json="$HOME/.codex/hooks.json"
+    echo "🔍 Codex (global: $hooks_json)"
+  else
+    local repo_root
+    repo_root="$(find_repo_root)"
+    hooks_json="$repo_root/.codex/hooks.json"
+    echo "🔍 Codex (project: $hooks_json)"
+  fi
+  if [ ! -f "$hooks_json" ]; then
+    echo "  ⏭️  Hooks file not found"
+    return 0
+  fi
+  python3 -c "
+import json, sys
+with open(sys.argv[1]) as f:
+    doc = json.load(f)
+count = 0
+for entries in doc.get('hooks', {}).values():
+    for entry in entries:
+        for h in entry.get('hooks', []):
+            cmd = h.get('command', '')
+            if 'otel_hook' in cmd or 'otel-hook' in cmd:
+                count += 1
+print(f'  {\"✅\" if count else \"⏭️\"} {count} OTel hook entries registered' if count else '  ⏭️  No OTel hook entries found')
+" "$hooks_json"
+}
+
+uninstall_codex() {
+  local hooks_json
+  if [[ -n "$CODEX_GLOBAL" ]]; then
+    hooks_json="$HOME/.codex/hooks.json"
+    echo "🗑️  Codex (global: $hooks_json)"
+  else
+    local repo_root
+    repo_root="$(find_repo_root)"
+    hooks_json="$repo_root/.codex/hooks.json"
+    echo "🗑️  Codex (project: $hooks_json)"
+  fi
+  if [ ! -f "$hooks_json" ]; then
+    echo "  ⏭️  Hooks file not found — nothing to uninstall"
+    return 0
+  fi
+  python3 -c "
+import json, sys
+path = sys.argv[1]
+with open(path) as f:
+    doc = json.load(f)
+hooks = doc.get('hooks', {})
+removed = 0
+for event, entries in list(hooks.items()):
+    live = []
+    for entry in entries:
+        before = len(entry.get('hooks', []))
+        surviving = [h for h in entry.get('hooks', []) if 'otel-hook' not in h.get('command', '') and 'otel_hook' not in h.get('command', '')]
+        removed += before - len(surviving)
+        if surviving:
+            entry['hooks'] = surviving
+            live.append(entry)
+    hooks[event] = live
+    if not hooks[event]:
+        del hooks[event]
+if removed:
+    with open(path, 'w') as f:
+        json.dump(doc, f, indent=2)
+        f.write('\n')
+print(f'  ✅ Uninstalled {removed} hook entries' if removed else '  ⏭️  No OTel hook entries found to uninstall')
+" "$hooks_json"
+}
+
+clean_codex() {
+  diagnose_codex
+}
+
 # ─── Claude Code cleanup ────────────────────────────────────────────────────
 diagnose_claude() {
   local settings_json
@@ -1388,6 +1595,7 @@ if [[ -n "$DO_DIAGNOSE" ]]; then
   [[ -n "$DO_CLAUDE" ]] && diagnose_claude
   [[ -n "$DO_COPILOT" ]] && diagnose_copilot
   [[ -n "$DO_GEMINI" ]] && diagnose_gemini
+  [[ -n "$DO_CODEX" ]] && diagnose_codex
   exit 0
 fi
 
@@ -1397,6 +1605,7 @@ if [[ -n "$DO_UNINSTALL" ]]; then
   [[ -n "$DO_CLAUDE" ]] && uninstall_claude
   [[ -n "$DO_COPILOT" ]] && uninstall_copilot
   [[ -n "$DO_GEMINI" ]] && uninstall_gemini
+  [[ -n "$DO_CODEX" ]] && uninstall_codex
   echo "✅ Uninstall complete!"
   exit 0
 fi
@@ -1407,6 +1616,7 @@ if [[ -n "$DO_CLEAN" ]]; then
   [[ -n "$DO_CLAUDE" ]] && clean_claude
   [[ -n "$DO_COPILOT" ]] && clean_copilot
   [[ -n "$DO_GEMINI" ]] && clean_gemini
+  [[ -n "$DO_CODEX" ]] && clean_codex
   echo "✅ Cleaning complete!"
   exit 0
 fi
@@ -1436,6 +1646,11 @@ if [[ -n "$DO_GEMINI" ]]; then
   echo ""
 fi
 
+if [[ -n "$DO_CODEX" ]]; then
+  setup_codex
+  echo ""
+fi
+
 # ─── Kick off venv provisioning ─────────────────────────────────────────────
 echo "🚀 Bootstrapping Python venv (runs in background) ..."
 echo '{}' | python3 "$HOOK_DIR/otel_hook.py" > /dev/null 2>&1 || true
@@ -1460,6 +1675,9 @@ if [[ -n "$DO_COPILOT" ]]; then
 fi
 if [[ -n "$DO_OPENCODE" ]]; then
   echo "  2. Restart OpenCode to activate the plugin"
+fi
+if [[ -n "$DO_CODEX" ]]; then
+  echo "  2. Restart Codex to activate hooks"
 fi
 # Determine the hook home used for logging: prefer IDE_OTEL_HOOK_HOME, then
 # fall back to the system default for otel-hook, or the local script dir.

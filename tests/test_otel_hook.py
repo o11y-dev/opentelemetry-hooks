@@ -282,6 +282,16 @@ class TestDetectIDE:
     def test_opencode_cli_self_reported_name(self):
         assert otel_hook._detect_ide({"source_app": "OpenCode CLI"}) == "opencode"
 
+    def test_codex_env_override(self, monkeypatch):
+        monkeypatch.setenv("IDE_OTEL_IDE_NAME", "OpenAI Codex")
+        assert otel_hook._detect_ide({"session_id": "sess-1"}) == "codex"
+
+    def test_codex_cli_self_reported_name(self):
+        assert otel_hook._detect_ide({"source_app": "Codex CLI"}) == "codex"
+
+    def test_codex_via_turn_id(self):
+        assert otel_hook._detect_ide({"hook_event_name": "PreToolUse", "session_id": "sess-1", "turn_id": "turn-1"}) == "codex"
+
     def test_antigravity_spaced_self_reported_name(self):
         assert otel_hook._detect_ide({"source_app": "Anti Gravity"}) == "antigravity"
 
@@ -1685,3 +1695,40 @@ class TestSetupOpencode:
         monkeypatch.setattr(otel_hook, "setup_opencode", lambda global_, cwd: called.append((global_, cwd)))
         otel_hook.setup_agent("opencode", global_=True, cwd="/tmp")
         assert called == [(True, "/tmp")]
+
+
+# ---------------------------------------------------------------------------
+# setup_codex
+# ---------------------------------------------------------------------------
+
+class TestSetupCodex:
+    def test_project_install_creates_hooks_and_config(self, tmp_path, monkeypatch):
+        (tmp_path / ".git").mkdir()
+        monkeypatch.setattr(otel_hook, "_resolve_hook_cmd", lambda: "otel-hook")
+        otel_hook.setup_codex(global_=False, cwd=str(tmp_path))
+        hooks_path = tmp_path / ".codex" / "hooks.json"
+        config_path = tmp_path / ".codex" / "config.toml"
+        assert hooks_path.is_file()
+        assert config_path.is_file()
+        doc = json.loads(hooks_path.read_text())
+        assert set(otel_hook._CODEX_EVENTS).issubset(doc["hooks"])
+        assert "codex_hooks = true" in config_path.read_text()
+
+    def test_global_install_uses_home(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr(otel_hook, "_resolve_hook_cmd", lambda: "otel-hook")
+        otel_hook.setup_codex(global_=True)
+        assert (tmp_path / ".codex" / "hooks.json").is_file()
+
+    def test_detect_available_agents_includes_codex_when_config_exists(self, tmp_path, monkeypatch):
+        (tmp_path / ".codex").mkdir()
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr(otel_hook.shutil, "which", lambda cmd: None)
+        found = otel_hook._detect_available_agents()
+        assert "codex" in found
+
+    def test_setup_agent_dispatches_to_codex(self, monkeypatch):
+        called = []
+        monkeypatch.setattr(otel_hook, "setup_codex", lambda global_, cwd: called.append((global_, cwd)))
+        otel_hook.setup_agent("codex", global_=False, cwd="/tmp/project")
+        assert called == [(False, "/tmp/project")]

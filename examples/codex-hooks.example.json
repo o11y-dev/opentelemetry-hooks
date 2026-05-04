@@ -1,0 +1,39 @@
+{
+  "_comment": "Template for Codex hooks. Replace {{SCRIPT_PATH}} with the hook command. For a source checkout use 'python3 /absolute/path/to/otel_hook.py'; use 'otel-hook' when installed via pipx or pip. Enable hooks with [features] codex_hooks = true in Codex config.toml.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear",
+        "hooks": [{ "type": "command", "command": "{{SCRIPT_PATH}}", "timeout": 30 }]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [{ "type": "command", "command": "{{SCRIPT_PATH}}", "timeout": 30 }]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "matcher": "*",
+        "hooks": [{ "type": "command", "command": "{{SCRIPT_PATH}}", "timeout": 30 }]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [{ "type": "command", "command": "{{SCRIPT_PATH}}", "timeout": 30 }]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [{ "type": "command", "command": "{{SCRIPT_PATH}}", "timeout": 30 }]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [{ "type": "command", "command": "{{SCRIPT_PATH}}", "timeout": 30 }]
+      }
+    ]
+  }
+}
