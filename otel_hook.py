@@ -611,8 +611,13 @@ def _get_os_info() -> dict:
 # ---------------------------------------------------------------------------
 # Client (IDE) version detection
 # ---------------------------------------------------------------------------
+_CODEX_VERSION_CACHE: Optional[str] = None  # sentinel: None = uncached, "" = not found
+_CODEX_VERSION_DETECTED: bool = False
+
+
 def _detect_client_version(data: dict, ide: str) -> Optional[str]:
     """Extract client/IDE version from environment variables or input payload."""
+    global _CODEX_VERSION_CACHE, _CODEX_VERSION_DETECTED
     # Check input payload first
     version = _first_present(data, ("client_version", "ide_version", "app_version"))
     if version:
@@ -631,17 +636,24 @@ def _detect_client_version(data: dict, ide: str) -> Optional[str]:
         if v:
             return v
     if ide == "codex":
-        try:
-            result = subprocess.run(
-                ["codex", "--version"],
-                capture_output=True,
-                text=True,
-                timeout=2,
-            )
-            if result.returncode == 0:
-                return result.stdout.strip()
-        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-            pass
+        v = os.getenv("CODEX_VERSION")
+        if v:
+            return v
+        if not _CODEX_VERSION_DETECTED:
+            _CODEX_VERSION_DETECTED = True
+            try:
+                result = subprocess.run(
+                    ["codex", "--version"],
+                    capture_output=True,
+                    text=True,
+                    timeout=2,
+                )
+                if result.returncode == 0:
+                    _CODEX_VERSION_CACHE = result.stdout.strip()
+            except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+                pass
+        if _CODEX_VERSION_CACHE:
+            return _CODEX_VERSION_CACHE
     # Generic fallback
     v = os.getenv("IDE_OTEL_CLIENT_VERSION")
     if v:
@@ -1541,7 +1553,7 @@ def _maybe_attach_text(span, label: str, text: str) -> None:
 # ---------------------------------------------------------------------------
 _MCP_EVENTS = {"BeforeMCPExecution", "AfterMCPExecution"}
 _SHELL_EVENTS = {"BeforeShellExecution", "AfterShellExecution"}
-_TOOL_EVENTS = {"PreToolUse", "PostToolUse", "PostToolUseFailure"}
+_TOOL_EVENTS = {"PreToolUse", "PostToolUse", "PostToolUseFailure", "PermissionRequest"}
 
 
 def _get_otel_logger(name: str) -> logging.Logger:
@@ -2335,17 +2347,45 @@ def _set_codex_tool_attrs(span, event_name: str, data: dict) -> None:
         description = tool_input.get("description")
         if isinstance(description, str):
             span.set_attribute("gen_ai.client.approval.description", description)
-        flat_input: dict = {}
-        _flatten(flat_input, "gen_ai.client.tool.input", tool_input)
-        for key, value in flat_input.items():
-            _set_if_present(span, key, value)
+        # Flatten full input only when explicitly opted in (respects privacy controls)
+        if _safe_bool(os.getenv("IDE_OTEL_CAPTURE_TOOL_INPUT_CONTENT", "")):
+            mask = _safe_bool(os.getenv("IDE_OTEL_MASK_PROMPTS", ""))
+            max_chars = int(os.getenv("IDE_OTEL_TEXT_MAX_CHARS", "4000"))
+            flat_input: dict = {}
+            _flatten(flat_input, "gen_ai.client.tool.input", tool_input)
+            for key, value in flat_input.items():
+                if isinstance(value, str):
+                    if mask:
+                        value = _mask_text(value)
+                    _set_if_present(span, key, value[:max_chars])
+                else:
+                    _set_if_present(span, key, value)
+        else:
+            # Always emit length+digest for cardinality-safe observability
+            text = _stringify(tool_input)
+            span.set_attribute("gen_ai.client.tool.input.length", len(text))
+            span.set_attribute("gen_ai.client.tool.input.sha256", _hash_text(text))
 
     tool_response = data.get("tool_response")
     if isinstance(tool_response, dict):
-        flat_response: dict = {}
-        _flatten(flat_response, "gen_ai.client.tool.response", tool_response)
-        for key, value in flat_response.items():
-            _set_if_present(span, key, value)
+        # Flatten full response only when explicitly opted in
+        if _safe_bool(os.getenv("IDE_OTEL_CAPTURE_TOOL_INPUT_CONTENT", "")):
+            mask = _safe_bool(os.getenv("IDE_OTEL_MASK_PROMPTS", ""))
+            max_chars = int(os.getenv("IDE_OTEL_TEXT_MAX_CHARS", "4000"))
+            flat_response: dict = {}
+            _flatten(flat_response, "gen_ai.client.tool.response", tool_response)
+            for key, value in flat_response.items():
+                if isinstance(value, str):
+                    if mask:
+                        value = _mask_text(value)
+                    _set_if_present(span, key, value[:max_chars])
+                else:
+                    _set_if_present(span, key, value)
+        else:
+            # Always emit length+digest for cardinality-safe observability
+            text = _stringify(tool_response)
+            span.set_attribute("gen_ai.client.tool.response.length", len(text))
+            span.set_attribute("gen_ai.client.tool.response.sha256", _hash_text(text))
     elif tool_response is not None:
         _maybe_attach_text(span, "tool_response", _stringify(tool_response))
 

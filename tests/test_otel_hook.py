@@ -1416,6 +1416,82 @@ class TestDetectClientVersion:
         monkeypatch.delenv("IDE_OTEL_CLIENT_VERSION", raising=False)
         assert otel_hook._detect_client_version({}, "claude") is None
 
+    def test_codex_from_env(self, monkeypatch):
+        monkeypatch.setenv("CODEX_VERSION", "1.5.0")
+        monkeypatch.setattr(otel_hook, "_CODEX_VERSION_DETECTED", False)
+        monkeypatch.setattr(otel_hook, "_CODEX_VERSION_CACHE", None)
+        assert otel_hook._detect_client_version({}, "codex") == "1.5.0"
+
+    def test_codex_subprocess_cached(self, monkeypatch):
+        """codex --version subprocess must only be called once per process."""
+        monkeypatch.delenv("CODEX_VERSION", raising=False)
+        monkeypatch.delenv("IDE_OTEL_CLIENT_VERSION", raising=False)
+        monkeypatch.setattr(otel_hook, "_CODEX_VERSION_DETECTED", False)
+        monkeypatch.setattr(otel_hook, "_CODEX_VERSION_CACHE", None)
+        call_count = []
+
+        import subprocess as _sp
+        real_run = _sp.run
+
+        def fake_run(args, **kwargs):
+            if args == ["codex", "--version"]:
+                call_count.append(1)
+                class R:
+                    returncode = 0
+                    stdout = "2.0.0\n"
+                return R()
+            return real_run(args, **kwargs)
+
+        monkeypatch.setattr(_sp, "run", fake_run)
+        assert otel_hook._detect_client_version({}, "codex") == "2.0.0"
+        assert otel_hook._detect_client_version({}, "codex") == "2.0.0"
+        assert len(call_count) == 1, "subprocess must only be invoked once"
+
+
+class _FakeSpan:
+    """Minimal span stub for testing attribute helpers."""
+    def __init__(self):
+        self.attrs = {}
+
+    def set_attribute(self, key, value):
+        self.attrs[key] = value
+
+
+class TestSetCodexToolAttrs:
+    def test_default_emits_digest_not_content(self, monkeypatch):
+        monkeypatch.delenv("IDE_OTEL_CAPTURE_TOOL_INPUT_CONTENT", raising=False)
+        span = _FakeSpan()
+        data = {"tool_input": {"command": "ls", "path": "/tmp"}, "tool_response": {"output": "file.txt"}}
+        otel_hook._set_codex_tool_attrs(span, "PreToolUse", data)
+        # command is always safe to expose
+        assert span.attrs.get("gen_ai.client.command") == "ls"
+        # content should NOT be flattened by default
+        assert "gen_ai.client.tool.input.command" not in span.attrs
+        assert "gen_ai.client.tool.response.output" not in span.attrs
+        # length + digest should be present
+        assert "gen_ai.client.tool.input.length" in span.attrs
+        assert "gen_ai.client.tool.input.sha256" in span.attrs
+        assert "gen_ai.client.tool.response.length" in span.attrs
+        assert "gen_ai.client.tool.response.sha256" in span.attrs
+
+    def test_opt_in_flattens_content(self, monkeypatch):
+        monkeypatch.setenv("IDE_OTEL_CAPTURE_TOOL_INPUT_CONTENT", "1")
+        span = _FakeSpan()
+        data = {"tool_input": {"command": "ls", "path": "/tmp"}, "tool_response": {"output": "file.txt"}}
+        otel_hook._set_codex_tool_attrs(span, "PreToolUse", data)
+        assert span.attrs.get("gen_ai.client.tool.input.command") == "ls"
+        assert span.attrs.get("gen_ai.client.tool.response.output") == "file.txt"
+
+    def test_permission_request_handled(self, monkeypatch):
+        monkeypatch.delenv("IDE_OTEL_CAPTURE_TOOL_INPUT_CONTENT", raising=False)
+        span = _FakeSpan()
+        data = {"tool_input": {"description": "need access"}}
+        otel_hook._set_codex_tool_attrs(span, "PermissionRequest", data)
+        assert span.attrs.get("gen_ai.client.approval.description") == "need access"
+
+    def test_permission_request_in_tool_events(self):
+        assert "PermissionRequest" in otel_hook._TOOL_EVENTS
+
 
 # ── New IDE name aliases ─────────────────────────────────────────────────
 
