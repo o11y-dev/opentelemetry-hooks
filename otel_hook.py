@@ -611,8 +611,8 @@ def _get_os_info() -> dict:
 # ---------------------------------------------------------------------------
 # Client (IDE) version detection
 # ---------------------------------------------------------------------------
-_CODEX_VERSION_CACHE: Optional[str] = None  # sentinel: None = uncached, "" = not found
-_CODEX_VERSION_DETECTED: bool = False
+_CODEX_VERSION_CACHE: Optional[str] = None  # cached result; None means not yet detected or not found
+_CODEX_VERSION_DETECTED: bool = False  # True once detection has been attempted
 
 
 def _detect_client_version(data: dict, ide: str) -> Optional[str]:
@@ -2347,7 +2347,8 @@ def _set_codex_tool_attrs(span, event_name: str, data: dict) -> None:
         description = tool_input.get("description")
         if isinstance(description, str):
             span.set_attribute("gen_ai.client.approval.description", description)
-        # Flatten full input only when explicitly opted in (respects privacy controls)
+        # Flatten full input only when explicitly opted in (IDE_OTEL_CAPTURE_TOOL_INPUT_CONTENT
+        # gates both tool input and tool response content — consistent with _emit_tool_log).
         if _safe_bool(os.getenv("IDE_OTEL_CAPTURE_TOOL_INPUT_CONTENT", "")):
             mask = _safe_bool(os.getenv("IDE_OTEL_MASK_PROMPTS", ""))
             max_chars = int(os.getenv("IDE_OTEL_TEXT_MAX_CHARS", "4000"))
@@ -2368,7 +2369,7 @@ def _set_codex_tool_attrs(span, event_name: str, data: dict) -> None:
 
     tool_response = data.get("tool_response")
     if isinstance(tool_response, dict):
-        # Flatten full response only when explicitly opted in
+        # Flatten full response only when explicitly opted in (same gate as tool input above)
         if _safe_bool(os.getenv("IDE_OTEL_CAPTURE_TOOL_INPUT_CONTENT", "")):
             mask = _safe_bool(os.getenv("IDE_OTEL_MASK_PROMPTS", ""))
             max_chars = int(os.getenv("IDE_OTEL_TEXT_MAX_CHARS", "4000"))
