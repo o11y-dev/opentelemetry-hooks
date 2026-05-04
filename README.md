@@ -7,11 +7,11 @@
 
 > Observability for AI coding agents — any OTLP-compatible backend.
 
-An open-source OpenTelemetry integration that captures AI coding agent activity as structured **traces and logs** and exports them to any OTLP-compatible backend. Works with **any AI coding agent** — today: **Antigravity**, **Claude Code**, **Cursor IDE / Cursor CLI**, **Gemini CLI**, **GitHub Copilot**, and **OpenCode** — using [OpenTelemetry GenAI semantic conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/).
+An open-source OpenTelemetry integration that captures AI coding agent activity as structured **traces and logs** and exports them to any OTLP-compatible backend. Works with **any AI coding agent** — today: **Antigravity**, **Claude Code**, **Codex**, **Cursor IDE / Cursor CLI**, **Gemini CLI**, **GitHub Copilot**, and **OpenCode** — using [OpenTelemetry GenAI semantic conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/).
 
 Every hook event — prompt submissions, tool calls, shell commands, MCP interactions, file edits, subagent orchestration — becomes an OpenTelemetry span you can query, alert on, and visualize in Jaeger, Grafana, Datadog, Honeycomb, Coralogix, or any OTLP-compatible backend.
 
-> **Note**: Claude Code has [native OpenTelemetry support](https://docs.claude.com/en/docs/claude-code/monitoring-usage), but this repo can also be used as a hook target when you want the same hook-based pipeline across all agents.
+> **Note**: Claude Code and Codex have native OpenTelemetry support, but this repo can also be used as a hook target when you want the same hook-based pipeline across all agents. Avoid enabling native Codex OTel export and `otel-hook` for the same events unless you intentionally want duplicate telemetry.
 
 ## How It Works
 
@@ -25,7 +25,7 @@ IDE Event → stdin (JSON) → otel-hook → OpenTelemetry SDK → OTLP Backend
 
 ## Features
 
-- **Multi-agent support**: One hook command, multiple agent integrations. The CLI and `setup.sh` can register Cursor, Claude Code, Gemini CLI, GitHub Copilot, and OpenCode. Antigravity and compatible hook runners can call the same hook command directly. Runtime detection prefers parent-process discovery first, then explicit overrides, then self-reported payload fields, and finally heuristics when needed.
+- **Multi-agent support**: One hook command, multiple agent integrations. The CLI and `setup.sh` can register Codex, Cursor, Claude Code, Gemini CLI, GitHub Copilot, and OpenCode. Antigravity and compatible hook runners can call the same hook command directly. Runtime detection prefers parent-process discovery first, then explicit overrides, then self-reported payload fields, and finally heuristics when needed.
 
 - **Session-level Traces**: Groups all events within a session into a single trace with a 3-tier hierarchy:
 
@@ -71,24 +71,25 @@ Run `otel-hook diagnose` to see what is currently registered, and `otel-hook uni
 
 ## Supported Events
 
-| Canonical Name | Antigravity / Claude Code | Cursor IDE / CLI | Gemini CLI | GitHub Copilot | OpenCode (plugin) |
-|---|---|---|---|---|---|
-| `SessionStart` | `SessionStart` | `sessionStart` | `SessionStart` | `sessionStart` | `session.created` |
-| `SessionEnd` | `SessionEnd` | `sessionEnd` | `SessionEnd` | `sessionEnd` | `session.deleted`, `session.error` |
-| `UserPromptSubmit` | `UserPromptSubmit` | `beforeSubmitPrompt` | `BeforeModel` ¹ | `userPromptSubmitted` | `message.updated` (role=user) |
-| `PreToolUse` | `PreToolUse` | `preToolUse` | `BeforeTool` | `preToolUse` | `tool.execute.before` ² |
-| `PostToolUse` | `PostToolUse` | `postToolUse` | `AfterTool` | `postToolUse` | `tool.execute.after` (exit=0) |
-| `PostToolUseFailure` | `PostToolUseFailure` | `postToolUseFailure` | — | — | `tool.execute.after` (exit≠0) |
-| `Stop` | `Stop` | `stop` | `AfterModel` ¹ | — | `session.idle` |
-| `SubagentStart` | `SubagentStart` | `subagentStart` | `BeforeAgent` | — | — ³ |
-| `SubagentStop` | `SubagentStop` | `subagentStop` | `AfterAgent` | — | — ³ |
-| `ErrorOccurred` | — | — | — | `errorOccurred` | — |
-| `BeforeShellExecution` | — | `beforeShellExecution` | — | — | — ² |
-| `AfterShellExecution` | — | `afterShellExecution` | — | — | — ² |
-| `BeforeMCPExecution` | — | `beforeMCPExecution` | — | — | — ² |
-| `AfterMCPExecution` | — | `afterMCPExecution` | — | — | — ² |
-| `BeforeReadFile` | — | `beforeReadFile` | — | — | — ² |
-| `AfterFileEdit` | — | `afterFileEdit` | — | — | `file.edited` |
+| Canonical Name | Antigravity / Claude Code | Codex | Cursor IDE / CLI | Gemini CLI | GitHub Copilot | OpenCode (plugin) |
+|---|---|---|---|---|---|---|
+| `SessionStart` | `SessionStart` | `SessionStart` | `sessionStart` | `SessionStart` | `sessionStart` | `session.created` |
+| `SessionEnd` | `SessionEnd` | — | `sessionEnd` | `SessionEnd` | `sessionEnd` | `session.deleted`, `session.error` |
+| `UserPromptSubmit` | `UserPromptSubmit` | `UserPromptSubmit` | `beforeSubmitPrompt` | `BeforeModel` ¹ | `userPromptSubmitted` | `message.updated` (role=user) |
+| `PreToolUse` | `PreToolUse` | `PreToolUse` | `preToolUse` | `BeforeTool` | `preToolUse` | `tool.execute.before` ² |
+| `PermissionRequest` | — | `PermissionRequest` | — | — | — | — |
+| `PostToolUse` | `PostToolUse` | `PostToolUse` | `postToolUse` | `AfterTool` | `postToolUse` | `tool.execute.after` (exit=0) |
+| `PostToolUseFailure` | `PostToolUseFailure` | — | `postToolUseFailure` | — | — | `tool.execute.after` (exit≠0) |
+| `Stop` | `Stop` | `Stop` | `stop` | `AfterModel` ¹ | — | `session.idle` |
+| `SubagentStart` | `SubagentStart` | — | `subagentStart` | `BeforeAgent` | — | — ³ |
+| `SubagentStop` | `SubagentStop` | — | `subagentStop` | `AfterAgent` | — | — ³ |
+| `ErrorOccurred` | — | — | — | — | `errorOccurred` | — |
+| `BeforeShellExecution` | — | — | `beforeShellExecution` | — | — | — ² |
+| `AfterShellExecution` | — | — | `afterShellExecution` | — | — | — ² |
+| `BeforeMCPExecution` | — | — | `beforeMCPExecution` | — | — | — ² |
+| `AfterMCPExecution` | — | — | `afterMCPExecution` | — | — | — ² |
+| `BeforeReadFile` | — | — | `beforeReadFile` | — | — | — ² |
+| `AfterFileEdit` | — | — | `afterFileEdit` | — | — | `file.edited` |
 
 ¹ Gemini CLI uses `BeforeModel`/`AfterModel` where other agents use `UserPromptSubmit`/`Stop`; the hook normalizes both to canonical span names.<br>
 ² OpenCode routes bash, read, write, MCP, and all other tools through the universal `tool.execute.before/after` hooks, so these events are observable as `PreToolUse`/`PostToolUse` with the appropriate `tool_name`.<br>
@@ -134,9 +135,11 @@ otel-hook setup --agent cursor
 otel-hook setup --agent copilot --no-global   # project-scoped (run from repo root)
 otel-hook setup --agent gemini
 otel-hook setup --agent opencode
+otel-hook setup --agent codex
 
 # Project-scoped instead of global
 otel-hook setup --agent cursor --no-global
+otel-hook setup --agent codex --no-global
 
 # Check registration status
 otel-hook diagnose
@@ -294,6 +297,38 @@ cp .cursor/hooks/opentelemetry-hook/examples/antigravity-workflow.example.md .ag
 
 Replace `{{SCRIPT_PATH}}` in the copied workflow with the hook command you want Antigravity to invoke. For a copied-source checkout use `python3 .cursor/hooks/opentelemetry-hook/otel_hook.py`; use `otel-hook` for a pip-installed package.
 
+#### Codex
+
+Codex hooks are configured in `~/.codex/hooks.json` or `<repo>/.codex/hooks.json` and require the `codex_hooks` feature flag in the matching `config.toml`.
+
+**Quick setup (recommended):**
+
+```bash
+# Global — available in every Codex session
+bash setup.sh --codex --global
+
+# Project-level — only active for this project
+bash setup.sh --codex
+```
+
+The setup command enables:
+
+```toml
+[features]
+codex_hooks = true
+```
+
+**Manual install:**
+
+```bash
+mkdir -p .codex
+cp examples/codex-hooks.example.json .codex/hooks.json
+```
+
+Then replace `{{SCRIPT_PATH}}` with `otel-hook` or the absolute source checkout command.
+
+**Events captured:** `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, and `Stop`. Codex does not currently emit a hook-level `SessionEnd`, so unfinished sessions are closed by this hook's stale-session cleanup when needed.
+
 #### OpenCode
 
 A native TypeScript plugin is included at `plugin/opencode.ts`. It hooks into OpenCode's session and tool lifecycle events and pipes JSON payloads to `otel-hook` on stdin — the same pattern used by [rtk](https://github.com/rtk-ai/rtk).
@@ -369,7 +404,7 @@ Then restart your agent or IDE.
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `IDE_OTEL_BATCH_ON_STOP` | Enable session-level batching (recommended) | `false` |
-| `IDE_OTEL_IDE_NAME` | Force the detected IDE name (`cursor`, `copilot`, `claude`, `gemini`, `antigravity`, `opencode`) for generic hook runners; common labels like `GitHub Copilot`, `Claude Code`, `Cursor IDE` / `Cursor CLI`, `Gemini CLI`, `Anti Gravity`, `OpenCode`, and their `... CLI` / `... IDE` variants normalize automatically | auto-detect |
+| `IDE_OTEL_IDE_NAME` | Force the detected IDE name (`codex`, `cursor`, `copilot`, `claude`, `gemini`, `antigravity`, `opencode`) for generic hook runners; common labels like `OpenAI Codex`, `Codex CLI`, `GitHub Copilot`, `Claude Code`, `Cursor IDE` / `Cursor CLI`, `Gemini CLI`, `Anti Gravity`, `OpenCode`, and their `... CLI` / `... IDE` variants normalize automatically | auto-detect |
 | `IDE_OTEL_LOCAL_SPANS` | Save hook spans locally as JSONL files for agent analysis (`.state/local_spans/*.jsonl`) | unset |
 | `IDE_OTEL_CAPTURE_TEXT` | Include prompt/response text in spans | `false` |
 | `IDE_OTEL_MASK_PROMPTS` | Redact emails, tokens, usernames from text | `false` |
@@ -634,7 +669,7 @@ Requires the [Datadog Agent](https://docs.datadoghq.com/opentelemetry/) with OTL
 | Attribute | Description |
 |-----------|-------------|
 | `gen_ai.client.hook.event` | Canonical event name (PascalCase) |
-| `gen_ai.client.name` | Outer IDE or hook host (`cursor`, `copilot`, `claude`, `opencode`, etc.) |
+| `gen_ai.client.name` | Outer IDE or hook host (`codex`, `cursor`, `copilot`, `claude`, `opencode`, etc.) |
 | `gen_ai.client.agent_engine` | Inner agent engine when it differs from the outer IDE (for example Cursor running Claude Code) |
 | `gen_ai.client.session_id` | Session identifier |
 | `gen_ai.client.generation_id` | Generation identifier (Cursor) |
@@ -737,9 +772,10 @@ The hook auto-detects which IDE is calling it:
 |--------|-----|
 | Parent process tree (`ps` parent-chain walk) | Preferred detection for supported IDEs such as Cursor, Copilot / VS Code, Claude Code, and OpenCode |
 | `IDE_OTEL_IDE_NAME` env var | Explicit override for generic hook runners or manual debugging |
-| Self-reported `ide_name`, `client`, or `source_app` values such as `GitHub Copilot`, `GitHub Copilot CLI`, `GitHub Copilot Chat`, `Claude Code`, `Claude Code CLI`, `Anthropic Claude Code`, `Cursor IDE`, `Cursor CLI`, `Anti Gravity`, `Anti Gravity CLI`, or `OpenCode` / `OpenCode CLI` (case-insensitive, hyphen/space-insensitive) | Normalized to the canonical `gen_ai.client.name` |
+| Self-reported `ide_name`, `client`, or `source_app` values such as `OpenAI Codex`, `Codex CLI`, `GitHub Copilot`, `GitHub Copilot CLI`, `GitHub Copilot Chat`, `Claude Code`, `Claude Code CLI`, `Anthropic Claude Code`, `Cursor IDE`, `Cursor CLI`, `Anti Gravity`, `Anti Gravity CLI`, or `OpenCode` / `OpenCode CLI` (case-insensitive, hyphen/space-insensitive) | Normalized to the canonical `gen_ai.client.name` |
 | `conversation_id` or `generation_id` in input | Cursor |
 | `transcript_path`, `permission_mode`, or `notification_type` | Claude Code |
+| `turn_id`, `tool_response`, or `last_assistant_message` | Codex |
 | `session_id` only (no Cursor-specific fields) | GitHub Copilot |
 
 Detection order is: (1) parent process tree, (2) explicit `IDE_OTEL_IDE_NAME`, (3) self-reported payload fields, then (4) heuristics. `setup.sh` now relies on process discovery for generated Cursor, Copilot, and Claude configs, while the env var remains available as an escape hatch for generic runners and debugging.

@@ -147,6 +147,12 @@ def _gemini_settings_doc(tmp_root: str) -> dict:
         return json.load(f)
 
 
+def _codex_hooks_doc(tmp_root: str) -> dict:
+    hooks_json = os.path.join(tmp_root, ".codex", "hooks.json")
+    with open(hooks_json) as f:
+        return json.load(f)
+
+
 def _copilot_hooks_doc(tmp_root: str) -> dict:
     hooks_json = os.path.join(tmp_root, ".github", "hooks", "otel-hooks.json")
     with open(hooks_json) as f:
@@ -726,6 +732,39 @@ class TestGeminiSetup:
                         f"OTel hook was not removed for event {event!r}: {cmd!r}"
                     )
 
+    def test_codex_global_creates_hooks_and_config(self, tmp_path):
+        """setup.sh --codex --global must create ~/.codex/hooks.json and enable codex_hooks."""
+        hook_dir = _make_hook_dir(str(tmp_path))
+        env = self._minimal_env(tmp_path)
+
+        result = _run_setup(hook_dir, args=["--codex", "--global"], env=env)
+        assert result.returncode == 0, result.stderr
+
+        hooks_path = tmp_path / ".codex" / "hooks.json"
+        config_path = tmp_path / ".codex" / "config.toml"
+        assert hooks_path.exists()
+        assert config_path.exists()
+        assert "codex_hooks = true" in config_path.read_text()
+
+        doc = _codex_hooks_doc(str(tmp_path))
+        assert "PermissionRequest" in doc["hooks"]
+        assert doc["hooks"]["SessionStart"][0]["matcher"] == "startup|resume|clear"
+        assert doc["hooks"]["PreToolUse"][0]["matcher"] == "*"
+        assert "matcher" not in doc["hooks"]["UserPromptSubmit"][0]
+
+    def test_codex_uninstall_removes_all_otel_hooks(self, tmp_path):
+        """--uninstall --codex must remove all OTel hook entries."""
+        hook_dir = _make_hook_dir(str(tmp_path))
+        env = self._minimal_env(tmp_path)
+
+        result = _run_setup(hook_dir, args=["--codex", "--global"], env=env)
+        assert result.returncode == 0, result.stderr
+
+        result = _run_setup(hook_dir, args=["--uninstall", "--codex", "--global"], env=env)
+        assert result.returncode == 0, result.stderr
+        doc = _codex_hooks_doc(str(tmp_path))
+        assert doc.get("hooks", {}) == {}
+
     def test_diagnose_auto_detects_gemini_when_dir_exists(self, tmp_path):
         """--diagnose without an IDE flag must auto-detect gemini when ~/.gemini exists."""
         hook_dir = _make_hook_dir(str(tmp_path))
@@ -859,4 +898,3 @@ class TestOperationalFlags:
             for h in entries:
                 cmd = h.get("command", "")
                 assert "otel_hook" not in cmd and "otel-hook" not in cmd
-

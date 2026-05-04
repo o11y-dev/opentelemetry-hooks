@@ -1,15 +1,15 @@
 [build-system]
-requires = ["setuptools>=64"]
+requires = ["setuptools>=64", "setuptools-scm>=8"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "opentelemetry-hooks"
-version = "0.13.0"
-description = "OpenTelemetry integration for AI coding agents (Cursor IDE/CLI, GitHub Copilot, Claude Code, Gemini CLI, Antigravity, OpenCode-compatible runners)"
+dynamic = ["version"]
+description = "OpenTelemetry integration for AI coding agents (Codex, Cursor IDE/CLI, GitHub Copilot, Claude Code, Gemini CLI, Antigravity, OpenCode-compatible runners)"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.12"
-keywords = ["opentelemetry", "observability", "ai-agents", "claude", "copilot", "cursor", "gemini", "telemetry", "hooks", "tracing"]
+keywords = ["opentelemetry", "observability", "ai-agents", "codex", "claude", "copilot", "cursor", "gemini", "telemetry", "hooks", "tracing"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Console",
@@ -47,6 +47,7 @@ py-modules = ["otel_hook", "enrichment_connectors"]
 "share/opentelemetry-hooks/examples" = [
     "examples/antigravity-workflow.example.md",
     "examples/claude-hooks.example.json",
+    "examples/codex-hooks.example.json",
     "examples/copilot-hooks.example.json",
     "examples/cursor-hooks.example.json",
     "examples/hooks.example.json",
@@ -61,8 +62,11 @@ target-version = "py312"
 select = ["E", "F", "W"]
 ignore = ["E501"]
 
+[tool.setuptools_scm]
+fallback_version = "0.13.0"
+
 [tool.semantic_release]
-version_toml = ["pyproject.toml:project.version"]
+version_toml = []
 version_variables = []
 major_on_zero = false
 allow_zero_version = true
