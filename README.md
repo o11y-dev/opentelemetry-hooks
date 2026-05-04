@@ -25,7 +25,7 @@ IDE Event → stdin (JSON) → otel-hook → OpenTelemetry SDK → OTLP Backend
 
 ## Features
 
-- **Multi-IDE Support**: One script, multiple hook providers — `setup.sh` now creates native hook configs for Cursor, GitHub Copilot, and Claude Code without extra IDE override env vars, while the bundled examples cover Copilot/Claude/Cursor for manual installs. The runtime prefers parent-process discovery first, then explicit overrides, then self-reported payload fields, and finally heuristics when needed.
+- **Multi-agent support**: One hook command, multiple agent integrations. The CLI and `setup.sh` can register Cursor, Claude Code, Gemini CLI, GitHub Copilot, and OpenCode. Antigravity and compatible hook runners can call the same hook command directly. Runtime detection prefers parent-process discovery first, then explicit overrides, then self-reported payload fields, and finally heuristics when needed.
 
 - **Session-level Traces**: Groups all events within a session into a single trace with a 3-tier hierarchy:
 
@@ -55,6 +55,19 @@ gen_ai.client.session (root)
 - **Privacy Controls**: Built-in masking of emails, tokens, and usernames. Text capture is opt-in.
 
 - **JSON Config File**: All settings in `otel_config.json` — no environment variable exports needed.
+
+## Supported Agents
+
+| Agent | Setup Command | Scope | Config Written |
+|---|---|---|---|
+| Cursor IDE / CLI | `otel-hook setup --agent cursor` | Global by default; use `--no-global` for project scope | `~/.cursor/hooks.json` or `.cursor/hooks.json` |
+| Claude Code | `otel-hook setup --agent claude` | Global by default; use `--no-global` for project scope | `~/.claude/settings.json` or `.claude/settings.json` |
+| Gemini CLI | `otel-hook setup --agent gemini` | Global by default; use `--no-global` for project scope | `~/.gemini/settings.json` or `.gemini/settings.json` |
+| GitHub Copilot coding agent | `otel-hook setup --agent copilot --no-global` | Repository only | `.github/hooks/otel-hooks.json` |
+| OpenCode | `otel-hook setup --agent opencode` | Global by default; use `--no-global` for project scope | `~/.config/opencode/plugins/otel-hook.ts` or `.opencode/plugins/otel-hook.ts` |
+| Antigravity / compatible runners | Manual hook command | Runner-defined | Runner workflow/config |
+
+Run `otel-hook diagnose` to see what is currently registered, and `otel-hook uninstall --agent <agent>` to remove this hook from an agent config.
 
 ## Supported Events
 
@@ -94,7 +107,7 @@ pip install opentelemetry-hooks
 To pin a specific version or install directly from a tag:
 
 ```bash
-pipx install git+https://github.com/o11y-dev/opentelemetry-hooks.git@v0.12.0
+pipx install git+https://github.com/o11y-dev/opentelemetry-hooks.git@v0.13.0
 ```
 
 Or install from a pre-built wheel from the [Releases](https://github.com/o11y-dev/opentelemetry-hooks/releases) page:
@@ -120,6 +133,7 @@ otel-hook setup --agent claude
 otel-hook setup --agent cursor
 otel-hook setup --agent copilot --no-global   # project-scoped (run from repo root)
 otel-hook setup --agent gemini
+otel-hook setup --agent opencode
 
 # Project-scoped instead of global
 otel-hook setup --agent cursor --no-global
@@ -142,30 +156,34 @@ vim ~/.local/share/opentelemetry-hooks/otel_config.json
 The setup functions are importable for programmatic use:
 
 ```python
-from otel_hook import setup_agent, setup_claude, setup_cursor
+from otel_hook import setup_agent, setup_claude, setup_cursor, setup_gemini
 
 setup_claude(global_=True)   # ~/.claude/settings.json
 setup_cursor(global_=True)   # ~/.cursor/hooks.json
 setup_agent("gemini", global_=True)
 ```
 
-### Source Checkout / Cursor Project Setup
+### Source Checkout Setup
 
 If you're working from a source checkout rather than a pip install, use the
 bundled `setup.sh`:
 
 ```bash
-# Project-level — hooks.json in the current repo (.cursor/hooks.json)
-bash .cursor/hooks/opentelemetry-hook/setup.sh
+# Auto-detect installed/supported agents and configure them
+bash setup.sh
 
-# Global — applies to every Cursor project (~/.cursor/hooks.json)
-bash .cursor/hooks/opentelemetry-hook/setup.sh --cursor --global
+# Configure one agent
+bash setup.sh --cursor --global
+bash setup.sh --claude --global
+bash setup.sh --gemini --global
+bash setup.sh --copilot       # repository-scoped
+bash setup.sh --opencode --global
 ```
 
-Then edit your endpoint config and restart Cursor:
+Then edit your endpoint config and restart the configured agent:
 
 ```bash
-vim .cursor/hooks/opentelemetry-hook/otel_config.json
+vim otel_config.json
 ```
 
 ### Clone Into an Existing Project
@@ -202,7 +220,7 @@ Cursor CLI uses the same `.cursor/hooks.json` configuration and hook payload sha
 
 ```bash
 # Repo-scoped hooks file (.github/hooks/otel-hooks.json)
-bash .cursor/hooks/opentelemetry-hook/setup.sh --copilot
+bash setup.sh --copilot
 ```
 
 `setup.sh --copilot` creates or merges `.github/hooks/otel-hooks.json` and points each event directly at `otel-hook` (or the local `otel_hook.py` fallback). Copilot is then detected from the process tree first, with `session_id`-based heuristics as a fallback.
@@ -213,7 +231,7 @@ If you prefer a manual install, copy the bundled example instead:
 
 ```bash
 mkdir -p .github/hooks
-cp .cursor/hooks/opentelemetry-hook/examples/copilot-hooks.example.json .github/hooks/otel-hooks.json
+cp examples/copilot-hooks.example.json .github/hooks/otel-hooks.json
 ```
 
 Then replace `{{SCRIPT_PATH}}` with the hook command. For a copied-source checkout the default is `python3 .cursor/hooks/opentelemetry-hook/otel_hook.py`; use `otel-hook` only when the package is installed via pipx or pip.
@@ -223,7 +241,7 @@ See [GitHub Copilot hooks docs](https://docs.github.com/en/copilot/concepts/agen
 
 ```bash
 mkdir -p .claude
-cp .cursor/hooks/opentelemetry-hook/examples/claude-hooks.example.json .claude/settings.json
+cp examples/claude-hooks.example.json .claude/settings.json
 ```
 
 Replace `{{SCRIPT_PATH}}` with the hook command, for example:
@@ -237,6 +255,24 @@ otel-hook
 
 The bundled Claude example and `setup.sh --claude` both invoke `otel-hook` directly without an IDE override env var.
 Claude Code is auto-detected from the parent process tree first; hook metadata such as `session_id`, `transcript_path`, `permission_mode`, and `notification_type` is used as a fallback. The camelCase alias handling is mainly for compatible third-party hook runners and mixed payload formats.
+
+#### Gemini CLI
+
+```bash
+# Global Gemini settings (~/.gemini/settings.json)
+otel-hook setup --agent gemini
+
+# Project-scoped Gemini settings (.gemini/settings.json)
+otel-hook setup --agent gemini --no-global
+```
+
+For a source checkout, use:
+
+```bash
+bash setup.sh --gemini --global
+```
+
+Gemini CLI emits model, tool, and agent lifecycle events. The hook maps `BeforeModel` / `AfterModel` to prompt and stop spans, `BeforeTool` / `AfterTool` to tool spans, and `BeforeAgent` / `AfterAgent` to subagent spans.
 
 #### Antigravity
 
@@ -302,7 +338,7 @@ To make this hook automatically available to the GitHub Copilot coding agent acr
 
 ### Configuration
 
-Edit `.cursor/hooks/opentelemetry-hook/otel_config.json`:
+Edit the hook config file. For pip/pipx installs this lives at `~/.local/share/opentelemetry-hooks/otel_config.json` unless `IDE_OTEL_HOOK_HOME` is set. For a source checkout or copied-source install, edit the local `otel_config.json` next to `otel_hook.py`.
 
 ```json
 {
@@ -313,7 +349,7 @@ Edit `.cursor/hooks/opentelemetry-hook/otel_config.json`:
 }
 ```
 
-Then restart your IDE.
+Then restart your agent or IDE.
 
 ## Configuration Reference
 
@@ -333,7 +369,7 @@ Then restart your IDE.
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `IDE_OTEL_BATCH_ON_STOP` | Enable session-level batching (recommended) | `false` |
-| `IDE_OTEL_IDE_NAME` | Force the detected IDE name (`cursor`, `copilot`, `claude`, `antigravity`, `opencode`) for generic hook runners; common labels like `GitHub Copilot`, `Claude Code`, `Cursor IDE` / `Cursor CLI`, `Anti Gravity`, `OpenCode`, and their `... CLI` / `... IDE` variants normalize automatically | auto-detect |
+| `IDE_OTEL_IDE_NAME` | Force the detected IDE name (`cursor`, `copilot`, `claude`, `gemini`, `antigravity`, `opencode`) for generic hook runners; common labels like `GitHub Copilot`, `Claude Code`, `Cursor IDE` / `Cursor CLI`, `Gemini CLI`, `Anti Gravity`, `OpenCode`, and their `... CLI` / `... IDE` variants normalize automatically | auto-detect |
 | `IDE_OTEL_LOCAL_SPANS` | Save hook spans locally as JSONL files for agent analysis (`.state/local_spans/*.jsonl`) | unset |
 | `IDE_OTEL_CAPTURE_TEXT` | Include prompt/response text in spans | `false` |
 | `IDE_OTEL_MASK_PROMPTS` | Redact emails, tokens, usernames from text | `false` |
@@ -727,6 +763,7 @@ The detected outer IDE is recorded on spans as `gen_ai.client.name` and is also 
         │   ├── cursor-hooks.example.json       # Minimal Cursor hooks template
         │   ├── copilot-hooks.example.json      # GitHub Copilot hooks template
         │   ├── claude-hooks.example.json       # Claude Code hooks template
+        │   ├── opencode-plugin.example.ts      # OpenCode plugin template
         │   └── antigravity-workflow.example.md # Antigravity workflow template
         ├── .gitignore                          # Excludes secrets, venv, state
         ├── .venv/                              # Python venv (auto-provisioned)
@@ -762,7 +799,11 @@ Set `IDE_OTEL_CAPTURE_TEXT=true` to include prompt/response text. Combine with `
 ### Check the log
 
 ```bash
-tail -f .cursor/hooks/opentelemetry-hook/otel_hook.log
+# pip/pipx install
+tail -f ~/.local/share/opentelemetry-hooks/otel_hook.log
+
+# source checkout / copied-source install
+tail -f ./otel_hook.log
 ```
 
 ### Enable debug output
