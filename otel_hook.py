@@ -262,6 +262,11 @@ _MDM_REGISTRY_PATH = r"SOFTWARE\Policies\OpenTelemetryHook"  # Windows registry 
 _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 _TOKEN_RE = re.compile(r"\b[A-Za-z0-9_\-]{24,}\b")
 _HOME_RE = re.compile(r"/Users/[^/\s]+")
+_TRACEPARENT_RE = re.compile(
+    r"^(?P<version>[0-9a-f]{2})-(?P<trace_id>[0-9a-f]{32})-(?P<span_id>[0-9a-f]{16})-(?P<trace_flags>[0-9a-f]{2})$"
+)
+_TRACE_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+_SPAN_ID_RE = re.compile(r"^[0-9a-f]{16}$")
 
 
 # ---------------------------------------------------------------------------
@@ -392,6 +397,11 @@ _INPUT_ALIASES = {
     "appVersion": "app_version",
     "ideName": "ide_name",
     "sourceApp": "source_app",
+    "traceId": "trace_id",
+    "spanId": "span_id",
+    "parentSpanId": "parent_span_id",
+    "traceFlags": "trace_flags",
+    "traceState": "tracestate",
 }
 
 # Canonical gen_ai.client.name values accepted directly from IDE_OTEL_IDE_NAME or
@@ -519,6 +529,14 @@ def _first_present(data: dict, keys: tuple):
     for key in keys:
         if key in data and data[key] is not None:
             return data[key]
+    return None
+
+
+def _first_env(keys: tuple[str, ...]) -> Optional[str]:
+    for key in keys:
+        value = os.getenv(key)
+        if value:
+            return value
     return None
 
 
@@ -663,7 +681,15 @@ def _detect_client_version(data: dict, ide: str) -> Optional[str]:
 
 def _detect_agent_engine(data: dict) -> Optional[str]:
     """Detect an inner agent engine without consulting IDE_OTEL_IDE_NAME."""
-    explicit = _normalize_ide_name(_first_present(data, ("agent_engine", "agentEngine", "engine", "engine_name")))
+    explicit = _normalize_ide_name(_first_present(
+        data,
+        (
+            "agent_engine",
+            "agentEngine",
+            "engine",
+            "engine_name",
+        ),
+    ))
     if explicit:
         return explicit
 
@@ -680,6 +706,19 @@ def _detect_agent_engine(data: dict) -> Optional[str]:
     if reported:
         return reported
 
+    semantic_signals = [
+        _normalize_ide_name(_first_present(data, ("gen_ai.client.name",))),
+        _normalize_ide_name(_first_present(data, ("gen_ai.system",))),
+        _normalize_ide_name(_first_present(data, ("service.name", "service_name"))),
+    ]
+    semantic_counts: dict[str, int] = {}
+    for signal in semantic_signals:
+        if signal:
+            semantic_counts[signal] = semantic_counts.get(signal, 0) + 1
+    corroborated = [name for name, count in semantic_counts.items() if count >= 2]
+    if len(corroborated) == 1:
+        return corroborated[0]
+
     raw_event = _first_present(data, ("hook_event_name", "hook_event_type", "event"))
     if isinstance(raw_event, str) and raw_event and raw_event[0].isupper():
         return "claude"
@@ -687,17 +726,40 @@ def _detect_agent_engine(data: dict) -> Optional[str]:
     return None
 
 
+def _resolved_agent_engine(data: Optional[dict] = None, session_ctx: Optional[dict] = None) -> Optional[str]:
+    resolved = _detect_agent_engine(data or {})
+    if resolved:
+        return resolved
+    if session_ctx:
+        return _normalize_ide_name(session_ctx.get("agent_engine"))
+    return None
+
+
+def _resolve_client_name(
+    ide: str,
+    data: Optional[dict] = None,
+    agent_engine: Optional[str] = None,
+    session_ctx: Optional[dict] = None,
+) -> str:
+    resolved_engine = agent_engine if agent_engine is not None else _resolved_agent_engine(data, session_ctx)
+    if resolved_engine and resolved_engine != ide:
+        return resolved_engine
+    return ide
+
+
 def _set_client_identity_attributes(
-    span, ide: str, data: Optional[dict] = None, agent_engine: Optional[str] = None,
+    span, ide: str, data: Optional[dict] = None, agent_engine: Optional[str] = None, session_ctx: Optional[dict] = None,
 ) -> Optional[str]:
-    """Attach outer IDE identity and, when distinct, the inner agent engine.
+    """Attach canonical client identity and preserve wrapper identity when nested.
 
     Returns the resolved inner engine when one is detected and differs from the
     outer IDE; otherwise returns ``None``.
     """
-    span.set_attribute("gen_ai.client.name", ide)
-    resolved_engine = agent_engine if agent_engine is not None else _detect_agent_engine(data or {})
+    resolved_engine = agent_engine if agent_engine is not None else _resolved_agent_engine(data, session_ctx)
+    client_name = _resolve_client_name(ide, data=data, agent_engine=resolved_engine, session_ctx=session_ctx)
+    span.set_attribute("gen_ai.client.name", client_name)
     if resolved_engine and resolved_engine != ide:
+        span.set_attribute("gen_ai.client.wrapper", ide)
         span.set_attribute("gen_ai.client.agent_engine", resolved_engine)
         return resolved_engine
     return None
@@ -1465,7 +1527,7 @@ def _force_flush_provider(timeout_millis: int = 500) -> None:
         _LOGGER.warning("log force_flush failed: %s", exc)
 
 
-def _init_tracing(ide: str = "cursor") -> bool:
+def _init_tracing(ide: str = "cursor", client_name: Optional[str] = None) -> bool:
     global _TRACING_INITIALIZED
     if _TRACING_INITIALIZED:
         return True
@@ -1478,9 +1540,13 @@ def _init_tracing(ide: str = "cursor") -> bool:
         os.environ["OTEL_SERVICE_NAME"] = service_name
 
     app_name = os.getenv("IDE_OTEL_APP_NAME") or os.getenv("OTEL_SERVICE_NAME") or "ide-agent"
+    resolved_client_name = client_name or ide
     resource_attrs = _parse_resource_attributes(os.getenv("OTEL_RESOURCE_ATTRIBUTES", ""))
     resource_attrs.setdefault("service.name", app_name)
-    resource_attrs.setdefault("gen_ai.system", ide)
+    resource_attrs.setdefault("gen_ai.client.name", resolved_client_name)
+    resource_attrs.setdefault("gen_ai.system", resolved_client_name)
+    if ide != resolved_client_name:
+        resource_attrs.setdefault("gen_ai.client.wrapper", ide)
 
     # OS / host resource attributes (OTel semantic conventions)
     os_info = _get_os_info()
@@ -1947,16 +2013,25 @@ def _session_path(session_key: str) -> str:
 
 
 def _create_session_context(session_key: str, data: dict, ide: str) -> dict:
-    """Create and persist a new session context with pre-generated trace IDs."""
+    """Create and persist a new session context with upstream or synthetic trace IDs."""
     os.makedirs(_SESSION_DIR, exist_ok=True)
+    upstream_ctx = _resolve_upstream_trace_context(data)
     ctx = {
-        "trace_id": f"{random.getrandbits(128):032x}",
         "phantom_parent_id": f"{random.getrandbits(64):016x}",
+        "trace_id": f"{random.getrandbits(128):032x}",
         "start_time_ns": time.time_ns(),
         "ide": ide,
         "generation_count": 0,
         "created_at": datetime.now(timezone.utc).isoformat(),
+        "context_origin": "synthetic",
     }
+    if upstream_ctx is not None:
+        ctx["trace_id"] = upstream_ctx["trace_id"]
+        ctx["upstream_parent_span_id"] = upstream_ctx["parent_span_id"]
+        ctx["trace_flags"] = upstream_ctx.get("trace_flags", "01")
+        if upstream_ctx.get("tracestate"):
+            ctx["tracestate"] = upstream_ctx["tracestate"]
+        ctx["context_origin"] = "upstream"
     if model := _first_present(data, ("request_model", "model", "model_name")):
         ctx["last_known_model"] = model
 
@@ -1987,6 +2062,24 @@ def _write_session_context(session_key: str, ctx: dict) -> None:
     lock_path = os.path.join(_LOCK_DIR, f"{re.sub(r'[^A-Za-z0-9_.-]+', '_', session_key)}.lock")
     with _acquire_lock(lock_path):
         _atomic_write_json(_session_path(session_key), ctx)
+
+
+def _maybe_bind_session_to_upstream_context(session_key: Optional[str], session_ctx: Optional[dict], data: dict) -> Optional[dict]:
+    if not session_key or not session_ctx or session_ctx.get("context_origin") == "upstream":
+        return session_ctx
+    upstream_ctx = _resolve_upstream_trace_context(data)
+    if upstream_ctx is None:
+        return session_ctx
+    session_ctx["trace_id"] = upstream_ctx["trace_id"]
+    session_ctx["upstream_parent_span_id"] = upstream_ctx["parent_span_id"]
+    session_ctx["trace_flags"] = upstream_ctx.get("trace_flags", "01")
+    if upstream_ctx.get("tracestate"):
+        session_ctx["tracestate"] = upstream_ctx["tracestate"]
+    else:
+        session_ctx.pop("tracestate", None)
+    session_ctx["context_origin"] = "upstream"
+    _write_session_context(session_key, session_ctx)
+    return session_ctx
 
 
 def _clear_session_context(session_key: Optional[str]) -> None:
@@ -2137,7 +2230,74 @@ def _clear_batch_events(key: str) -> None:
 # ---------------------------------------------------------------------------
 # Trace context helpers
 # ---------------------------------------------------------------------------
-def _make_trace_context(trace_id_hex: str, span_id_hex: str):
+def _parse_traceparent(value: Optional[str]) -> Optional[dict]:
+    if not isinstance(value, str):
+        return None
+    match = _TRACEPARENT_RE.match(value.strip().lower())
+    if match is None or match.group("version") == "ff":
+        return None
+    trace_id = match.group("trace_id")
+    span_id = match.group("span_id")
+    if trace_id == "0" * 32 or span_id == "0" * 16:
+        return None
+    return {
+        "trace_id": trace_id,
+        "parent_span_id": span_id,
+        "trace_flags": match.group("trace_flags"),
+    }
+
+
+def _resolve_upstream_trace_context(data: Optional[dict]) -> Optional[dict]:
+    data = data or {}
+    tracestate = _first_present(data, ("tracestate",)) or _first_env(
+        ("IDE_OTEL_TRACESTATE", "TRACESTATE", "OTEL_TRACESTATE")
+    )
+    traceparent = _first_present(data, ("traceparent",)) or _first_env(
+        ("IDE_OTEL_TRACEPARENT", "TRACEPARENT", "OTEL_TRACEPARENT")
+    )
+    parsed = _parse_traceparent(traceparent)
+    if parsed is not None:
+        if isinstance(tracestate, str) and tracestate.strip():
+            parsed["tracestate"] = tracestate.strip()
+        return parsed
+
+    trace_id = _lower_or_none(_first_present(data, ("trace_id",)) or _first_env(
+        ("IDE_OTEL_TRACE_ID", "TRACE_ID", "OTEL_TRACE_ID")
+    ))
+    span_id = _lower_or_none(_first_present(data, ("span_id",)) or _first_env(
+        ("IDE_OTEL_SPAN_ID", "SPAN_ID", "OTEL_SPAN_ID")
+    ))
+    parent_span_id = _lower_or_none(_first_present(data, ("parent_span_id",)) or _first_env(
+        ("IDE_OTEL_PARENT_SPAN_ID", "PARENT_SPAN_ID", "OTEL_PARENT_SPAN_ID")
+    ))
+    trace_flags = _lower_or_none(_first_present(data, ("trace_flags",)) or _first_env(
+        ("IDE_OTEL_TRACE_FLAGS", "TRACE_FLAGS", "OTEL_TRACE_FLAGS")
+    )) or "01"
+    effective_parent_span_id = span_id or parent_span_id
+    if trace_id is None or effective_parent_span_id is None:
+        return None
+    if not _TRACE_ID_RE.match(trace_id) or trace_id == "0" * 32:
+        return None
+    if not _SPAN_ID_RE.match(effective_parent_span_id) or effective_parent_span_id == "0" * 16:
+        return None
+    if not re.fullmatch(r"[0-9a-f]{2}", trace_flags):
+        trace_flags = "01"
+    ctx = {
+        "trace_id": trace_id,
+        "parent_span_id": effective_parent_span_id,
+        "trace_flags": trace_flags,
+    }
+    if isinstance(tracestate, str) and tracestate.strip():
+        ctx["tracestate"] = tracestate.strip()
+    return ctx
+
+
+def _make_trace_context(
+    trace_id_hex: str,
+    span_id_hex: str,
+    trace_flags_hex: str = "01",
+    tracestate_header: Optional[str] = None,
+):
     """Create an OTel context from hex trace/span IDs for cross-process linking."""
     if SpanContext is None:
         return None
@@ -2148,11 +2308,47 @@ def _make_trace_context(trace_id_hex: str, span_id_hex: str):
         return None
     if not tid or not sid:
         return None
+    trace_flags = TraceFlags(TraceFlags.SAMPLED)
+    try:
+        trace_flags = TraceFlags(int(trace_flags_hex, 16) & 0xFF)
+    except (ValueError, TypeError):
+        pass
+    trace_state = TraceState()
+    if tracestate_header and hasattr(TraceState, "from_header"):
+        try:
+            parsed_state = TraceState.from_header([tracestate_header])
+            if parsed_state is not None:
+                trace_state = parsed_state
+        except Exception:
+            pass
     ctx = SpanContext(
         trace_id=tid, span_id=sid, is_remote=True,
-        trace_flags=TraceFlags(TraceFlags.SAMPLED), trace_state=TraceState(),
+        trace_flags=trace_flags, trace_state=trace_state,
     )
     return trace.set_span_in_context(NonRecordingSpan(ctx))
+
+
+def _session_trace_context(session_ctx: Optional[dict]):
+    if not session_ctx:
+        return None
+    return _make_trace_context(
+        session_ctx.get("trace_id", "0"),
+        session_ctx.get("upstream_parent_span_id") or session_ctx.get("phantom_parent_id", "0"),
+        session_ctx.get("trace_flags", "01"),
+        session_ctx.get("tracestate"),
+    )
+
+
+def _event_parent_trace_context(data: dict, session_ctx: Optional[dict]):
+    upstream_ctx = _resolve_upstream_trace_context(data)
+    if upstream_ctx is not None:
+        return _make_trace_context(
+            upstream_ctx["trace_id"],
+            upstream_ctx["parent_span_id"],
+            upstream_ctx.get("trace_flags", "01"),
+            upstream_ctx.get("tracestate"),
+        )
+    return _session_trace_context(session_ctx)
 
 
 # ---------------------------------------------------------------------------
@@ -2182,8 +2378,7 @@ def _apply_genai_semconv(span, event_name: str, data: dict, ide: str, session_ct
     provider = _infer_genai_provider(data)
     if provider is not None:
         span.set_attribute("gen_ai.provider.name", provider)
-    # Keep gen_ai.system aligned with the IDE identifier; provider identity is in gen_ai.provider.name.
-    span.set_attribute("gen_ai.system", ide)
+    span.set_attribute("gen_ai.system", _resolve_client_name(ide, data=data, session_ctx=session_ctx))
     span.set_attribute("gen_ai.operation.name", _genai_operation(event_name))
     _set_if_present(span, "gen_ai.conversation.id", data.get("conversation_id") or data.get("session_id"))
     _set_if_present(span, "gen_ai.agent.id", _first_present(data, ("agent_id",)))
@@ -2283,7 +2478,7 @@ def _apply_genai_semconv(span, event_name: str, data: dict, ide: str, session_ct
 def _populate_span(span, event_name: str, data: dict, ide: str, session_ctx: Optional[dict] = None, batch_model: Optional[str] = None) -> None:
     """Attach all attributes to a span and emit OTel log records."""
     span.set_attribute("gen_ai.client.hook.event", event_name)
-    _set_client_identity_attributes(span, ide, data=data)
+    _set_client_identity_attributes(span, ide, data=data, session_ctx=session_ctx)
 
     # Optionally attach OS / host attributes on every span.
     # These are already present as resource attributes via OTEL_RESOURCE_ATTRIBUTES,
@@ -2459,12 +2654,7 @@ def _flush_generation(tracer, gen_key: str, session_ctx: Optional[dict], ide: st
     last_ts = batch[-1].get("timestamp_ns") or time.time_ns()
 
     # Use session trace context if available, so this generation shares the trace_id
-    parent_ctx = None
-    if session_ctx:
-        parent_ctx = _make_trace_context(
-            session_ctx.get("trace_id", "0"),
-            session_ctx.get("phantom_parent_id", "0"),
-        )
+    parent_ctx = _session_trace_context(session_ctx)
 
     # Scan batch for model (Fix B)
     batch_model = next(
@@ -2520,10 +2710,7 @@ def _flush_session(tracer, session_key: str, session_ctx: dict, ide: str, flush:
     start_ns = session_ctx.get("start_time_ns") or time.time_ns()
     end_ns = time.time_ns()
 
-    parent_ctx = _make_trace_context(
-        session_ctx.get("trace_id", "0"),
-        session_ctx.get("phantom_parent_id", "0"),
-    )
+    parent_ctx = _session_trace_context(session_ctx)
 
     span_kind = SpanKind.INTERNAL if SpanKind is not None else None
     session_span = tracer.start_span(
@@ -2564,6 +2751,9 @@ def main() -> int:
     event_name = _normalize_event(raw_event)
     ide = _detect_ide(data)
     sk = _session_key(data)
+    session_ctx = _load_session_context(sk)
+    session_ctx = _maybe_bind_session_to_upstream_context(sk, session_ctx, data)
+    agent_engine = _resolved_agent_engine(data, session_ctx)
 
     if _safe_bool(os.getenv("IDE_OTEL_LOG_EVENTS", "")):
         _LOGGER.info(
@@ -2574,8 +2764,6 @@ def main() -> int:
     # Fast path for buffered batch events (no span emission yet):
     # avoid loading OpenTelemetry SDK for events that only append to batch files.
     if _batch_enabled():
-        session_ctx = _load_session_context(sk)
-
         if event_name in _SESSION_START_EVENTS:
             if sk:
                 _create_session_context(sk, data, ide)
@@ -2599,7 +2787,7 @@ def main() -> int:
                 print(_continue_response_json())
                 return 0
 
-    if not _init_tracing(ide):
+    if not _init_tracing(ide, client_name=_resolve_client_name(ide, data=data, agent_engine=agent_engine, session_ctx=session_ctx)):
         print(_continue_response_json())
         return 0
 
@@ -2610,8 +2798,6 @@ def main() -> int:
     _flush_stale_sessions(tracer)
 
     try:
-        session_ctx = _load_session_context(sk)
-        agent_engine = _detect_agent_engine(data)
         if sk and session_ctx and agent_engine and agent_engine != ide and session_ctx.get("agent_engine") != agent_engine:
             session_ctx["agent_engine"] = agent_engine
             _write_session_context(sk, session_ctx)
@@ -2676,12 +2862,7 @@ def main() -> int:
                 _append_batch_event(gen_key, event_name, data)
             else:
                 # No generation context — emit as standalone span
-                parent_ctx = None
-                if session_ctx:
-                    parent_ctx = _make_trace_context(
-                        session_ctx.get("trace_id", "0"),
-                        session_ctx.get("phantom_parent_id", "0"),
-                    )
+                parent_ctx = _event_parent_trace_context(data, session_ctx)
                 with tracer.start_as_current_span(
                     f"gen_ai.client.hook.{event_name}", kind=SpanKind.INTERNAL,
                     context=parent_ctx,
@@ -2692,20 +2873,12 @@ def main() -> int:
             return 0
 
         # ── Streaming mode: emit spans immediately ──
-        parent_ctx = None
-        if session_ctx:
-            parent_ctx = _make_trace_context(
-                session_ctx.get("trace_id", "0"),
-                session_ctx.get("phantom_parent_id", "0"),
-            )
+        parent_ctx = _event_parent_trace_context(data, session_ctx)
 
         # Create session context on SessionStart even in streaming mode
         if event_name in _SESSION_START_EVENTS and sk and not session_ctx:
             session_ctx = _create_session_context(sk, data, ide)
-            parent_ctx = _make_trace_context(
-                session_ctx["trace_id"],
-                session_ctx["phantom_parent_id"],
-            )
+            parent_ctx = _event_parent_trace_context(data, session_ctx)
 
         with tracer.start_as_current_span(
             f"gen_ai.client.hook.{event_name}", kind=SpanKind.INTERNAL,
