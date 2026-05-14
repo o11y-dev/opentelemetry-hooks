@@ -1041,6 +1041,21 @@ class TestUpstreamTraceContext:
             "tracestate": "vendor=value",
         }
 
+    def test_parses_future_version_traceparent_with_extra_fields(self):
+        ctx = otel_hook._resolve_upstream_trace_context({
+            "traceparent": f"01-{'1' * 32}-{'2' * 16}-00-extra-fields-allowed",
+        })
+        assert ctx == {
+            "trace_id": "1" * 32,
+            "parent_span_id": "2" * 16,
+            "trace_flags": "00",
+        }
+
+    def test_rejects_version_00_traceparent_with_extra_fields(self):
+        assert otel_hook._resolve_upstream_trace_context({
+            "traceparent": f"00-{'1' * 32}-{'2' * 16}-00-extra-fields-not-allowed",
+        }) is None
+
     def test_explicit_ids_prefer_current_span_id_as_parent(self):
         ctx = otel_hook._resolve_upstream_trace_context({
             "trace_id": "3" * 32,

@@ -262,9 +262,6 @@ _MDM_REGISTRY_PATH = r"SOFTWARE\Policies\OpenTelemetryHook"  # Windows registry 
 _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 _TOKEN_RE = re.compile(r"\b[A-Za-z0-9_\-]{24,}\b")
 _HOME_RE = re.compile(r"/Users/[^/\s]+")
-_TRACEPARENT_RE = re.compile(
-    r"^(?P<version>[0-9a-f]{2})-(?P<trace_id>[0-9a-f]{32})-(?P<span_id>[0-9a-f]{16})-(?P<trace_flags>[0-9a-f]{2})$"
-)
 _TRACE_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 _SPAN_ID_RE = re.compile(r"^[0-9a-f]{16}$")
 
@@ -2233,17 +2230,28 @@ def _clear_batch_events(key: str) -> None:
 def _parse_traceparent(value: Optional[str]) -> Optional[dict]:
     if not isinstance(value, str):
         return None
-    match = _TRACEPARENT_RE.match(value.strip().lower())
-    if match is None or match.group("version") == "ff":
+    parts = value.strip().lower().split("-")
+    if len(parts) < 4:
         return None
-    trace_id = match.group("trace_id")
-    span_id = match.group("span_id")
+    version, trace_id, span_id, trace_flags = parts[:4]
+    if version == "ff":
+        return None
+    if len(version) != 2 or len(trace_flags) != 2:
+        return None
+    if version == "00" and len(parts) != 4:
+        return None
+    if version != "00" and len(parts) > 4 and any(part == "" for part in parts[4:]):
+        return None
+    if not re.fullmatch(r"[0-9a-f]{2}", version) or not re.fullmatch(r"[0-9a-f]{2}", trace_flags):
+        return None
+    if not _TRACE_ID_RE.match(trace_id) or not _SPAN_ID_RE.match(span_id):
+        return None
     if trace_id == "0" * 32 or span_id == "0" * 16:
         return None
     return {
         "trace_id": trace_id,
         "parent_span_id": span_id,
-        "trace_flags": match.group("trace_flags"),
+        "trace_flags": trace_flags,
     }
 
 
