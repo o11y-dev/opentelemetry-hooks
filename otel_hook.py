@@ -262,6 +262,7 @@ _MDM_REGISTRY_PATH = r"SOFTWARE\Policies\OpenTelemetryHook"  # Windows registry 
 _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 _TOKEN_RE = re.compile(r"\b[A-Za-z0-9_\-]{24,}\b")
 _HOME_RE = re.compile(r"/Users/[^/\s]+")
+_HEX_DIGITS = frozenset("0123456789abcdef")
 _TRACE_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 _SPAN_ID_RE = re.compile(r"^[0-9a-f]{16}$")
 
@@ -2242,7 +2243,7 @@ def _parse_traceparent(value: Optional[str]) -> Optional[dict]:
         return None
     if version != "00" and len(parts) > 4 and any(part == "" for part in parts[4:]):
         return None
-    if not re.fullmatch(r"[0-9a-f]{2}", version) or not re.fullmatch(r"[0-9a-f]{2}", trace_flags):
+    if any(ch not in _HEX_DIGITS for ch in version) or any(ch not in _HEX_DIGITS for ch in trace_flags):
         return None
     if not _TRACE_ID_RE.match(trace_id) or not _SPAN_ID_RE.match(span_id):
         return None
