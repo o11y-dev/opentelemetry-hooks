@@ -134,8 +134,8 @@ otel-hook setup --agent claude
 otel-hook setup --agent cursor
 otel-hook setup --agent copilot --no-global   # project-scoped (run from repo root)
 otel-hook setup --agent gemini
-otel-hook setup --agent opencode
 otel-hook setup --agent codex
+otel-hook setup --agent opencode
 
 # Project-scoped instead of global
 otel-hook setup --agent cursor --no-global
@@ -159,11 +159,11 @@ vim ~/.local/share/opentelemetry-hooks/otel_config.json
 The setup functions are importable for programmatic use:
 
 ```python
-from otel_hook import setup_agent, setup_claude, setup_cursor, setup_gemini
+from otel_hook import setup_claude, setup_cursor, setup_gemini
 
 setup_claude(global_=True)   # ~/.claude/settings.json
 setup_cursor(global_=True)   # ~/.cursor/hooks.json
-setup_agent("gemini", global_=True)
+setup_gemini(global_=True)   # ~/.gemini/settings.json
 ```
 
 ### Source Checkout Setup
@@ -757,12 +757,14 @@ Example: `https://ingress.us1.coralogix.com:443/v1/traces` → `https://ingress.
 
 When `IDE_OTEL_BATCH_ON_STOP=true` (recommended):
 
-1. **SessionStart**: Pre-generates a `trace_id` shared by all spans in the session. Stored in `.state/sessions/`.
+1. **SessionStart**: If the hook receives upstream trace context (`traceparent` / `TRACEPARENT`, or explicit `trace_id` + `span_id` / `parent_span_id`), it adopts that real `trace_id` and parent span for the session. Otherwise it pre-generates a synthetic `trace_id`. State is stored in `.state/sessions/`.
 2. **Generation events**: Buffered to `.state/batches/<generation_id>.jsonl`.
 3. **Stop**: Flushes the generation's events as a `gen_ai.client.generation` span with child event spans. All share the session's `trace_id`. Exported immediately to avoid data loss.
 4. **SessionEnd**: Emits the root `gen_ai.client.session` span covering the full session duration. Cleans up state files.
 
 For IDEs without a `generation_id` (Copilot), the hook auto-derives generation boundaries from `UserPromptSubmit` → `Stop` cycles using an internal counter.
+
+When upstream context is present, hook spans keep the real `trace_id` and attach to the real upstream parent span. The hook still cannot force a specific emitted `span_id` for its own spans because the Python OpenTelemetry SDK assigns span IDs when spans are started.
 
 ## IDE Detection
 
@@ -780,7 +782,7 @@ The hook auto-detects which IDE is calling it:
 
 Detection order is: (1) parent process tree, (2) explicit `IDE_OTEL_IDE_NAME`, (3) self-reported payload fields, then (4) heuristics. `setup.sh` now relies on process discovery for generated Cursor, Copilot, and Claude configs, while the env var remains available as an escape hatch for generic runners and debugging.
 
-The detected outer IDE is recorded on spans as `gen_ai.client.name` and is also exported as the `gen_ai.system` resource attribute via `OTEL_RESOURCE_ATTRIBUTES` for backward compatibility. When nested signals indicate a different inner engine (for example Cursor hosting Claude Code), the hook additionally records `gen_ai.client.agent_engine`. When the hook can infer a provider from the payload, it also sets `gen_ai.provider.name` as the canonical provider attribute (v1.37+).
+The hook still detects the outer wrapper IDE/process, but the emitted canonical client identity now prefers a distinct inner engine when one is present (for example Gemini running under Claude Code). In that case, spans/resources use the inner engine for `gen_ai.client.name` and `gen_ai.system`, keep `gen_ai.client.agent_engine` for compatibility, and record the wrapper as `gen_ai.client.wrapper`. When the hook can infer a provider from the payload, it also sets `gen_ai.provider.name` as the canonical provider attribute (v1.37+).
 
 ## File Structure
 

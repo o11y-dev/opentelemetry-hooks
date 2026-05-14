@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=64", "setuptools-scm>=8"]
+requires = ["setuptools>=64"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "opentelemetry-hooks"
-dynamic = ["version"]
+version = "0.13.0"
 description = "OpenTelemetry integration for AI coding agents (Codex, Cursor IDE/CLI, GitHub Copilot, Claude Code, Gemini CLI, Antigravity, OpenCode-compatible runners)"
 readme = "README.md"
 license = {text = "MIT"}
@@ -62,11 +62,8 @@ target-version = "py312"
 select = ["E", "F", "W"]
 ignore = ["E501"]
 
-[tool.setuptools_scm]
-fallback_version = "0.13.0"
-
 [tool.semantic_release]
-version_toml = []
+version_toml = ["pyproject.toml:project.version"]
 version_variables = []
 major_on_zero = false
 allow_zero_version = true

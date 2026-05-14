@@ -156,6 +156,11 @@ class TestNormalizeInputData:
             "cacheReadInputTokens": 2,
             "agentName": "planner",
             "hookEventType": "PreToolUse",
+            "traceId": "a" * 32,
+            "spanId": "b" * 16,
+            "parentSpanId": "c" * 16,
+            "traceFlags": "01",
+            "traceState": "vendor=value",
         })
         assert data["session_id"] == "sess-1"
         assert data["request_model"] == "claude-3-7-sonnet"
@@ -170,6 +175,11 @@ class TestNormalizeInputData:
         assert data["cache_read_input_tokens"] == 2
         assert data["agent_name"] == "planner"
         assert data["hook_event_type"] == "PreToolUse"
+        assert data["trace_id"] == "a" * 32
+        assert data["span_id"] == "b" * 16
+        assert data["parent_span_id"] == "c" * 16
+        assert data["trace_flags"] == "01"
+        assert data["tracestate"] == "vendor=value"
 
     def test_returns_original_dict_when_no_aliases_are_needed(self):
         data = {"session_id": "sess-1"}
@@ -323,6 +333,18 @@ class TestDetectAgentEngine:
 
     def test_returns_none_without_engine_signal(self):
         assert otel_hook._detect_agent_engine({"session_id": "sess-1"}) is None
+
+    def test_detects_gemini_from_corroborated_semantic_fields(self):
+        assert otel_hook._detect_agent_engine({
+            "gen_ai.client.name": "gemini",
+            "service.name": "gemini-cli",
+        }) == "gemini"
+
+    def test_ignores_single_semantic_field_without_corroboration(self):
+        assert otel_hook._detect_agent_engine({
+            "gen_ai.system": "vscode",
+            "session_id": "sess-1",
+        }) is None
 
 
 # ── OpenCode plugin payload handling ──────────────────────────────────────
@@ -758,6 +780,34 @@ class TestGenAISemconv:
         assert attrs["gen_ai.provider.name"] == "openai"
         assert attrs["gen_ai.system"] == "cursor"
 
+    def test_nested_agent_engine_becomes_genai_system(self):
+        span = mock.MagicMock()
+
+        otel_hook._apply_genai_semconv(
+            span,
+            "SubagentStop",
+            {"gen_ai.client.name": "gemini", "service.name": "gemini-cli"},
+            "claude",
+            session_ctx={"agent_engine": "gemini"},
+        )
+
+        attrs = self._attrs(span)
+        assert attrs["gen_ai.system"] == "gemini"
+
+    def test_single_semantic_field_does_not_change_genai_system(self):
+        span = mock.MagicMock()
+
+        otel_hook._apply_genai_semconv(
+            span,
+            "UserPromptSubmit",
+            {"gen_ai.system": "vscode"},
+            "cursor",
+            session_ctx={},
+        )
+
+        attrs = self._attrs(span)
+        assert attrs["gen_ai.system"] == "cursor"
+
 
 class TestClientIdentityAttributes:
     @staticmethod
@@ -774,7 +824,8 @@ class TestClientIdentityAttributes:
         otel_hook._set_client_identity_attributes(span, "cursor", data={"session_id": "sess-1"})
 
         attrs = self._attrs(span)
-        assert attrs["gen_ai.client.name"] == "cursor"
+        assert attrs["gen_ai.client.name"] == "claude"
+        assert attrs["gen_ai.client.wrapper"] == "cursor"
         assert attrs["gen_ai.client.agent_engine"] == "claude"
 
     def test_omits_agent_engine_when_same_as_outer_ide(self):
@@ -784,6 +835,30 @@ class TestClientIdentityAttributes:
 
         attrs = self._attrs(span)
         assert attrs["gen_ai.client.name"] == "claude"
+        assert "gen_ai.client.agent_engine" not in attrs
+
+    def test_promotes_gemini_over_outer_claude(self):
+        span = mock.MagicMock()
+
+        otel_hook._set_client_identity_attributes(
+            span,
+            "claude",
+            data={"gen_ai.client.name": "gemini", "service.name": "gemini-cli"},
+        )
+
+        attrs = self._attrs(span)
+        assert attrs["gen_ai.client.name"] == "gemini"
+        assert attrs["gen_ai.client.wrapper"] == "claude"
+        assert attrs["gen_ai.client.agent_engine"] == "gemini"
+
+    def test_preserves_outer_agent_when_single_semantic_field_disagrees(self):
+        span = mock.MagicMock()
+
+        otel_hook._set_client_identity_attributes(span, "cursor", data={"gen_ai.system": "vscode"})
+
+        attrs = self._attrs(span)
+        assert attrs["gen_ai.client.name"] == "cursor"
+        assert "gen_ai.client.wrapper" not in attrs
         assert "gen_ai.client.agent_engine" not in attrs
 
 
@@ -920,6 +995,133 @@ class TestSessionContext:
     def test_load_missing_returns_none(self):
         assert otel_hook._load_session_context(None) is None
         assert otel_hook._load_session_context("nonexistent-session") is None
+
+    def test_create_uses_upstream_trace_context_when_present(self, tmp_path):
+        with mock.patch.object(otel_hook, "_SESSION_DIR", str(tmp_path)):
+            with mock.patch.object(otel_hook, "_LOCK_DIR", str(tmp_path / "locks")):
+                ctx = otel_hook._create_session_context(
+                    "sess-upstream",
+                    {"traceparent": f"00-{'a' * 32}-{'b' * 16}-00", "tracestate": "vendor=value"},
+                    "cursor",
+                )
+                assert ctx["trace_id"] == "a" * 32
+                assert ctx["upstream_parent_span_id"] == "b" * 16
+                assert ctx["trace_flags"] == "00"
+                assert ctx["tracestate"] == "vendor=value"
+                assert ctx["context_origin"] == "upstream"
+
+    def test_binds_existing_synthetic_session_to_first_upstream_context(self, tmp_path):
+        with mock.patch.object(otel_hook, "_SESSION_DIR", str(tmp_path)):
+            with mock.patch.object(otel_hook, "_LOCK_DIR", str(tmp_path / "locks")):
+                ctx = otel_hook._create_session_context("sess-bind", {}, "cursor")
+                assert ctx["context_origin"] == "synthetic"
+                updated = otel_hook._maybe_bind_session_to_upstream_context(
+                    "sess-bind",
+                    ctx,
+                    {"trace_id": "d" * 32, "span_id": "e" * 16},
+                )
+                assert updated["trace_id"] == "d" * 32
+                assert updated["upstream_parent_span_id"] == "e" * 16
+                assert updated["context_origin"] == "upstream"
+                loaded = otel_hook._load_session_context("sess-bind")
+                assert loaded["trace_id"] == "d" * 32
+                assert loaded["upstream_parent_span_id"] == "e" * 16
+
+
+class TestUpstreamTraceContext:
+    def test_parses_traceparent_payload(self):
+        ctx = otel_hook._resolve_upstream_trace_context({
+            "traceparent": f"00-{'1' * 32}-{'2' * 16}-00",
+            "tracestate": "vendor=value",
+        })
+        assert ctx == {
+            "trace_id": "1" * 32,
+            "parent_span_id": "2" * 16,
+            "trace_flags": "00",
+            "tracestate": "vendor=value",
+        }
+
+    def test_parses_future_version_traceparent_with_extra_fields(self):
+        ctx = otel_hook._resolve_upstream_trace_context({
+            "traceparent": f"01-{'1' * 32}-{'2' * 16}-00-extra-fields-allowed",
+        })
+        assert ctx == {
+            "trace_id": "1" * 32,
+            "parent_span_id": "2" * 16,
+            "trace_flags": "00",
+        }
+
+    def test_rejects_version_00_traceparent_with_extra_fields(self):
+        assert otel_hook._resolve_upstream_trace_context({
+            "traceparent": f"00-{'1' * 32}-{'2' * 16}-00-extra-fields-not-allowed",
+        }) is None
+
+    def test_explicit_ids_prefer_current_span_id_as_parent(self):
+        ctx = otel_hook._resolve_upstream_trace_context({
+            "trace_id": "3" * 32,
+            "span_id": "4" * 16,
+            "parent_span_id": "5" * 16,
+            "trace_flags": "01",
+        })
+        assert ctx == {
+            "trace_id": "3" * 32,
+            "parent_span_id": "4" * 16,
+            "trace_flags": "01",
+        }
+
+    def test_reads_trace_context_from_env(self, monkeypatch):
+        monkeypatch.setenv("TRACEPARENT", f"00-{'6' * 32}-{'7' * 16}-01")
+        monkeypatch.setenv("TRACESTATE", "foo=bar")
+        ctx = otel_hook._resolve_upstream_trace_context({})
+        assert ctx == {
+            "trace_id": "6" * 32,
+            "parent_span_id": "7" * 16,
+            "trace_flags": "01",
+            "tracestate": "foo=bar",
+        }
+
+    def test_rejects_zero_trace_context(self):
+        assert otel_hook._resolve_upstream_trace_context({
+            "trace_id": "0" * 32,
+            "span_id": "1" * 16,
+        }) is None
+
+
+class TestTraceContextSelection:
+    def test_session_trace_context_prefers_upstream_parent(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            otel_hook,
+            "_make_trace_context",
+            lambda tid, sid, flags="01", tracestate=None: calls.append((tid, sid, flags, tracestate)) or "ctx",
+        )
+        session_ctx = {
+            "trace_id": "8" * 32,
+            "upstream_parent_span_id": "9" * 16,
+            "phantom_parent_id": "a" * 16,
+            "trace_flags": "00",
+            "tracestate": "vendor=value",
+        }
+        assert otel_hook._session_trace_context(session_ctx) == "ctx"
+        assert calls == [("8" * 32, "9" * 16, "00", "vendor=value")]
+
+    def test_event_context_overrides_session_fallback(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            otel_hook,
+            "_make_trace_context",
+            lambda tid, sid, flags="01", tracestate=None: calls.append((tid, sid, flags, tracestate)) or "ctx",
+        )
+        session_ctx = {
+            "trace_id": "b" * 32,
+            "upstream_parent_span_id": "c" * 16,
+            "phantom_parent_id": "d" * 16,
+        }
+        assert otel_hook._event_parent_trace_context(
+            {"trace_id": "e" * 32, "span_id": "f" * 16, "trace_flags": "00"},
+            session_ctx,
+        ) == "ctx"
+        assert calls == [("e" * 32, "f" * 16, "00", None)]
 
 
 # ── Generation advance ────────────────────────────────────────────────────
@@ -1061,7 +1263,7 @@ class TestMainFlow:
         """Main outputs legacy continue response by default."""
         monkeypatch.setattr("sys.stdin", __import__("io").StringIO('{"hook_event_name":"stop"}'))
         # Prevent actual tracing init
-        monkeypatch.setattr(otel_hook, "_init_tracing", lambda ide: False)
+        monkeypatch.setattr(otel_hook, "_init_tracing", lambda ide, **kwargs: False)
         monkeypatch.setattr(otel_hook, "_configure_logging", lambda: None)
         monkeypatch.setattr(otel_hook, "_cleanup_state", lambda: None)
         monkeypatch.setattr(otel_hook, "_load_config", lambda: {})
@@ -1093,7 +1295,7 @@ class TestMainFlow:
         monkeypatch.setattr(otel_hook, "_configure_logging", lambda: None)
         monkeypatch.setattr(otel_hook, "_cleanup_state", lambda: None)
         monkeypatch.setattr(otel_hook, "_load_config", lambda: {})
-        monkeypatch.setattr(otel_hook, "_init_tracing", lambda ide: True)
+        monkeypatch.setattr(otel_hook, "_init_tracing", lambda ide, **kwargs: True)
         monkeypatch.setattr(otel_hook, "_flush_stale_sessions", lambda tracer: None)
         monkeypatch.setattr(otel_hook, "_force_flush_provider", lambda **kw: None)
         mock_span_cm = mock.MagicMock()
@@ -1115,7 +1317,7 @@ class TestMainFlow:
     def test_empty_input(self, monkeypatch):
         """Empty stdin should not crash."""
         monkeypatch.setattr("sys.stdin", __import__("io").StringIO(""))
-        monkeypatch.setattr(otel_hook, "_init_tracing", lambda ide: False)
+        monkeypatch.setattr(otel_hook, "_init_tracing", lambda ide, **kwargs: False)
         monkeypatch.setattr(otel_hook, "_configure_logging", lambda: None)
         monkeypatch.setattr(otel_hook, "_cleanup_state", lambda: None)
         monkeypatch.setattr(otel_hook, "_load_config", lambda: {})
@@ -1128,7 +1330,7 @@ class TestMainFlow:
     def test_malformed_json(self, monkeypatch):
         """Malformed JSON should not crash."""
         monkeypatch.setattr("sys.stdin", __import__("io").StringIO("{bad json"))
-        monkeypatch.setattr(otel_hook, "_init_tracing", lambda ide: False)
+        monkeypatch.setattr(otel_hook, "_init_tracing", lambda ide, **kwargs: False)
         monkeypatch.setattr(otel_hook, "_configure_logging", lambda: None)
         monkeypatch.setattr(otel_hook, "_cleanup_state", lambda: None)
         monkeypatch.setattr(otel_hook, "_load_config", lambda: {})
@@ -1148,7 +1350,7 @@ class TestMainFlow:
         appended = []
         monkeypatch.setattr(otel_hook, "_append_batch_event", lambda key, evt, data: appended.append((key, evt)))
         called = {"init": 0}
-        monkeypatch.setattr(otel_hook, "_init_tracing", lambda ide: called.__setitem__("init", called["init"] + 1) or True)
+        monkeypatch.setattr(otel_hook, "_init_tracing", lambda ide, **kwargs: called.__setitem__("init", called["init"] + 1) or True)
         captured = []
         monkeypatch.setattr("builtins.print", lambda s: captured.append(s))
         result = otel_hook.main()

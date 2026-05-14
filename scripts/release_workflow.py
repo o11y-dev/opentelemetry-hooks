@@ -99,7 +99,10 @@ def determine_version(
 
 def extract_release_notes(version: str, changelog_path: Path = CHANGELOG) -> str:
     _validate_semver(version)
-    text = changelog_path.read_text(encoding="utf-8")
+    try:
+        text = changelog_path.read_text(encoding="utf-8")
+    except (FileNotFoundError, OSError) as exc:
+        raise ValueError(f"{changelog_path.name} not found") from exc
     heading = re.compile(
         rf"^## {re.escape(version)}(?: \([^)]+\))?\s*$",
         flags=re.MULTILINE,

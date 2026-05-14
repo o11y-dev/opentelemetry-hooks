@@ -12,8 +12,8 @@ def _load_script(name: str):
     repo_root = Path(__file__).resolve().parent.parent
     module_path = repo_root / "scripts" / f"{name}.py"
     spec = spec_from_file_location(f"test_{name}_module", module_path)
+    assert spec is not None and spec.loader is not None, f"Could not load spec for {module_path}"
     module = module_from_spec(spec)
-    assert spec is not None and spec.loader is not None
     spec.loader.exec_module(module)
     return module
 
