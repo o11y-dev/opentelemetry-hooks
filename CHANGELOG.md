@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.13.0 (unreleased)
+## 0.13.0 (2026-05-17)
 
 ### Added
 - Added a supported-agent setup matrix to the README covering Cursor, Claude Code, Gemini CLI, GitHub Copilot, OpenCode, and compatible hook runners
