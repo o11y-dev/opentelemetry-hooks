@@ -59,56 +59,56 @@ jobs:
           python-version: "3.12"
 
       - name: Install build tools
-        run: python -m pip install build setuptools-scm python-semantic-release
+        run: python -m pip install build twine python-semantic-release
 
       - name: Determine version
         id: semver
         run: |
+          ARGS=()
           if [ -n "${{ inputs.version }}" ]; then
-            VERSION="${{ inputs.version }}"
-            if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-              echo "::error::Version must be in semver format (e.g. 0.2.0), got: $VERSION"
-              exit 1
-            fi
-            echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-            echo "Manually specified version: $VERSION"
+            ARGS+=(--version "${{ inputs.version }}")
+          fi
+          if [ -n "${{ inputs.force }}" ]; then
+            ARGS+=(--force "${{ inputs.force }}")
+          fi
+          if [ "${#ARGS[@]}" -gt 0 ]; then
+            VERSION=$(python3 scripts/release_workflow.py determine-version "${ARGS[@]}")
           else
-            FORCE_ARG=""
-            if [ -n "${{ inputs.force }}" ]; then
-              FORCE_ARG="--${{ inputs.force }}"
-            fi
-            SEMREL_OUTPUT=$(semantic-release version --print $FORCE_ARG 2>&1) || true
-            VERSION=$(echo "$SEMREL_OUTPUT" | tail -1 | grep -E '^[0-9]+\.[0-9]+\.[0-9]+' || true)
-            if [ -z "$VERSION" ]; then
-              echo "::notice::No version bump detected from commits. Use 'force' or provide an explicit 'version'."
-              echo "::notice::semantic-release output: $SEMREL_OUTPUT"
-            else
-              echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-              echo "Auto-detected version: $VERSION"
-            fi
+            VERSION=$(python3 scripts/release_workflow.py determine-version)
+          fi
+          if [ -z "$VERSION" ]; then
+            echo "::notice::No unreleased version found in pyproject.toml and no semantic-release bump was detected."
+          else
+            echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+            echo "Resolved release version: $VERSION"
           fi
 
       - name: Check tag does not already exist
         if: steps.semver.outputs.version != ''
         run: |
-          if git rev-parse "v${{ steps.semver.outputs.version }}" >/dev/null 2>&1; then
+          if git show-ref --tags --verify --quiet "refs/tags/v${{ steps.semver.outputs.version }}"; then
             echo "::error::Tag v${{ steps.semver.outputs.version }} already exists"
             exit 1
           fi
 
-      - name: Update version in README
+      - name: Bump version in pyproject.toml, README.md, and CHANGELOG.md
         if: steps.semver.outputs.version != ''
         run: |
+          python scripts/bump_version.py "${{ steps.semver.outputs.version }}"
           python scripts/update_readme_release_refs.py README.md "${{ steps.semver.outputs.version }}"
-          if git diff --quiet README.md; then
-            echo "README already up to date"
+          if git diff --quiet; then
+            echo "Files already up to date"
           else
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add README.md
-            git commit -m "docs: update install version to v${{ steps.semver.outputs.version }}"
+            git add pyproject.toml README.md CHANGELOG.md
+            git commit -m "release: v${{ steps.semver.outputs.version }}"
             git push origin HEAD
           fi
+
+      - name: Build release notes
+        if: steps.semver.outputs.version != ''
+        run: python3 scripts/release_workflow.py release-notes "${{ steps.semver.outputs.version }}" > release-notes.md
 
       - name: Create and push tag
         if: steps.semver.outputs.version != ''
@@ -120,15 +120,11 @@ jobs:
 
       - name: Build package
         if: steps.semver.outputs.version != ''
-        env:
-          SETUPTOOLS_SCM_PRETEND_VERSION: ${{ steps.semver.outputs.version }}
         run: python -m build
 
       - name: Verify package
         if: steps.semver.outputs.version != ''
-        run: |
-          pip install twine
-          twine check dist/*
+        run: twine check dist/*
 
       - name: Create GitHub Release
         if: steps.semver.outputs.version != ''
@@ -136,7 +132,7 @@ jobs:
         with:
           tag_name: v${{ steps.semver.outputs.version }}
           files: dist/*
-          generate_release_notes: true
+          body_path: release-notes.md
 
       - name: Delete merged branches
         if: steps.semver.outputs.version != ''
@@ -172,11 +168,9 @@ jobs:
           python-version: "3.12"
 
       - name: Install build tools
-        run: pip install build setuptools-scm
+        run: pip install build
 
       - name: Build package
-        env:
-          SETUPTOOLS_SCM_PRETEND_VERSION: ${{ needs.release.outputs.version }}
         run: python -m build
 
       - name: Publish to PyPI
