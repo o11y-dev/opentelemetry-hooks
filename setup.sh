@@ -46,7 +46,7 @@ CLAUDE_EVENTS=(
   SessionStart SessionEnd
   SubagentStart SubagentStop
   PreToolUse PostToolUse PostToolUseFailure
-  UserPromptSubmit Stop
+  UserPromptSubmit PreCompact PostCompact Stop
 )
 
 GEMINI_EVENTS=(

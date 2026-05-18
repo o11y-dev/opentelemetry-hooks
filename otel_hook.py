@@ -316,7 +316,7 @@ _CURSOR_EVENTS = [
 _CLAUDE_EVENTS = [
     "SessionStart", "SessionEnd", "SubagentStart", "SubagentStop",
     "PreToolUse", "PostToolUse", "PostToolUseFailure",
-    "UserPromptSubmit", "Stop",
+    "UserPromptSubmit", "PreCompact", "PostCompact", "Stop",
 ]
 _CLAUDE_MATCHER_EVENTS = {"PreToolUse", "PostToolUse", "PostToolUseFailure"}
 
@@ -445,6 +445,7 @@ _OP_TOOL_EVENTS = {
 _OP_AGENT_EVENTS = {
     "SessionStart", "SessionEnd",
     "SubagentStart", "SubagentStop",
+    "PreCompact", "PostCompact",
 }
 
 # Per-event attribute extraction map (canonical names)
@@ -2141,6 +2142,24 @@ def _continue_response_json() -> str:
     return json.dumps(payload)
 
 
+def _stdout_response(event_name: str, ide: str) -> Optional[str]:
+    """Return the hook runner's expected stdout payload for this event.
+
+    Codex treats generic JSON on SessionStart/UserPromptSubmit as structured
+    hook output and rejects the passive `{"continue": true}` envelope there.
+    For those events, exit 0 with no stdout is the success path.
+    """
+    if ide == "codex" and event_name in {"SessionStart", "UserPromptSubmit"}:
+        return None
+    return _continue_response_json()
+
+
+def _emit_stdout_response(event_name: str, ide: str) -> None:
+    response = _stdout_response(event_name, ide)
+    if response is not None:
+        print(response)
+
+
 def _local_span_path(session_key: Optional[str]) -> str:
     key = session_key or "unscoped"
     safe_key = re.sub(r"[^A-Za-z0-9_.-]+", "_", key)
@@ -2777,7 +2796,7 @@ def main() -> int:
             if sk:
                 _create_session_context(sk, data, ide)
                 _append_batch_event(f"{sk}_session", event_name, data)
-            print(_continue_response_json())
+            _emit_stdout_response(event_name, ide)
             return 0
 
         if event_name in _GENERATION_START_EVENTS:
@@ -2786,18 +2805,18 @@ def main() -> int:
                 gen_key = _advance_generation(sk, session_ctx)
             if gen_key:
                 _append_batch_event(gen_key, event_name, data)
-            print(_continue_response_json())
+            _emit_stdout_response(event_name, ide)
             return 0
 
         if event_name not in _GENERATION_END_EVENTS and event_name not in _SESSION_END_EVENTS:
             gen_key = _resolve_generation_key(data, session_ctx)
             if gen_key:
                 _append_batch_event(gen_key, event_name, data)
-                print(_continue_response_json())
+                _emit_stdout_response(event_name, ide)
                 return 0
 
     if not _init_tracing(ide, client_name=_resolve_client_name(ide, data=data, agent_engine=agent_engine, session_ctx=session_ctx)):
-        print(_continue_response_json())
+        _emit_stdout_response(event_name, ide)
         return 0
 
     if _local_spans_enabled():
@@ -2826,7 +2845,7 @@ def main() -> int:
                 if sk:
                     session_ctx = _create_session_context(sk, data, ide)
                     _append_batch_event(f"{sk}_session", event_name, data)
-                print(_continue_response_json())
+                _emit_stdout_response(event_name, ide)
                 return 0
 
             # UserPromptSubmit: start a new generation
@@ -2837,7 +2856,7 @@ def main() -> int:
                     session_ctx = _load_session_context(sk)
                 if gen_key:
                     _append_batch_event(gen_key, event_name, data)
-                print(_continue_response_json())
+                _emit_stdout_response(event_name, ide)
                 return 0
 
             # Stop: flush generation
@@ -2850,7 +2869,7 @@ def main() -> int:
                     if sk and session_ctx:
                         session_ctx.pop("current_generation", None)
                         _write_session_context(sk, session_ctx)
-                print(_continue_response_json())
+                _emit_stdout_response(event_name, ide)
                 return 0
 
             # SessionEnd: emit session root span, clean up
@@ -2862,7 +2881,7 @@ def main() -> int:
                         _flush_generation(tracer, pending_gen, session_ctx, ide)
                     _flush_session(tracer, sk, session_ctx, ide)
                     _clear_session_context(sk)
-                print(_continue_response_json())
+                _emit_stdout_response(event_name, ide)
                 return 0
 
             # All other events: buffer under current generation
@@ -2878,7 +2897,7 @@ def main() -> int:
                 ) as span:
                     _populate_span(span, event_name, data, ide, session_ctx=session_ctx)
 
-            print(_continue_response_json())
+            _emit_stdout_response(event_name, ide)
             return 0
 
         # ── Streaming mode: emit spans immediately ──
@@ -2912,7 +2931,7 @@ def main() -> int:
                 cur.set_status(Status(StatusCode.ERROR, str(exc)))
         _LOGGER.exception("Hook failure: %s", exc)
 
-    print(_continue_response_json())
+    _emit_stdout_response(event_name, ide)
     return 0
 
 

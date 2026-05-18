@@ -701,7 +701,7 @@ class TestGenAIOperation:
             assert otel_hook._genai_operation(evt) == "execute_tool"
 
     def test_agent_events(self):
-        for evt in ("SessionStart", "SessionEnd", "SubagentStart"):
+        for evt in ("SessionStart", "SessionEnd", "SubagentStart", "PreCompact", "PostCompact"):
             assert otel_hook._genai_operation(evt) == "invoke_agent"
 
     def test_chat_default(self):
@@ -1274,6 +1274,54 @@ class TestMainFlow:
         captured = []
         monkeypatch.setattr("builtins.print", lambda s: captured.append(s))
         result = otel_hook.main()
+        assert result == 0
+        assert json.loads(captured[0]) == {"continue": True}
+
+    def test_codex_session_start_suppresses_stdout(self, monkeypatch):
+        monkeypatch.setattr(
+            "sys.stdin",
+            __import__("io").StringIO('{"hook_event_name":"SessionStart","session_id":"s1","source_app":"Codex"}'),
+        )
+        monkeypatch.setattr(otel_hook, "_init_tracing", lambda ide, **kwargs: False)
+        monkeypatch.setattr(otel_hook, "_configure_logging", lambda: None)
+        monkeypatch.setattr(otel_hook, "_cleanup_state", lambda: None)
+        monkeypatch.setattr(otel_hook, "_load_config", lambda: {})
+        captured = []
+        monkeypatch.setattr("builtins.print", lambda s: captured.append(s))
+
+        result = otel_hook.main()
+
+        assert result == 0
+        assert captured == []
+
+    def test_codex_user_prompt_submit_suppresses_stdout(self, monkeypatch):
+        monkeypatch.setattr(
+            "sys.stdin",
+            __import__("io").StringIO('{"hook_event_name":"UserPromptSubmit","session_id":"s1","source_app":"Codex"}'),
+        )
+        monkeypatch.setattr(otel_hook, "_init_tracing", lambda ide, **kwargs: False)
+        monkeypatch.setattr(otel_hook, "_configure_logging", lambda: None)
+        monkeypatch.setattr(otel_hook, "_cleanup_state", lambda: None)
+        monkeypatch.setattr(otel_hook, "_load_config", lambda: {})
+        captured = []
+        monkeypatch.setattr("builtins.print", lambda s: captured.append(s))
+
+        result = otel_hook.main()
+
+        assert result == 0
+        assert captured == []
+
+    def test_codex_stop_keeps_json_stdout(self, monkeypatch):
+        monkeypatch.setattr("sys.stdin", __import__("io").StringIO('{"hook_event_name":"Stop","session_id":"s1","source_app":"Codex"}'))
+        monkeypatch.setattr(otel_hook, "_init_tracing", lambda ide, **kwargs: False)
+        monkeypatch.setattr(otel_hook, "_configure_logging", lambda: None)
+        monkeypatch.setattr(otel_hook, "_cleanup_state", lambda: None)
+        monkeypatch.setattr(otel_hook, "_load_config", lambda: {})
+        captured = []
+        monkeypatch.setattr("builtins.print", lambda s: captured.append(s))
+
+        result = otel_hook.main()
+
         assert result == 0
         assert json.loads(captured[0]) == {"continue": True}
 

@@ -118,6 +118,8 @@ class TestSetupClaude:
         doc = _read(str(settings_path))
         assert "hooks" in doc
         assert "SessionStart" in doc["hooks"]
+        assert "PreCompact" in doc["hooks"]
+        assert "PostCompact" in doc["hooks"]
 
     def test_preserves_existing_keys(self, tmp_path, monkeypatch):
         monkeypatch.setattr(otel_hook, "_resolve_hook_cmd", lambda: "otel-hook")
@@ -140,7 +142,7 @@ class TestSetupClaude:
         monkeypatch.setattr(otel_hook, "_resolve_hook_cmd", lambda: "otel-hook")
         setup_claude(global_=False, cwd=str(tmp_path))
         doc = _read(str(tmp_path / ".claude" / "settings.json"))
-        for event in ["SessionStart", "SessionEnd", "Stop"]:
+        for event in ["SessionStart", "SessionEnd", "PreCompact", "PostCompact", "Stop"]:
             entries = doc["hooks"][event]
             assert all("matcher" not in e for e in entries)
 
