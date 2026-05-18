@@ -1328,7 +1328,10 @@ class TestMainFlow:
         assert result == 0
         assert json.loads(captured[0]) == {"continue": True}
 
-    def test_codex_session_start_governance_uses_adapter_payload(self):
+    def test_codex_session_start_governance_uses_adapter_payload(self, monkeypatch):
+        monkeypatch.delenv("IDE_OTEL_LOCAL_SPANS", raising=False)
+        monkeypatch.delenv("IDE_OTEL_LOCAL_TRACE_SAVING", raising=False)
+        monkeypatch.delenv("IDE_OTEL_BATCH_ON_STOP", raising=False)
         response = otel_hook._stdout_response(
             "SessionStart",
             "codex",
