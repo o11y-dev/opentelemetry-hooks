@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.13.2 (unreleased)
+## 0.13.2 (2026-05-18)
 
 ### Added
 - Added Claude Code `PreCompact` and `PostCompact` hook registration, examples, docs, and tests
