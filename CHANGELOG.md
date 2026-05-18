@@ -1,6 +1,14 @@
 # Changelog
 
-## 0.13.1 (unreleased)
+## 0.13.2 (unreleased)
+
+### Added
+- Added Claude Code `PreCompact` and `PostCompact` hook registration, examples, docs, and tests
+
+### Fixed
+- Suppressed passive stdout for Codex `SessionStart` and `UserPromptSubmit` while preserving JSON stdout for events like `Stop`
+
+## 0.13.1 (2026-05-18)
 
 ### Fixed
 - Updated Codex setup to use the current `[features].hooks` flag and remove deprecated `codex_hooks` entries from existing configs

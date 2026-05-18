@@ -47,7 +47,7 @@ jobs:
     permissions:
       contents: write
     outputs:
-      version: ${{ steps.semver.outputs.version }}
+      version: ${{ steps.release_meta.outputs.version }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -83,59 +83,63 @@ jobs:
             echo "Resolved release version: $VERSION"
           fi
 
-      - name: Check tag does not already exist
+      - name: Finalize release version
+        id: release_meta
         if: steps.semver.outputs.version != ''
         run: |
-          if git show-ref --tags --verify --quiet "refs/tags/v${{ steps.semver.outputs.version }}"; then
-            echo "::error::Tag v${{ steps.semver.outputs.version }} already exists"
-            exit 1
+          VERSION="${{ steps.semver.outputs.version }}"
+          if git show-ref --tags --verify --quiet "refs/tags/v${VERSION}"; then
+            echo "::notice::Tag v${VERSION} already exists; skipping release steps."
+            echo "version=" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Bump version in pyproject.toml, README.md, and CHANGELOG.md
-        if: steps.semver.outputs.version != ''
+        if: steps.release_meta.outputs.version != ''
         run: |
-          python scripts/bump_version.py "${{ steps.semver.outputs.version }}"
-          python scripts/update_readme_release_refs.py README.md "${{ steps.semver.outputs.version }}"
+          python scripts/bump_version.py "${{ steps.release_meta.outputs.version }}"
+          python scripts/update_readme_release_refs.py README.md "${{ steps.release_meta.outputs.version }}"
           if git diff --quiet; then
             echo "Files already up to date"
           else
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git add pyproject.toml README.md CHANGELOG.md
-            git commit -m "release: v${{ steps.semver.outputs.version }}"
+            git commit -m "release: v${{ steps.release_meta.outputs.version }}"
             git push origin HEAD
           fi
 
       - name: Build release notes
-        if: steps.semver.outputs.version != ''
-        run: python3 scripts/release_workflow.py release-notes "${{ steps.semver.outputs.version }}" > release-notes.md
+        if: steps.release_meta.outputs.version != ''
+        run: python3 scripts/release_workflow.py release-notes "${{ steps.release_meta.outputs.version }}" > release-notes.md
 
       - name: Create and push tag
-        if: steps.semver.outputs.version != ''
+        if: steps.release_meta.outputs.version != ''
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a "v${{ steps.semver.outputs.version }}" -m "Release v${{ steps.semver.outputs.version }}"
-          git push origin "v${{ steps.semver.outputs.version }}"
+          git tag -a "v${{ steps.release_meta.outputs.version }}" -m "Release v${{ steps.release_meta.outputs.version }}"
+          git push origin "v${{ steps.release_meta.outputs.version }}"
 
       - name: Build package
-        if: steps.semver.outputs.version != ''
+        if: steps.release_meta.outputs.version != ''
         run: python -m build
 
       - name: Verify package
-        if: steps.semver.outputs.version != ''
+        if: steps.release_meta.outputs.version != ''
         run: twine check dist/*
 
       - name: Create GitHub Release
-        if: steps.semver.outputs.version != ''
+        if: steps.release_meta.outputs.version != ''
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ steps.semver.outputs.version }}
+          tag_name: v${{ steps.release_meta.outputs.version }}
           files: dist/*
           body_path: release-notes.md
 
       - name: Delete merged branches
-        if: steps.semver.outputs.version != ''
+        if: steps.release_meta.outputs.version != ''
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

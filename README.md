@@ -110,7 +110,7 @@ pip install opentelemetry-hooks
 To pin a specific version or install directly from a tag:
 
 ```bash
-pipx install git+https://github.com/o11y-dev/opentelemetry-hooks.git@v0.13.0
+pipx install git+https://github.com/o11y-dev/opentelemetry-hooks.git@v0.13.1
 ```
 
 Or install from a pre-built wheel from the [Releases](https://github.com/o11y-dev/opentelemetry-hooks/releases) page:
