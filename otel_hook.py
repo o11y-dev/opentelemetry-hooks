@@ -33,6 +33,7 @@ import subprocess
 import sys
 import time
 import urllib.parse
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional, Tuple
 
@@ -316,7 +317,7 @@ _CURSOR_EVENTS = [
 _CLAUDE_EVENTS = [
     "SessionStart", "SessionEnd", "SubagentStart", "SubagentStop",
     "PreToolUse", "PostToolUse", "PostToolUseFailure",
-    "UserPromptSubmit", "Stop",
+    "UserPromptSubmit", "PreCompact", "PostCompact", "Stop",
 ]
 _CLAUDE_MATCHER_EVENTS = {"PreToolUse", "PostToolUse", "PostToolUseFailure"}
 
@@ -445,6 +446,7 @@ _OP_TOOL_EVENTS = {
 _OP_AGENT_EVENTS = {
     "SessionStart", "SessionEnd",
     "SubagentStart", "SubagentStop",
+    "PreCompact", "PostCompact",
 }
 
 # Per-event attribute extraction map (canonical names)
@@ -2141,6 +2143,98 @@ def _continue_response_json() -> str:
     return json.dumps(payload)
 
 
+@dataclass(slots=True)
+class GovernanceResponse:
+    """Governance-oriented response fields that adapters can project to stdout later."""
+
+    continue_: Optional[bool] = None
+    stop_reason: Optional[str] = None
+    system_message: Optional[str] = None
+    suppress_output: Optional[bool] = None
+    hook_specific_output: Optional[dict] = None
+
+
+class HookResponseAdapter:
+    """Runner-specific adapter for stdout response envelopes."""
+
+    def build_payload(
+        self,
+        event_name: str,
+        data: dict,
+        governance: Optional[GovernanceResponse] = None,
+    ) -> Optional[dict]:
+        payload = {"continue": True}
+        if _local_spans_configured():
+            payload["local_spans"] = _local_spans_enabled()
+        return self._merge_governance(payload, governance)
+
+    @staticmethod
+    def _merge_governance(payload: Optional[dict], governance: Optional[GovernanceResponse]) -> Optional[dict]:
+        if governance is None:
+            return payload
+        merged = dict(payload or {})
+        if governance.continue_ is not None:
+            merged["continue"] = governance.continue_
+        if governance.stop_reason is not None:
+            merged["stopReason"] = governance.stop_reason
+        if governance.system_message is not None:
+            merged["systemMessage"] = governance.system_message
+        if governance.suppress_output is not None:
+            merged["suppressOutput"] = governance.suppress_output
+        if governance.hook_specific_output is not None:
+            merged["hookSpecificOutput"] = governance.hook_specific_output
+        return merged
+
+
+class CodexHookResponseAdapter(HookResponseAdapter):
+    """Codex has event-specific stdout contracts that differ from the default envelope."""
+
+    _PASSIVE_SILENT_EVENTS = frozenset({"SessionStart", "UserPromptSubmit"})
+
+    def build_payload(
+        self,
+        event_name: str,
+        data: dict,
+        governance: Optional[GovernanceResponse] = None,
+    ) -> Optional[dict]:
+        if governance is None and event_name in self._PASSIVE_SILENT_EVENTS:
+            return None
+        return super().build_payload(event_name, data, governance)
+
+
+_DEFAULT_HOOK_RESPONSE_ADAPTER = HookResponseAdapter()
+_HOOK_RESPONSE_ADAPTERS = {
+    "codex": CodexHookResponseAdapter(),
+}
+
+
+def _response_adapter_for(ide: str) -> HookResponseAdapter:
+    return _HOOK_RESPONSE_ADAPTERS.get(ide, _DEFAULT_HOOK_RESPONSE_ADAPTER)
+
+
+def _stdout_response(
+    event_name: str,
+    ide: str,
+    data: dict,
+    governance: Optional[GovernanceResponse] = None,
+) -> Optional[str]:
+    payload = _response_adapter_for(ide).build_payload(event_name, data, governance)
+    if payload is None:
+        return None
+    return json.dumps(payload)
+
+
+def _emit_stdout_response(
+    event_name: str,
+    ide: str,
+    data: dict,
+    governance: Optional[GovernanceResponse] = None,
+) -> None:
+    response = _stdout_response(event_name, ide, data, governance)
+    if response is not None:
+        print(response)
+
+
 def _local_span_path(session_key: Optional[str]) -> str:
     key = session_key or "unscoped"
     safe_key = re.sub(r"[^A-Za-z0-9_.-]+", "_", key)
@@ -2777,7 +2871,7 @@ def main() -> int:
             if sk:
                 _create_session_context(sk, data, ide)
                 _append_batch_event(f"{sk}_session", event_name, data)
-            print(_continue_response_json())
+            _emit_stdout_response(event_name, ide, data)
             return 0
 
         if event_name in _GENERATION_START_EVENTS:
@@ -2786,18 +2880,18 @@ def main() -> int:
                 gen_key = _advance_generation(sk, session_ctx)
             if gen_key:
                 _append_batch_event(gen_key, event_name, data)
-            print(_continue_response_json())
+            _emit_stdout_response(event_name, ide, data)
             return 0
 
         if event_name not in _GENERATION_END_EVENTS and event_name not in _SESSION_END_EVENTS:
             gen_key = _resolve_generation_key(data, session_ctx)
             if gen_key:
                 _append_batch_event(gen_key, event_name, data)
-                print(_continue_response_json())
+                _emit_stdout_response(event_name, ide, data)
                 return 0
 
     if not _init_tracing(ide, client_name=_resolve_client_name(ide, data=data, agent_engine=agent_engine, session_ctx=session_ctx)):
-        print(_continue_response_json())
+        _emit_stdout_response(event_name, ide, data)
         return 0
 
     if _local_spans_enabled():
@@ -2826,7 +2920,7 @@ def main() -> int:
                 if sk:
                     session_ctx = _create_session_context(sk, data, ide)
                     _append_batch_event(f"{sk}_session", event_name, data)
-                print(_continue_response_json())
+                _emit_stdout_response(event_name, ide, data)
                 return 0
 
             # UserPromptSubmit: start a new generation
@@ -2837,7 +2931,7 @@ def main() -> int:
                     session_ctx = _load_session_context(sk)
                 if gen_key:
                     _append_batch_event(gen_key, event_name, data)
-                print(_continue_response_json())
+                _emit_stdout_response(event_name, ide, data)
                 return 0
 
             # Stop: flush generation
@@ -2850,7 +2944,7 @@ def main() -> int:
                     if sk and session_ctx:
                         session_ctx.pop("current_generation", None)
                         _write_session_context(sk, session_ctx)
-                print(_continue_response_json())
+                _emit_stdout_response(event_name, ide, data)
                 return 0
 
             # SessionEnd: emit session root span, clean up
@@ -2862,7 +2956,7 @@ def main() -> int:
                         _flush_generation(tracer, pending_gen, session_ctx, ide)
                     _flush_session(tracer, sk, session_ctx, ide)
                     _clear_session_context(sk)
-                print(_continue_response_json())
+                _emit_stdout_response(event_name, ide, data)
                 return 0
 
             # All other events: buffer under current generation
@@ -2878,7 +2972,7 @@ def main() -> int:
                 ) as span:
                     _populate_span(span, event_name, data, ide, session_ctx=session_ctx)
 
-            print(_continue_response_json())
+            _emit_stdout_response(event_name, ide, data)
             return 0
 
         # ── Streaming mode: emit spans immediately ──
@@ -2912,7 +3006,7 @@ def main() -> int:
                 cur.set_status(Status(StatusCode.ERROR, str(exc)))
         _LOGGER.exception("Hook failure: %s", exc)
 
-    print(_continue_response_json())
+    _emit_stdout_response(event_name, ide, data)
     return 0
 
 

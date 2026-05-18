@@ -15,7 +15,7 @@ Every hook event — prompt submissions, tool calls, shell commands, MCP interac
 
 ## How It Works
 
-The hook is a lightweight Python command that your IDE invokes on every agent event. The IDE pipes a JSON payload to stdin, the hook processes it, emits OpenTelemetry spans and logs, and returns `{"continue": true}` on stdout so the IDE proceeds normally. No sidecar, no daemon — just a command your IDE calls.
+The hook is a lightweight Python command that your IDE invokes on every agent event. The IDE pipes a JSON payload to stdin, the hook processes it, emits OpenTelemetry spans and logs, and returns the runner-compatible success response on stdout so the IDE proceeds normally. For most events that is `{"continue": true}`; Codex `SessionStart` and `UserPromptSubmit` intentionally exit with no stdout because Codex treats passive JSON there as structured hook output. No sidecar, no daemon — just a command your IDE calls.
 
 ```
 IDE Event → stdin (JSON) → otel-hook → OpenTelemetry SDK → OTLP Backend
@@ -80,6 +80,8 @@ Run `otel-hook diagnose` to see what is currently registered, and `otel-hook uni
 | `PermissionRequest` | — | `PermissionRequest` | — | — | — | — |
 | `PostToolUse` | `PostToolUse` | `PostToolUse` | `postToolUse` | `AfterTool` | `postToolUse` | `tool.execute.after` (exit=0) |
 | `PostToolUseFailure` | `PostToolUseFailure` | — | `postToolUseFailure` | — | — | `tool.execute.after` (exit≠0) |
+| `PreCompact` | `PreCompact` | — | — | — | — | — |
+| `PostCompact` | `PostCompact` | — | — | — | — | — |
 | `Stop` | `Stop` | `Stop` | `stop` | `AfterModel` ¹ | — | `session.idle` |
 | `SubagentStart` | `SubagentStart` | — | `subagentStart` | `BeforeAgent` | — | — ³ |
 | `SubagentStop` | `SubagentStop` | — | `subagentStop` | `AfterAgent` | — | — ³ |
@@ -455,12 +457,18 @@ These settings have sensible defaults and typically don't need to be changed:
 
 ## Hook Stdout Response
 
-The hook writes a JSON response to stdout for the IDE/client.
+The hook writes the response expected by the current IDE/client.
 
 - Default (backward compatible):
 
 ```json
 {"continue": true}
+```
+
+- Codex `SessionStart` and `UserPromptSubmit`:
+
+```text
+<no stdout>
 ```
 
 - If `IDE_OTEL_LOCAL_SPANS` is explicitly set (`true` or `false`), the response includes:
@@ -469,7 +477,7 @@ The hook writes a JSON response to stdout for the IDE/client.
 {"continue": true, "local_spans": true}
 ```
 
-For the stdout response field, `local_spans` uses `IDE_OTEL_LOCAL_SPANS` when set; otherwise internal behavior falls back to `IDE_OTEL_BATCH_ON_STOP`.
+For the stdout response field, `local_spans` uses `IDE_OTEL_LOCAL_SPANS` when set; otherwise internal behavior falls back to `IDE_OTEL_BATCH_ON_STOP`. Codex `SessionStart` and `UserPromptSubmit` skip stdout entirely because those events accept exit-0/no-output success but reject the generic passive JSON envelope.
 
 ## Local Trace Files (Agent-Friendly)
 

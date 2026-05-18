@@ -701,7 +701,7 @@ class TestGenAIOperation:
             assert otel_hook._genai_operation(evt) == "execute_tool"
 
     def test_agent_events(self):
-        for evt in ("SessionStart", "SessionEnd", "SubagentStart"):
+        for evt in ("SessionStart", "SessionEnd", "SubagentStart", "PreCompact", "PostCompact"):
             assert otel_hook._genai_operation(evt) == "invoke_agent"
 
     def test_chat_default(self):
@@ -1276,6 +1276,83 @@ class TestMainFlow:
         result = otel_hook.main()
         assert result == 0
         assert json.loads(captured[0]) == {"continue": True}
+
+    def test_codex_session_start_suppresses_stdout(self, monkeypatch):
+        monkeypatch.setattr(
+            "sys.stdin",
+            __import__("io").StringIO('{"hook_event_name":"SessionStart","session_id":"s1","source_app":"Codex"}'),
+        )
+        monkeypatch.setattr(otel_hook, "_init_tracing", lambda ide, **kwargs: False)
+        monkeypatch.setattr(otel_hook, "_configure_logging", lambda: None)
+        monkeypatch.setattr(otel_hook, "_cleanup_state", lambda: None)
+        monkeypatch.setattr(otel_hook, "_load_config", lambda: {})
+        captured = []
+        monkeypatch.setattr("builtins.print", lambda s: captured.append(s))
+
+        result = otel_hook.main()
+
+        assert result == 0
+        assert captured == []
+
+    def test_codex_user_prompt_submit_suppresses_stdout(self, monkeypatch):
+        monkeypatch.setattr(
+            "sys.stdin",
+            __import__("io").StringIO('{"hook_event_name":"UserPromptSubmit","session_id":"s1","source_app":"Codex"}'),
+        )
+        monkeypatch.setattr(otel_hook, "_init_tracing", lambda ide, **kwargs: False)
+        monkeypatch.setattr(otel_hook, "_configure_logging", lambda: None)
+        monkeypatch.setattr(otel_hook, "_cleanup_state", lambda: None)
+        monkeypatch.setattr(otel_hook, "_load_config", lambda: {})
+        captured = []
+        monkeypatch.setattr("builtins.print", lambda s: captured.append(s))
+
+        result = otel_hook.main()
+
+        assert result == 0
+        assert captured == []
+
+    def test_codex_stop_keeps_json_stdout(self, monkeypatch):
+        monkeypatch.setattr("sys.stdin", __import__("io").StringIO('{"hook_event_name":"Stop","session_id":"s1","source_app":"Codex"}'))
+        monkeypatch.setattr(otel_hook, "_init_tracing", lambda ide, **kwargs: False)
+        monkeypatch.setattr(otel_hook, "_configure_logging", lambda: None)
+        monkeypatch.setattr(otel_hook, "_cleanup_state", lambda: None)
+        monkeypatch.setattr(otel_hook, "_load_config", lambda: {})
+        monkeypatch.delenv("IDE_OTEL_LOCAL_SPANS", raising=False)
+        monkeypatch.delenv("IDE_OTEL_LOCAL_TRACE_SAVING", raising=False)
+        monkeypatch.delenv("IDE_OTEL_BATCH_ON_STOP", raising=False)
+        captured = []
+        monkeypatch.setattr("builtins.print", lambda s: captured.append(s))
+
+        result = otel_hook.main()
+
+        assert result == 0
+        assert json.loads(captured[0]) == {"continue": True}
+
+    def test_codex_session_start_governance_uses_adapter_payload(self, monkeypatch):
+        monkeypatch.delenv("IDE_OTEL_LOCAL_SPANS", raising=False)
+        monkeypatch.delenv("IDE_OTEL_LOCAL_TRACE_SAVING", raising=False)
+        monkeypatch.delenv("IDE_OTEL_BATCH_ON_STOP", raising=False)
+        response = otel_hook._stdout_response(
+            "SessionStart",
+            "codex",
+            {"session_id": "s1"},
+            governance=otel_hook.GovernanceResponse(
+                system_message="workspace policy loaded",
+                hook_specific_output={
+                    "hookEventName": "SessionStart",
+                    "additionalContext": "Load repository guardrails before editing.",
+                },
+            ),
+        )
+
+        assert json.loads(response) == {
+            "continue": True,
+            "systemMessage": "workspace policy loaded",
+            "hookSpecificOutput": {
+                "hookEventName": "SessionStart",
+                "additionalContext": "Load repository guardrails before editing.",
+            },
+        }
 
     def test_continue_response_opt_in_local_spans_flag(self, monkeypatch):
         monkeypatch.setenv("IDE_OTEL_LOCAL_SPANS", "true")

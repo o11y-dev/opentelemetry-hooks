@@ -22,6 +22,20 @@
         ]
       }
     ],
+    "PreCompact": [
+      {
+        "hooks": [
+          { "type": "command", "command": "{{SCRIPT_PATH}}" }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "hooks": [
+          { "type": "command", "command": "{{SCRIPT_PATH}}" }
+        ]
+      }
+    ],
     "PreToolUse": [
       {
         "matcher": "*",

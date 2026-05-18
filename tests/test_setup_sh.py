@@ -369,6 +369,8 @@ class TestSetupShIdeDetectionConfig:
         assert result.returncode == 0, result.stderr
 
         doc = _claude_settings_doc(str(tmp_path))
+        assert "PreCompact" in doc["hooks"]
+        assert "PostCompact" in doc["hooks"]
         for event_entries in doc["hooks"].values():
             for event_entry in event_entries:
                 for hook in event_entry["hooks"]:
