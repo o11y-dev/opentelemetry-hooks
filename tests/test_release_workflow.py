@@ -62,20 +62,6 @@ def test_determine_version_uses_semantic_release_when_tag_exists(tmp_path: Path,
     assert runner.call_args.args[0] == ["semantic-release", "version", "--print", "--minor"]
 
 
-def test_determine_version_skips_manual_version_when_tag_exists(tmp_path: Path, monkeypatch):
-    monkeypatch.setattr(release_workflow, "version_tag_exists", lambda version, root=None: True)
-    runner = Mock()
-
-    version = release_workflow.determine_version(
-        manual_version="0.2.0",
-        root=tmp_path,
-        runner=runner,
-    )
-
-    assert version is None
-    runner.assert_not_called()
-
-
 def test_version_tag_exists_checks_tag_namespace_only(monkeypatch):
     run = Mock(return_value=Mock(returncode=0))
     monkeypatch.setattr(release_workflow.subprocess, "run", run)

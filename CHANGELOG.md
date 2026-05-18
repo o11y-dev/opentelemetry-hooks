@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.13.1 (unreleased)
+
+### Fixed
+- Updated Codex setup to use the current `[features].hooks` flag and remove deprecated `codex_hooks` entries from existing configs
+
 ## 0.13.0 (2026-05-17)
 
 ### Added
@@ -14,4 +19,3 @@
 
 ### Fixed
 - Included the OpenCode TypeScript example in package data and source distributions so documented examples are present in built artifacts
-

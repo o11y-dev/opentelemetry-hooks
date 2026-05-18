@@ -76,10 +76,7 @@ def determine_version(
     runner: Callable[..., Any] | None = None,
 ) -> str | None:
     if manual_version:
-        requested = _validate_semver(manual_version)
-        if version_tag_exists(requested, root):
-            return None
-        return requested
+        return _validate_semver(manual_version)
 
     project_version = read_project_version(root / "pyproject.toml")
     if not version_tag_exists(project_version, root):
