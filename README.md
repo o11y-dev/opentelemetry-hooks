@@ -15,7 +15,7 @@ Every hook event — prompt submissions, tool calls, shell commands, MCP interac
 
 ## How It Works
 
-The hook is a lightweight Python command that your IDE invokes on every agent event. The IDE pipes a JSON payload to stdin, the hook processes it, emits OpenTelemetry spans and logs, and returns the runner-compatible success response on stdout so the IDE proceeds normally. For most events that is `{"continue": true}`; Codex `SessionStart` and `UserPromptSubmit` intentionally exit with no stdout because Codex treats passive JSON there as structured hook output. No sidecar, no daemon — just a command your IDE calls.
+The hook is a lightweight Python command that your IDE invokes on every agent event. The IDE pipes a JSON payload to stdin, the hook processes it, emits OpenTelemetry spans and logs, and returns the runner-compatible success response on stdout so the IDE proceeds normally. For most events that is `{"continue": true}`; Codex uses event-specific response contracts, so passive Codex hooks stay silent except for `Stop`, which still returns JSON. No sidecar, no daemon — just a command your IDE calls.
 
 ```
 IDE Event → stdin (JSON) → otel-hook → OpenTelemetry SDK → OTLP Backend
@@ -465,7 +465,7 @@ The hook writes the response expected by the current IDE/client.
 {"continue": true}
 ```
 
-- Codex `SessionStart` and `UserPromptSubmit`:
+- Codex passive hooks (`SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`):
 
 ```text
 <no stdout>
@@ -477,7 +477,7 @@ The hook writes the response expected by the current IDE/client.
 {"continue": true, "local_spans": true}
 ```
 
-For the stdout response field, `local_spans` uses `IDE_OTEL_LOCAL_SPANS` when set; otherwise internal behavior falls back to `IDE_OTEL_BATCH_ON_STOP`. Codex `SessionStart` and `UserPromptSubmit` skip stdout entirely because those events accept exit-0/no-output success but reject the generic passive JSON envelope.
+For the stdout response field, `local_spans` uses `IDE_OTEL_LOCAL_SPANS` when set; otherwise internal behavior falls back to `IDE_OTEL_BATCH_ON_STOP`. Codex responses are adapter-managed: passive non-`Stop` events skip stdout entirely, and Codex responses do not include the custom `local_spans` field because Codex validates event-specific JSON schemas.
 
 ## Local Trace Files (Agent-Friendly)
 

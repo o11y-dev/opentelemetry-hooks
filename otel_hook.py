@@ -2189,7 +2189,7 @@ class HookResponseAdapter:
 class CodexHookResponseAdapter(HookResponseAdapter):
     """Codex has event-specific stdout contracts that differ from the default envelope."""
 
-    _PASSIVE_SILENT_EVENTS = frozenset({"SessionStart", "UserPromptSubmit"})
+    _STOP_EVENT = "Stop"
 
     def build_payload(
         self,
@@ -2197,9 +2197,13 @@ class CodexHookResponseAdapter(HookResponseAdapter):
         data: dict,
         governance: Optional[GovernanceResponse] = None,
     ) -> Optional[dict]:
-        if governance is None and event_name in self._PASSIVE_SILENT_EVENTS:
+        if governance is None:
+            if event_name == self._STOP_EVENT:
+                return {"continue": True}
             return None
-        return super().build_payload(event_name, data, governance)
+
+        base_payload = {"continue": True} if event_name == self._STOP_EVENT else {}
+        return self._merge_governance(base_payload, governance)
 
 
 _DEFAULT_HOOK_RESPONSE_ADAPTER = HookResponseAdapter()
