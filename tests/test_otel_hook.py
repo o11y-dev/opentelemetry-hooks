@@ -1317,6 +1317,9 @@ class TestMainFlow:
         monkeypatch.setattr(otel_hook, "_configure_logging", lambda: None)
         monkeypatch.setattr(otel_hook, "_cleanup_state", lambda: None)
         monkeypatch.setattr(otel_hook, "_load_config", lambda: {})
+        monkeypatch.delenv("IDE_OTEL_LOCAL_SPANS", raising=False)
+        monkeypatch.delenv("IDE_OTEL_LOCAL_TRACE_SAVING", raising=False)
+        monkeypatch.delenv("IDE_OTEL_BATCH_ON_STOP", raising=False)
         captured = []
         monkeypatch.setattr("builtins.print", lambda s: captured.append(s))
 
@@ -1324,6 +1327,29 @@ class TestMainFlow:
 
         assert result == 0
         assert json.loads(captured[0]) == {"continue": True}
+
+    def test_codex_session_start_governance_uses_adapter_payload(self):
+        response = otel_hook._stdout_response(
+            "SessionStart",
+            "codex",
+            {"session_id": "s1"},
+            governance=otel_hook.GovernanceResponse(
+                system_message="workspace policy loaded",
+                hook_specific_output={
+                    "hookEventName": "SessionStart",
+                    "additionalContext": "Load repository guardrails before editing.",
+                },
+            ),
+        )
+
+        assert json.loads(response) == {
+            "continue": True,
+            "systemMessage": "workspace policy loaded",
+            "hookSpecificOutput": {
+                "hookEventName": "SessionStart",
+                "additionalContext": "Load repository guardrails before editing.",
+            },
+        }
 
     def test_continue_response_opt_in_local_spans_flag(self, monkeypatch):
         monkeypatch.setenv("IDE_OTEL_LOCAL_SPANS", "true")
