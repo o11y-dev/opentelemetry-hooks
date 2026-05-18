@@ -733,7 +733,7 @@ class TestGeminiSetup:
                     )
 
     def test_codex_global_creates_hooks_and_config(self, tmp_path):
-        """setup.sh --codex --global must create ~/.codex/hooks.json and enable codex_hooks."""
+        """setup.sh --codex --global must create ~/.codex/hooks.json and enable hooks."""
         hook_dir = _make_hook_dir(str(tmp_path))
         env = self._minimal_env(tmp_path)
 
@@ -744,7 +744,9 @@ class TestGeminiSetup:
         config_path = tmp_path / ".codex" / "config.toml"
         assert hooks_path.exists()
         assert config_path.exists()
-        assert "codex_hooks = true" in config_path.read_text()
+        text = config_path.read_text()
+        assert "hooks = true" in text
+        assert "codex_hooks" not in text
 
         doc = _codex_hooks_doc(str(tmp_path))
         assert "PermissionRequest" in doc["hooks"]

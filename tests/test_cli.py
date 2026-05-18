@@ -242,7 +242,9 @@ class TestSetupCodex:
         assert config_path.exists()
         doc = _read(str(hooks_path))
         assert "PermissionRequest" in doc["hooks"]
-        assert "codex_hooks = true" in config_path.read_text()
+        text = config_path.read_text()
+        assert "hooks = true" in text
+        assert "codex_hooks" not in text
 
     def test_matchers_only_where_supported(self, tmp_path, monkeypatch):
         monkeypatch.setattr(otel_hook, "_resolve_hook_cmd", lambda: "otel-hook")
@@ -262,7 +264,19 @@ class TestSetupCodex:
         text = config_path.read_text()
         assert 'model = "gpt-5.5"' in text
         assert "memories = true" in text
-        assert "codex_hooks = true" in text
+        assert "hooks = true" in text
+        assert "codex_hooks" not in text
+
+    def test_migrates_deprecated_codex_hooks_flag(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(otel_hook, "_resolve_hook_cmd", lambda: "otel-hook")
+        config_path = tmp_path / ".codex" / "config.toml"
+        os.makedirs(str(config_path.parent))
+        config_path.write_text('[features]\ncodex_hooks = true\nmemories = true\n')
+        setup_codex(global_=False, cwd=str(tmp_path))
+        text = config_path.read_text()
+        assert "hooks = true" in text
+        assert "memories = true" in text
+        assert "codex_hooks" not in text
 
 
 # ---------------------------------------------------------------------------

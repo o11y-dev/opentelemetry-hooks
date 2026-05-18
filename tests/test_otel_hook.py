@@ -1990,7 +1990,9 @@ class TestSetupCodex:
         assert config_path.is_file()
         doc = json.loads(hooks_path.read_text())
         assert set(otel_hook._CODEX_EVENTS).issubset(doc["hooks"])
-        assert "codex_hooks = true" in config_path.read_text()
+        text = config_path.read_text()
+        assert "hooks = true" in text
+        assert "codex_hooks" not in text
 
     def test_global_install_uses_home(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HOME", str(tmp_path))

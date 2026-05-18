@@ -864,15 +864,20 @@ for index, line in enumerate(lines):
 if section_start is None:
     if lines and lines[-1].strip():
         lines.append('\n')
-    lines.extend(['[features]\n', 'codex_hooks = true\n'])
+    lines.extend(['[features]\n', 'hooks = true\n'])
 else:
-    key_re = re.compile(r'^\s*codex_hooks\s*=')
+    key_re = re.compile(r'^\s*hooks\s*=')
     for index in range(section_start + 1, section_end):
         if key_re.match(lines[index]):
-            lines[index] = 'codex_hooks = true\n'
+            lines[index] = 'hooks = true\n'
             break
     else:
-        lines.insert(section_end, 'codex_hooks = true\n')
+        lines.insert(section_end, 'hooks = true\n')
+    deprecated_re = re.compile(r'^\s*codex_hooks\s*=')
+    lines = [
+        line for index, line in enumerate(lines)
+        if not (section_start < index < section_end and deprecated_re.match(line))
+    ]
 with open(config_path, 'w') as f:
     f.writelines(lines)
 

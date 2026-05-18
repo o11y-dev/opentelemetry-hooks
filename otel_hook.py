@@ -3021,6 +3021,46 @@ def _ensure_toml_bool(path: str, section: str, key: str, value: bool) -> None:
         f.writelines(lines)
 
 
+def _remove_toml_key(path: str, section: str, key: str) -> None:
+    """Remove a key from a simple TOML section while preserving unrelated text."""
+    if not os.path.exists(path):
+        return
+    with open(path) as f:
+        lines = f.readlines()
+
+    section_header = f"[{section}]"
+    section_start = None
+    section_end = len(lines)
+    section_re = re.compile(r"^\s*\[.*\]\s*$")
+    for index, line in enumerate(lines):
+        if line.strip() == section_header:
+            section_start = index
+            section_end = len(lines)
+            for probe in range(index + 1, len(lines)):
+                if section_re.match(lines[probe]):
+                    section_end = probe
+                    break
+            break
+
+    if section_start is None:
+        return
+
+    key_re = re.compile(rf"^\s*{re.escape(key)}\s*=")
+    new_lines = []
+    removed = False
+    for index, line in enumerate(lines):
+        if section_start < index < section_end and key_re.match(line):
+            removed = True
+            continue
+        new_lines.append(line)
+
+    if not removed:
+        return
+
+    with open(path, "w") as f:
+        f.writelines(new_lines)
+
+
 def _detect_available_agents() -> list:
     """Return list of agent names whose home dirs or commands exist."""
     found = []
@@ -3268,7 +3308,8 @@ def setup_codex(global_: bool = True, cwd: str = ".") -> None:
 
     hooks_path = os.path.join(codex_dir, "hooks.json")
     config_path = os.path.join(codex_dir, "config.toml")
-    _ensure_toml_bool(config_path, "features", "codex_hooks", True)
+    _ensure_toml_bool(config_path, "features", "hooks", True)
+    _remove_toml_key(config_path, "features", "codex_hooks")
 
     doc = _load_json_file(hooks_path)
     hooks = doc.setdefault("hooks", {})

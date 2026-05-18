@@ -299,7 +299,7 @@ Replace `{{SCRIPT_PATH}}` in the copied workflow with the hook command you want 
 
 #### Codex
 
-Codex hooks are configured in `~/.codex/hooks.json` or `<repo>/.codex/hooks.json` and require the `codex_hooks` feature flag in the matching `config.toml`.
+Codex hooks are configured in `~/.codex/hooks.json` or `<repo>/.codex/hooks.json` and require the `hooks` feature flag in the matching `config.toml`.
 
 **Quick setup (recommended):**
 
@@ -315,7 +315,7 @@ The setup command enables:
 
 ```toml
 [features]
-codex_hooks = true
+hooks = true
 ```
 
 **Manual install:**
