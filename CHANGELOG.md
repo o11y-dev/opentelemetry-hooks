@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.13.1 (unreleased)
+## 0.13.1 (2026-05-18)
 
 ### Fixed
 - Updated Codex setup to use the current `[features].hooks` flag and remove deprecated `codex_hooks` entries from existing configs
