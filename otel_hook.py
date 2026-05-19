@@ -2189,7 +2189,10 @@ class HookResponseAdapter:
 class CodexHookResponseAdapter(HookResponseAdapter):
     """Codex has event-specific stdout contracts that differ from the default envelope."""
 
-    _STOP_EVENT = "Stop"
+    # Keep these derived from the same lifecycle constants main() uses so Codex
+    # stdout behavior stays aligned if shared event sets change.
+    _JSON_RESPONSE_EVENTS = frozenset(_GENERATION_END_EVENTS.intersection(_CODEX_EVENTS))
+    _SILENT_SUCCESS_EVENTS = frozenset(set(_CODEX_EVENTS).difference(_JSON_RESPONSE_EVENTS))
 
     def build_payload(
         self,
@@ -2198,11 +2201,13 @@ class CodexHookResponseAdapter(HookResponseAdapter):
         governance: Optional[GovernanceResponse] = None,
     ) -> Optional[dict]:
         if governance is None:
-            if event_name == self._STOP_EVENT:
+            if event_name in self._JSON_RESPONSE_EVENTS:
                 return {"continue": True}
-            return None
+            if event_name in self._SILENT_SUCCESS_EVENTS:
+                return None
+            return super().build_payload(event_name, data, governance)
 
-        base_payload = {"continue": True} if event_name == self._STOP_EVENT else {}
+        base_payload = {"continue": True} if event_name in self._JSON_RESPONSE_EVENTS else {}
         return self._merge_governance(base_payload, governance)
 
 

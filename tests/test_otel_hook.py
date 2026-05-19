@@ -1277,45 +1277,18 @@ class TestMainFlow:
         assert result == 0
         assert json.loads(captured[0]) == {"continue": True}
 
-    def test_codex_session_start_suppresses_stdout(self, monkeypatch):
-        monkeypatch.setattr(
-            "sys.stdin",
-            __import__("io").StringIO('{"hook_event_name":"SessionStart","session_id":"s1","source_app":"Codex"}'),
-        )
-        monkeypatch.setattr(otel_hook, "_init_tracing", lambda ide, **kwargs: False)
-        monkeypatch.setattr(otel_hook, "_configure_logging", lambda: None)
-        monkeypatch.setattr(otel_hook, "_cleanup_state", lambda: None)
-        monkeypatch.setattr(otel_hook, "_load_config", lambda: {})
-        captured = []
-        monkeypatch.setattr("builtins.print", lambda s: captured.append(s))
-
-        result = otel_hook.main()
-
-        assert result == 0
-        assert captured == []
-
-    def test_codex_user_prompt_submit_suppresses_stdout(self, monkeypatch):
-        monkeypatch.setattr(
-            "sys.stdin",
-            __import__("io").StringIO('{"hook_event_name":"UserPromptSubmit","session_id":"s1","source_app":"Codex"}'),
-        )
-        monkeypatch.setattr(otel_hook, "_init_tracing", lambda ide, **kwargs: False)
-        monkeypatch.setattr(otel_hook, "_configure_logging", lambda: None)
-        monkeypatch.setattr(otel_hook, "_cleanup_state", lambda: None)
-        monkeypatch.setattr(otel_hook, "_load_config", lambda: {})
-        captured = []
-        monkeypatch.setattr("builtins.print", lambda s: captured.append(s))
-
-        result = otel_hook.main()
-
-        assert result == 0
-        assert captured == []
-
-    def test_codex_post_tool_use_suppresses_stdout(self, monkeypatch):
-        monkeypatch.setattr(
-            "sys.stdin",
-            __import__("io").StringIO('{"hook_event_name":"PostToolUse","session_id":"s1","source_app":"Codex","tool_name":"Bash"}'),
-        )
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            '{"hook_event_name":"SessionStart","session_id":"s1","source_app":"Codex"}',
+            '{"hook_event_name":"UserPromptSubmit","session_id":"s1","source_app":"Codex"}',
+            '{"hook_event_name":"PreToolUse","session_id":"s1","source_app":"Codex","tool_name":"Bash"}',
+            '{"hook_event_name":"PermissionRequest","session_id":"s1","source_app":"Codex","tool_name":"Bash"}',
+            '{"hook_event_name":"PostToolUse","session_id":"s1","source_app":"Codex","tool_name":"Bash"}',
+        ],
+    )
+    def test_codex_passive_events_suppress_stdout(self, monkeypatch, payload):
+        monkeypatch.setattr("sys.stdin", __import__("io").StringIO(payload))
         monkeypatch.setattr(otel_hook, "_init_tracing", lambda ide, **kwargs: False)
         monkeypatch.setattr(otel_hook, "_configure_logging", lambda: None)
         monkeypatch.setattr(otel_hook, "_cleanup_state", lambda: None)
