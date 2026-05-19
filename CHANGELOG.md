@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.13.3 (unreleased)
+## 0.13.3 (2026-05-19)
 
 ### Fixed
 - Made passive Codex hooks stay silent for non-`Stop` events like `PostToolUse`, while keeping `Stop` on the minimal valid JSON response and suppressing the custom `local_spans` field in Codex stdout responses
