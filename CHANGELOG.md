@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.13.4 (unreleased)
+
+### Fixed
+- Preserved native Cursor client attribution for Cursor-style payloads when leaked Claude-specific hints would otherwise misclassify the event, while still recording any distinct wrapper via `gen_ai.client.wrapper`
+
 ## 0.13.3 (2026-05-19)
 
 ### Fixed
