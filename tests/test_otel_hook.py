@@ -327,9 +327,17 @@ class TestDetectAgentEngine:
         monkeypatch.setenv("CLAUDE_CODE_ENTRYPOINT", "1")
         assert otel_hook._detect_agent_engine({"session_id": "sess-1"}) == "claude"
 
-    def test_detects_claude_when_outer_cursor_ide_present(self, monkeypatch):
+    def test_cursor_payload_beats_leaked_claude_env(self, monkeypatch):
         monkeypatch.setenv("CLAUDE_CODE_ENTRYPOINT", "1")
-        assert otel_hook._detect_agent_engine({"client": "Cursor IDE", "session_id": "sess-1"}) == "claude"
+        assert otel_hook._detect_agent_engine({"client": "Cursor IDE", "session_id": "sess-1"}) == "cursor"
+
+    def test_detects_claude_from_payload_when_outer_cursor_fields_exist(self, monkeypatch):
+        monkeypatch.setenv("CLAUDE_CODE_ENTRYPOINT", "1")
+        assert otel_hook._detect_agent_engine({
+            "client": "Cursor IDE",
+            "session_id": "sess-1",
+            "transcript_path": "/tmp/transcript.jsonl",
+        }) == "claude"
 
     def test_returns_none_without_engine_signal(self):
         assert otel_hook._detect_agent_engine({"session_id": "sess-1"}) is None
@@ -821,12 +829,30 @@ class TestClientIdentityAttributes:
         monkeypatch.setenv("CLAUDE_CODE_ENTRYPOINT", "1")
         span = mock.MagicMock()
 
-        otel_hook._set_client_identity_attributes(span, "cursor", data={"session_id": "sess-1"})
+        otel_hook._set_client_identity_attributes(
+            span,
+            "cursor",
+            data={"session_id": "sess-1", "transcript_path": "/tmp/transcript.jsonl"},
+        )
 
         attrs = self._attrs(span)
         assert attrs["gen_ai.client.name"] == "claude"
         assert attrs["gen_ai.client.wrapper"] == "cursor"
         assert attrs["gen_ai.client.agent_engine"] == "claude"
+
+    def test_promotes_cursor_over_misattributed_outer_ide_from_native_payload(self):
+        span = mock.MagicMock()
+
+        otel_hook._set_client_identity_attributes(
+            span,
+            "claude",
+            data={"conversation_id": "conv-1", "generation_id": "gen-1"},
+        )
+
+        attrs = self._attrs(span)
+        assert attrs["gen_ai.client.name"] == "cursor"
+        assert attrs["gen_ai.client.wrapper"] == "claude"
+        assert attrs["gen_ai.client.agent_engine"] == "cursor"
 
     def test_omits_agent_engine_when_same_as_outer_ide(self):
         span = mock.MagicMock()

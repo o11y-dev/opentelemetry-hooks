@@ -679,29 +679,8 @@ def _detect_client_version(data: dict, ide: str) -> Optional[str]:
     return None
 
 
-def _detect_agent_engine(data: dict) -> Optional[str]:
-    """Detect an inner agent engine without consulting IDE_OTEL_IDE_NAME."""
-    explicit = _normalize_ide_name(_first_present(
-        data,
-        (
-            "agent_engine",
-            "agentEngine",
-            "engine",
-            "engine_name",
-        ),
-    ))
-    if explicit:
-        return explicit
-
-    if os.getenv("CLAUDE_CODE_ENTRYPOINT"):
-        return "claude"
-
-    if data.get("transcript_path") or data.get("permission_mode") or data.get("notification_type"):
-        return "claude"
-
-    if data.get("turn_id") or data.get("last_assistant_message") is not None or data.get("tool_response") is not None:
-        return "codex"
-
+def _detect_payload_client_name(data: dict, include_session_fallback: bool = False) -> Optional[str]:
+    """Infer client identity from payload fields only, without wrapper env hints."""
     reported = _normalize_ide_name(_first_present(data, ("ide_name", "ide", "client", "source_app")))
     if reported:
         return reported
@@ -719,8 +698,61 @@ def _detect_agent_engine(data: dict) -> Optional[str]:
     if len(corroborated) == 1:
         return corroborated[0]
 
+    if data.get("conversation_id") or data.get("generation_id"):
+        return "cursor"
+
+    if data.get("transcript_path") or data.get("permission_mode") or data.get("notification_type"):
+        return "claude"
+
+    if data.get("turn_id") or data.get("last_assistant_message") is not None or data.get("tool_response") is not None:
+        return "codex"
+
     raw_event = _first_present(data, ("hook_event_name", "hook_event_type", "event"))
     if isinstance(raw_event, str) and raw_event and raw_event[0].isupper():
+        return "claude"
+
+    cursor_indicators = ("composer_mode", "agent_type", "cwd", "workspace", "workspace_path")
+    if any(data.get(key) for key in cursor_indicators):
+        return "cursor"
+
+    try:
+        cwd = data.get("cwd") or os.getcwd()
+        if ".cursor" in cwd or os.path.exists(os.path.join(cwd, ".cursor")):
+            return "cursor"
+    except Exception:
+        pass
+
+    if include_session_fallback and data.get("session_id"):
+        return "copilot"
+
+    return None
+
+
+def _detect_agent_engine(data: dict) -> Optional[str]:
+    """Detect an inner agent engine without consulting IDE_OTEL_IDE_NAME."""
+    explicit = _normalize_ide_name(_first_present(
+        data,
+        (
+            "agent_engine",
+            "agentEngine",
+            "engine",
+            "engine_name",
+        ),
+    ))
+    if explicit:
+        return explicit
+
+    if data.get("transcript_path") or data.get("permission_mode") or data.get("notification_type"):
+        return "claude"
+
+    if data.get("turn_id") or data.get("last_assistant_message") is not None or data.get("tool_response") is not None:
+        return "codex"
+
+    payload_client = _detect_payload_client_name(data, include_session_fallback=False)
+    if payload_client:
+        return payload_client
+
+    if os.getenv("CLAUDE_CODE_ENTRYPOINT"):
         return "claude"
 
     return None
@@ -1930,38 +1962,13 @@ def _detect_ide(data: dict) -> str:
         return override
 
     # Level 3: Self-reported payload fields.
-    reported = _normalize_ide_name(_first_present(data, ("ide_name", "ide", "client", "source_app")))
-    if reported:
-        return reported
+    payload_client = _detect_payload_client_name(data, include_session_fallback=False)
+    if payload_client:
+        return payload_client
 
     # Level 4: Heuristic fallback — Claude-specific signals.
     if os.getenv("CLAUDE_CODE_ENTRYPOINT"):
         return "claude"
-
-    if data.get("transcript_path") or data.get("permission_mode") or data.get("notification_type"):
-        return "claude"
-
-    if data.get("turn_id") or data.get("last_assistant_message") is not None or data.get("tool_response") is not None:
-        return "codex"
-
-    raw_event = _first_present(data, ("hook_event_name", "hook_event_type", "event"))
-    if isinstance(raw_event, str) and raw_event and raw_event[0].isupper():
-        return "claude"
-
-    # Level 4: Cursor-specific fields.
-    if data.get("conversation_id") or data.get("generation_id"):
-        return "cursor"
-
-    cursor_indicators = ("composer_mode", "agent_type", "cwd", "workspace", "workspace_path")
-    if any(data.get(key) for key in cursor_indicators):
-        return "cursor"
-
-    try:
-        cwd = data.get("cwd") or os.getcwd()
-        if ".cursor" in cwd or os.path.exists(os.path.join(cwd, ".cursor")):
-            return "cursor"
-    except Exception:
-        pass
 
     # Level 5: Copilot (session_id without other indicators).
     if data.get("session_id"):
