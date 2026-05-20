@@ -719,8 +719,8 @@ def _detect_payload_client_name(data: dict, include_session_fallback: bool = Fal
         cwd = data.get("cwd") or os.getcwd()
         if ".cursor" in cwd or os.path.exists(os.path.join(cwd, ".cursor")):
             return "cursor"
-    except Exception:
-        pass
+    except Exception as exc:
+        logging.debug("Failed cursor cwd heuristic during payload client detection: %s", exc)
 
     if include_session_fallback and data.get("session_id"):
         return "copilot"
