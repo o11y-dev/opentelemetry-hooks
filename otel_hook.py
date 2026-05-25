@@ -715,13 +715,6 @@ def _detect_payload_client_name(data: dict, include_session_fallback: bool = Fal
     if any(data.get(key) for key in cursor_indicators):
         return "cursor"
 
-    try:
-        cwd = data.get("cwd") or os.getcwd()
-        if ".cursor" in cwd or os.path.exists(os.path.join(cwd, ".cursor")):
-            return "cursor"
-    except Exception as exc:
-        logging.debug("Failed cursor cwd heuristic during payload client detection: %s", exc)
-
     if include_session_fallback and data.get("session_id"):
         return "copilot"
 
@@ -742,12 +735,6 @@ def _detect_agent_engine(data: dict) -> Optional[str]:
     if explicit:
         return explicit
 
-    if data.get("transcript_path") or data.get("permission_mode") or data.get("notification_type"):
-        return "claude"
-
-    if data.get("turn_id") or data.get("last_assistant_message") is not None or data.get("tool_response") is not None:
-        return "codex"
-
     payload_client = _detect_payload_client_name(data, include_session_fallback=False)
     if payload_client:
         return payload_client
@@ -758,14 +745,46 @@ def _detect_agent_engine(data: dict) -> Optional[str]:
     return None
 
 
-def _resolved_agent_engine(data: Optional[dict] = None, session_ctx: Optional[dict] = None) -> Optional[str]:
-    resolved = _detect_agent_engine(data or {})
+def _has_strong_engine_signal(data: dict, resolved_engine: str) -> bool:
+    """True when payload has high-confidence evidence for the resolved engine."""
+    explicit = _normalize_ide_name(_first_present(
+        data,
+        ("agent_engine", "agentEngine", "engine", "engine_name"),
+    ))
+    if explicit == resolved_engine:
+        return True
+    reported = _normalize_ide_name(_first_present(data, ("ide_name", "ide", "client", "source_app")))
+    if reported == resolved_engine:
+        return True
+    semantic_signals = [
+        _normalize_ide_name(_first_present(data, ("gen_ai.client.name",))),
+        _normalize_ide_name(_first_present(data, ("gen_ai.system",))),
+        _normalize_ide_name(_first_present(data, ("service.name", "service_name"))),
+    ]
+    if sum(1 for signal in semantic_signals if signal == resolved_engine) >= 2:
+        return True
+    if resolved_engine == "cursor" and (data.get("conversation_id") or data.get("generation_id")):
+        return True
+    return False
+
+
+def _resolved_agent_engine(
+    data: Optional[dict] = None,
+    session_ctx: Optional[dict] = None,
+    ide: Optional[str] = None,
+) -> Optional[str]:
+    payload = data or {}
+    resolved = _detect_agent_engine(payload)
+    if resolved and ide and resolved != ide and not _has_strong_engine_signal(payload, resolved):
+        resolved = None
     if resolved:
         return resolved
     if session_ctx:
-        return _normalize_ide_name(session_ctx.get("agent_engine"))
+        session_engine = _normalize_ide_name(session_ctx.get("agent_engine"))
+        if session_engine and ide and session_engine != ide and not _has_strong_engine_signal(payload, session_engine):
+            return None
+        return session_engine
     return None
-
 
 def _resolve_client_name(
     ide: str,
@@ -773,7 +792,7 @@ def _resolve_client_name(
     agent_engine: Optional[str] = None,
     session_ctx: Optional[dict] = None,
 ) -> str:
-    resolved_engine = agent_engine if agent_engine is not None else _resolved_agent_engine(data, session_ctx)
+    resolved_engine = agent_engine if agent_engine is not None else _resolved_agent_engine(data, session_ctx, ide=ide)
     if resolved_engine and resolved_engine != ide:
         return resolved_engine
     return ide
@@ -787,7 +806,7 @@ def _set_client_identity_attributes(
     Returns the resolved inner engine when one is detected and differs from the
     outer IDE; otherwise returns ``None``.
     """
-    resolved_engine = agent_engine if agent_engine is not None else _resolved_agent_engine(data, session_ctx)
+    resolved_engine = agent_engine if agent_engine is not None else _resolved_agent_engine(data, session_ctx, ide=ide)
     client_name = _resolve_client_name(ide, data=data, agent_engine=resolved_engine, session_ctx=session_ctx)
     span.set_attribute("gen_ai.client.name", client_name)
     if resolved_engine and resolved_engine != ide:
@@ -2872,7 +2891,7 @@ def main() -> int:
     sk = _session_key(data)
     session_ctx = _load_session_context(sk)
     session_ctx = _maybe_bind_session_to_upstream_context(sk, session_ctx, data)
-    agent_engine = _resolved_agent_engine(data, session_ctx)
+    agent_engine = _resolved_agent_engine(data, session_ctx, ide=ide)
 
     if _safe_bool(os.getenv("IDE_OTEL_LOG_EVENTS", "")):
         _LOGGER.info(

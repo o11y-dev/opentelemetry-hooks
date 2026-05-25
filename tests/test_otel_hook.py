@@ -331,16 +331,20 @@ class TestDetectAgentEngine:
         monkeypatch.setenv("CLAUDE_CODE_ENTRYPOINT", "1")
         assert otel_hook._detect_agent_engine({"client": "Cursor IDE", "session_id": "sess-1"}) == "cursor"
 
-    def test_detects_claude_from_payload_when_outer_cursor_fields_exist(self, monkeypatch):
+    def test_cursor_payload_beats_weak_claude_hints(self, monkeypatch):
         monkeypatch.setenv("CLAUDE_CODE_ENTRYPOINT", "1")
         assert otel_hook._detect_agent_engine({
             "client": "Cursor IDE",
             "session_id": "sess-1",
             "transcript_path": "/tmp/transcript.jsonl",
-        }) == "claude"
+        }) == "cursor"
 
     def test_returns_none_without_engine_signal(self):
-        assert otel_hook._detect_agent_engine({"session_id": "sess-1"}) is None
+        with (
+            mock.patch("os.getcwd", side_effect=AssertionError("os.getcwd should not be consulted for engine detection")),
+            mock.patch("os.path.exists", side_effect=AssertionError("os.path.exists should not be consulted for engine detection")),
+        ):
+            assert otel_hook._detect_agent_engine({"session_id": "sess-1"}) is None
 
     def test_detects_gemini_from_corroborated_semantic_fields(self):
         assert otel_hook._detect_agent_engine({
@@ -802,6 +806,20 @@ class TestGenAISemconv:
         attrs = self._attrs(span)
         assert attrs["gen_ai.system"] == "gemini"
 
+    def test_cursor_with_claude_engine_keeps_cursor_as_genai_system(self):
+        span = mock.MagicMock()
+
+        otel_hook._apply_genai_semconv(
+            span,
+            "PreToolUse",
+            {"transcript_path": "/tmp/transcript.jsonl"},
+            "cursor",
+            session_ctx={"agent_engine": "claude"},
+        )
+
+        attrs = self._attrs(span)
+        assert attrs["gen_ai.system"] == "cursor"
+
     def test_single_semantic_field_does_not_change_genai_system(self):
         span = mock.MagicMock()
 
@@ -825,7 +843,7 @@ class TestClientIdentityAttributes:
             for args, _kwargs in (call for call in span.set_attribute.call_args_list)
         }
 
-    def test_sets_nested_agent_engine_when_distinct_from_outer_ide(self, monkeypatch):
+    def test_cursor_with_claude_engine_keeps_cursor_as_client_name(self, monkeypatch):
         monkeypatch.setenv("CLAUDE_CODE_ENTRYPOINT", "1")
         span = mock.MagicMock()
 
@@ -836,9 +854,9 @@ class TestClientIdentityAttributes:
         )
 
         attrs = self._attrs(span)
-        assert attrs["gen_ai.client.name"] == "claude"
-        assert attrs["gen_ai.client.wrapper"] == "cursor"
-        assert attrs["gen_ai.client.agent_engine"] == "claude"
+        assert attrs["gen_ai.client.name"] == "cursor"
+        assert "gen_ai.client.wrapper" not in attrs
+        assert "gen_ai.client.agent_engine" not in attrs
 
     def test_promotes_cursor_over_misattributed_outer_ide_from_native_payload(self):
         span = mock.MagicMock()
