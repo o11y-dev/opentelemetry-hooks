@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "opentelemetry-hooks"
-version = "0.13.4"
+version = "0.13.5"
 description = "OpenTelemetry integration for AI coding agents (Codex, Cursor IDE/CLI, GitHub Copilot, Claude Code, Gemini CLI, Antigravity, OpenCode-compatible runners)"
 readme = "README.md"
 license = {text = "MIT"}

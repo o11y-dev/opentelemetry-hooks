@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.13.5 (2026-05-25)
+
+### Fixed
+- Removed project-directory (`.cursor`/cwd) checks from agent-engine inference and consolidated engine detection paths to avoid weak, environment-dependent relabeling.
+
 ## 0.13.4 (2026-05-20)
 
 ### Fixed
