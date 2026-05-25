@@ -340,7 +340,10 @@ class TestDetectAgentEngine:
         }) == "cursor"
 
     def test_returns_none_without_engine_signal(self):
-        with mock.patch("os.getcwd", return_value="/tmp/test"), mock.patch("os.path.exists", return_value=False):
+        with (
+            mock.patch("os.getcwd", side_effect=AssertionError("os.getcwd should not be consulted for engine detection")),
+            mock.patch("os.path.exists", side_effect=AssertionError("os.path.exists should not be consulted for engine detection")),
+        ):
             assert otel_hook._detect_agent_engine({"session_id": "sess-1"}) is None
 
     def test_detects_gemini_from_corroborated_semantic_fields(self):
