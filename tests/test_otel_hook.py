@@ -340,7 +340,9 @@ class TestDetectAgentEngine:
         }) == "cursor"
 
     def test_returns_none_without_engine_signal(self):
-        assert otel_hook._detect_agent_engine({"session_id": "sess-1"}) is None
+        with mock.patch("os.getcwd", return_value="/tmp/test"):
+            with mock.patch("os.path.exists", return_value=False):
+                assert otel_hook._detect_agent_engine({"session_id": "sess-1"}) is None
 
     def test_detects_gemini_from_corroborated_semantic_fields(self):
         assert otel_hook._detect_agent_engine({

@@ -715,13 +715,6 @@ def _detect_payload_client_name(data: dict, include_session_fallback: bool = Fal
     if any(data.get(key) for key in cursor_indicators):
         return "cursor"
 
-    try:
-        cwd = data.get("cwd") or os.getcwd()
-        if ".cursor" in cwd or os.path.exists(os.path.join(cwd, ".cursor")):
-            return "cursor"
-    except Exception as exc:
-        logging.debug("Failed cursor cwd heuristic during payload client detection: %s", exc)
-
     if include_session_fallback and data.get("session_id"):
         return "copilot"
 
@@ -745,12 +738,6 @@ def _detect_agent_engine(data: dict) -> Optional[str]:
     payload_client = _detect_payload_client_name(data, include_session_fallback=False)
     if payload_client:
         return payload_client
-
-    if data.get("transcript_path") or data.get("permission_mode") or data.get("notification_type"):
-        return "claude"
-
-    if data.get("turn_id") or data.get("last_assistant_message") is not None or data.get("tool_response") is not None:
-        return "codex"
 
     if os.getenv("CLAUDE_CODE_ENTRYPOINT"):
         return "claude"
