@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.13.6 (2026-05-26)
+
+### Fixed
+- Captured fallback failure reasons for tool events when payloads omit explicit `error` text by deriving from exit codes, status/reason fields, and nested metadata/tool-response fields, and propagated these reasons on `PostToolUse` spans via `gen_ai.client.error`.
+
 ## 0.13.5 (2026-05-25)
 
 ### Fixed
