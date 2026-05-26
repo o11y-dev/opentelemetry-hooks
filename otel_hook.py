@@ -462,7 +462,7 @@ _EVENT_ATTR_MAP = {
     },
     "SessionEnd": {"status": "gen_ai.client.status", "reason": "gen_ai.client.session_end_reason"},
     "PreToolUse": {"tool_name": "gen_ai.client.tool_name", "tool_id": "gen_ai.client.tool_id", "tool_use_id": "gen_ai.client.tool_use_id"},
-    "PostToolUse": {"tool_name": "gen_ai.client.tool_name", "tool_id": "gen_ai.client.tool_id", "tool_use_id": "gen_ai.client.tool_use_id", "duration_ms": "gen_ai.client.duration_ms"},
+    "PostToolUse": {"tool_name": "gen_ai.client.tool_name", "tool_id": "gen_ai.client.tool_id", "tool_use_id": "gen_ai.client.tool_use_id", "duration_ms": "gen_ai.client.duration_ms", "error": "gen_ai.client.error"},
     "PostToolUseFailure": {"tool_name": "gen_ai.client.tool_name", "tool_id": "gen_ai.client.tool_id", "tool_use_id": "gen_ai.client.tool_use_id", "error": "gen_ai.client.error", "is_interrupt": "gen_ai.client.is_interrupt"},
     "PermissionRequest": {"tool_name": "gen_ai.client.tool_name", "tool_id": "gen_ai.client.tool_id", "tool_use_id": "gen_ai.client.tool_use_id", "turn_id": "gen_ai.client.turn_id"},
     "SubagentStart": {"subagent_type": "gen_ai.client.subagent_type", "subagent_task": "gen_ai.client.subagent_task", "agent_id": "gen_ai.client.agent_id", "agent_type": "gen_ai.client.agent_type"},
@@ -559,6 +559,82 @@ def _lower_or_none(value: Optional[str]) -> Optional[str]:
         return None
     lowered = value.strip().lower()
     return lowered or None
+
+
+_FAILURE_STATUSES = frozenset({
+    "error", "failed", "failure", "cancelled", "canceled",
+    "timeout", "timed_out", "interrupted", "denied",
+})
+
+
+def _extract_exit_code(data: dict) -> Optional[int]:
+    for value in (data.get("exit_code"),):
+        code = _int_or_none(value)
+        if code is not None:
+            return code
+    metadata = data.get("metadata")
+    if isinstance(metadata, dict):
+        code = _int_or_none(metadata.get("exit"))
+        if code is not None:
+            return code
+    return None
+
+
+def _is_failure_status(value) -> bool:
+    status = _lower_or_none(value)
+    return status in _FAILURE_STATUSES if status else False
+
+
+def _event_indicates_failure(event_name: str, data: dict) -> bool:
+    if event_name in {"PostToolUseFailure", "ErrorOccurred"}:
+        return True
+    exit_code = _extract_exit_code(data)
+    if exit_code is not None and exit_code != 0:
+        return True
+    if _is_failure_status(_first_present(data, ("status", "state", "result"))):
+        return True
+    metadata = data.get("metadata")
+    if isinstance(metadata, dict) and _is_failure_status(_first_present(metadata, ("status", "state", "result"))):
+        return True
+    return False
+
+
+def _synthesize_failure_reason(data: dict) -> Optional[str]:
+    exit_code = _extract_exit_code(data)
+    if exit_code is not None and exit_code != 0:
+        return f"exit {exit_code}"
+
+    status = _lower_or_none(_first_present(data, ("status", "state", "result")))
+    reason = _first_present(data, ("reason", "failure_reason", "stop_reason"))
+    if reason is not None:
+        text = str(reason).strip()
+        if text:
+            return f"{status}: {text}" if status in _FAILURE_STATUSES else text
+    if status in _FAILURE_STATUSES:
+        return f"status={status}"
+
+    for container in (data.get("metadata"), data.get("tool_response")):
+        if isinstance(container, dict):
+            nested = _first_present(container, ("error", "reason", "failure_reason", "message", "stderr", "details"))
+            if nested is not None:
+                text = str(nested).strip()
+                if text:
+                    return text
+    return None
+
+
+def _enrich_failure_details(event_name: str, data: dict) -> dict:
+    if not isinstance(data, dict):
+        return data
+    error = data.get("error")
+    if error is not None and str(error).strip():
+        return data
+    if not _event_indicates_failure(event_name, data):
+        return data
+    synthesized = _synthesize_failure_reason(data)
+    if synthesized:
+        data["error"] = synthesized
+    return data
 
 
 def _normalize_genai_output_type(value) -> Optional[str]:
@@ -2887,6 +2963,7 @@ def main() -> int:
     data = _normalize_input_data(input_data)
     raw_event = _get_event_name(data)
     event_name = _normalize_event(raw_event)
+    data = _enrich_failure_details(event_name, data)
     ide = _detect_ide(data)
     sk = _session_key(data)
     session_ctx = _load_session_context(sk)
