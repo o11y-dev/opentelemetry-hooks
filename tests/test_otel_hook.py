@@ -929,6 +929,11 @@ class TestDeriveLogsEndpoint:
             os.environ.pop("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", None)
             assert otel_hook._derive_logs_endpoint() == "http://localhost:4317"
 
+    def test_http_fallback_endpoint_uses_local_http_port(self):
+        assert otel_hook._http_fallback_endpoint("http://localhost:4317") == "http://localhost:4318"
+        assert otel_hook._http_fallback_endpoint("http://127.0.0.1:4317") == "http://127.0.0.1:4318"
+        assert otel_hook._http_fallback_endpoint("https://collector.example:4317") == "https://collector.example:4317"
+
 
 # ── Batch buffer I/O ─────────────────────────────────────────────────────
 

@@ -1444,6 +1444,7 @@ def _init_sdk_tracer_provider(resource_attrs: dict, disable_batch: bool) -> bool
         except ImportError as exc:
             _LOGGER.warning("gRPC exporter unavailable: %s — falling back to http/protobuf", exc)
             protocol = "http/protobuf"
+            endpoint = _http_fallback_endpoint(endpoint)
 
     if exporter is None:
         try:
@@ -1480,6 +1481,14 @@ def _derive_logs_endpoint() -> Optional[str]:
     return base or None
 
 
+def _http_fallback_endpoint(endpoint: Optional[str]) -> Optional[str]:
+    if not endpoint:
+        return endpoint
+    if endpoint in {"http://localhost:4317", "http://127.0.0.1:4317"}:
+        return endpoint.rsplit(":", 1)[0] + ":4318"
+    return endpoint
+
+
 def _init_sdk_logger_provider(resource_attrs: dict, disable_batch: bool) -> bool:
     """Configure the OTel SDK LoggerProvider with OTLP log exporter."""
     global _OTEL_LOG_HANDLER, _LOGS_INITIALIZED
@@ -1508,6 +1517,7 @@ def _init_sdk_logger_provider(resource_attrs: dict, disable_batch: bool) -> bool
         except ImportError as exc:
             _LOGGER.warning("gRPC log exporter unavailable: %s — falling back to http/protobuf", exc)
             protocol = "http/protobuf"
+            endpoint = _http_fallback_endpoint(endpoint)
 
     if exporter is None:
         try:
