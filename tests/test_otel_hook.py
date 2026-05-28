@@ -929,6 +929,11 @@ class TestDeriveLogsEndpoint:
             os.environ.pop("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", None)
             assert otel_hook._derive_logs_endpoint() == "http://localhost:4317"
 
+    def test_http_fallback_endpoint_uses_local_http_port(self):
+        assert otel_hook._http_fallback_endpoint("http://localhost:4317") == "http://localhost:4318"
+        assert otel_hook._http_fallback_endpoint("http://127.0.0.1:4317") == "http://127.0.0.1:4318"
+        assert otel_hook._http_fallback_endpoint("https://collector.example:4317") == "https://collector.example:4317"
+
 
 # ── Batch buffer I/O ─────────────────────────────────────────────────────
 
@@ -1808,6 +1813,45 @@ class TestSetCodexToolAttrs:
 
     def test_permission_request_in_tool_events(self):
         assert "PermissionRequest" in otel_hook._TOOL_EVENTS
+
+
+class TestFailureReasonEnrichment:
+    def test_preserves_explicit_error(self):
+        data = {"error": "permission denied", "exit_code": 1}
+        otel_hook._enrich_failure_details("PostToolUseFailure", data)
+        assert data["error"] == "permission denied"
+
+    def test_synthesizes_from_exit_code(self):
+        data = {"exit_code": 127}
+        otel_hook._enrich_failure_details("PostToolUseFailure", data)
+        assert data["error"] == "exit 127"
+
+    def test_synthesizes_from_failure_status_and_reason(self):
+        data = {"status": "failed", "reason": "command timed out"}
+        otel_hook._enrich_failure_details("PostToolUse", data)
+        assert data["error"] == "failed: command timed out"
+
+    def test_synthesizes_from_nested_metadata(self):
+        data = {"metadata": {"status": "failed", "message": "tool crashed"}}
+        otel_hook._enrich_failure_details("PostToolUse", data)
+        assert data["error"] == "tool crashed"
+
+    def test_prefers_nested_message_over_failure_status_fallback(self):
+        data = {"status": "failed", "metadata": {"message": "tool crashed"}}
+        otel_hook._enrich_failure_details("PostToolUse", data)
+        assert data["error"] == "tool crashed"
+
+    def test_skips_successful_events(self):
+        data = {"status": "ok", "exit_code": 0}
+        otel_hook._enrich_failure_details("PostToolUse", data)
+        assert "error" not in data
+
+    def test_populate_span_sets_error_for_failed_post_tool_use(self):
+        span = _FakeSpan()
+        data = {"tool_name": "bash", "tool_id": "call-1", "exit_code": 3}
+        otel_hook._enrich_failure_details("PostToolUse", data)
+        otel_hook._populate_span(span, "PostToolUse", data, "opencode")
+        assert span.attrs.get("gen_ai.client.error") == "exit 3"
 
 
 # ── New IDE name aliases ─────────────────────────────────────────────────
