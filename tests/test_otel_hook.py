@@ -1836,6 +1836,11 @@ class TestFailureReasonEnrichment:
         otel_hook._enrich_failure_details("PostToolUse", data)
         assert data["error"] == "tool crashed"
 
+    def test_prefers_nested_message_over_failure_status_fallback(self):
+        data = {"status": "failed", "metadata": {"message": "tool crashed"}}
+        otel_hook._enrich_failure_details("PostToolUse", data)
+        assert data["error"] == "tool crashed"
+
     def test_skips_successful_events(self):
         data = {"status": "ok", "exit_code": 0}
         otel_hook._enrich_failure_details("PostToolUse", data)

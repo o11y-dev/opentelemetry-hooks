@@ -610,9 +610,6 @@ def _synthesize_failure_reason(data: dict) -> Optional[str]:
         text = str(reason).strip()
         if text:
             return f"{status}: {text}" if status in _FAILURE_STATUSES else text
-    if status in _FAILURE_STATUSES:
-        return f"status={status}"
-
     for container in (data.get("metadata"), data.get("tool_response")):
         if isinstance(container, dict):
             nested = _first_present(container, ("error", "reason", "failure_reason", "message", "stderr", "details"))
@@ -620,6 +617,8 @@ def _synthesize_failure_reason(data: dict) -> Optional[str]:
                 text = str(nested).strip()
                 if text:
                     return text
+    if status in _FAILURE_STATUSES:
+        return f"status={status}"
     return None
 
 
