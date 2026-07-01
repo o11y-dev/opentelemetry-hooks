@@ -32,7 +32,7 @@
   "IDE_OTEL_LOG_EVENTS": "false",
   "IDE_OTEL_DEBUG_CONSOLE": "false",
 
-  "_comment_6": "=== Advanced ===",
+  "_comment_6": "=== Advanced (set IDE_OTEL_DISABLE_BATCH=true for deterministic tests) ===",
   "IDE_OTEL_DISABLE_BATCH": "false",
   "IDE_OTEL_STATE_TTL_SECONDS": "86400",
   "IDE_OTEL_STATE_CLEANUP_INTERVAL_SECONDS": "3600",

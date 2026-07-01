@@ -42,6 +42,7 @@ from enrichment_connectors import (
     aggregate_generation_memory,
     extract_event_memory_facts,
     merge_memory_summaries,
+    normalize_memory_summary,
 )
 
 # Whether to attach OS/host attributes to every span in addition to resource attributes.
@@ -385,6 +386,20 @@ _INPUT_ALIASES = {
     "cacheReadInputTokens": "cache_read_input_tokens",
     "workspacePath": "workspace_path",
     "filePath": "file_path",
+    "userId": "user_id",
+    "userEmail": "user_email",
+    "userName": "user_name",
+    "permissionMode": "permission_mode",
+    "permissionDecision": "permission_decision",
+    "approvalPolicy": "approval_policy",
+    "approvalDecision": "approval_decision",
+    "approvalRequired": "approval_required",
+    "sandboxMode": "sandbox_mode",
+    "sandboxPolicy": "sandbox_policy",
+    "sandboxEnabled": "sandbox_enabled",
+    "isSandboxed": "is_sandboxed",
+    "toolChoice": "tool_choice",
+    "toolDecision": "tool_decision",
     "exitCode": "exit_code",
     "durationMs": "duration_ms",
     "loopCount": "loop_count",
@@ -559,6 +574,225 @@ def _lower_or_none(value: Optional[str]) -> Optional[str]:
         return None
     lowered = value.strip().lower()
     return lowered or None
+
+
+def _iter_enrichment_sources(data: Optional[dict], include_tool_payloads: bool = False):
+    if not isinstance(data, dict):
+        return
+    yield data
+    metadata = data.get("metadata")
+    if isinstance(metadata, dict):
+        yield metadata
+    user = data.get("user")
+    if isinstance(user, dict):
+        yield user
+    if include_tool_payloads:
+        for key in ("tool_input", "tool_response"):
+            value = data.get(key)
+            if isinstance(value, dict):
+                yield value
+
+
+def _coerce_attribute_value(value):
+    if isinstance(value, str):
+        stripped = value.strip()
+        return stripped or None
+    return value
+
+
+def _path_search_root(path: str) -> Optional[str]:
+    if not isinstance(path, str) or not path.strip():
+        return None
+    expanded = os.path.abspath(path.strip())
+    if os.path.isdir(expanded):
+        return expanded
+    return os.path.dirname(expanded) or expanded
+
+
+def _candidate_repo_paths(data: Optional[dict]) -> list[str]:
+    if not isinstance(data, dict):
+        return []
+    candidates: list[str] = []
+    cwd = data.get("cwd") or data.get("workspace_path")
+    if isinstance(cwd, str) and cwd.strip():
+        candidates.append(cwd.strip())
+
+    def _append_path(value) -> None:
+        if not isinstance(value, str) or not value.strip():
+            return
+        raw = value.strip()
+        if os.path.isabs(raw):
+            candidates.append(raw)
+            return
+        if isinstance(cwd, str) and cwd.strip() and os.path.isabs(cwd.strip()):
+            candidates.append(os.path.join(cwd.strip(), raw))
+
+    _append_path(data.get("file_path"))
+    edits = data.get("edits")
+    if isinstance(edits, list):
+        for entry in edits:
+            if isinstance(entry, dict):
+                _append_path(entry.get("file_path") or entry.get("path"))
+    elif isinstance(edits, dict):
+        _append_path(edits.get("file_path") or edits.get("path"))
+    return candidates
+
+
+def _git_command_output(args: list[str], cwd: str) -> Optional[str]:
+    try:
+        result = subprocess.run(
+            args,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return None
+    if result.returncode != 0:
+        return None
+    output = result.stdout.strip()
+    return output or None
+
+
+def _parse_repository_remote(remote_url: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+    if not isinstance(remote_url, str) or not remote_url.strip():
+        return None, None
+    normalized = remote_url.strip()
+    is_network_remote = False
+    if "://" in normalized:
+        is_network_remote = True
+        path = urllib.parse.urlparse(normalized).path or ""
+    elif "@" in normalized and ":" in normalized.split("@", 1)[1]:
+        is_network_remote = True
+        path = normalized.split(":", 1)[1]
+    else:
+        path = normalized
+    path = path.strip().strip("/")
+    if path.endswith(".git"):
+        path = path[:-4]
+    parts = [part for part in path.split("/") if part]
+    if not parts:
+        return None, None
+    owner = parts[-2] if is_network_remote and len(parts) >= 2 else None
+    return owner, parts[-1]
+
+
+def _resolve_repository_context(data: Optional[dict] = None, session_ctx: Optional[dict] = None) -> dict:
+    repo_ctx: dict[str, str] = {}
+    if session_ctx:
+        for key in ("repo_root", "vcs.repository.owner", "vcs.repository.name"):
+            value = session_ctx.get(key)
+            if isinstance(value, str) and value.strip():
+                repo_ctx[key] = value.strip()
+    if "repo_root" not in repo_ctx:
+        for candidate in _candidate_repo_paths(data):
+            search_root = _path_search_root(candidate)
+            if not search_root:
+                continue
+            repo_root = _find_repo_root(search_root)
+            if repo_root and any(os.path.exists(os.path.join(repo_root, marker)) for marker in _REPO_MARKERS):
+                repo_ctx["repo_root"] = repo_root
+                break
+    repo_root = repo_ctx.get("repo_root")
+    if not repo_root:
+        return repo_ctx
+    git_root = _git_command_output(["git", "rev-parse", "--show-toplevel"], cwd=repo_root)
+    if git_root:
+        repo_ctx["repo_root"] = git_root
+        if "vcs.repository.name" not in repo_ctx or "vcs.repository.owner" not in repo_ctx:
+            remote_url = _git_command_output(["git", "config", "--get", "remote.origin.url"], cwd=git_root)
+            owner, name = _parse_repository_remote(remote_url)
+            if owner and "vcs.repository.owner" not in repo_ctx:
+                repo_ctx["vcs.repository.owner"] = owner
+            if name and "vcs.repository.name" not in repo_ctx:
+                repo_ctx["vcs.repository.name"] = name
+        if "vcs.repository.name" not in repo_ctx:
+            repo_name = os.path.basename(git_root.rstrip(os.sep))
+            if repo_name:
+                repo_ctx["vcs.repository.name"] = repo_name
+    return repo_ctx
+
+
+def _collect_repository_attributes(data: Optional[dict] = None, session_ctx: Optional[dict] = None) -> dict:
+    attrs: dict[str, str] = {}
+    repo_ctx = _resolve_repository_context(data, session_ctx=session_ctx)
+    for key in ("vcs.repository.owner", "vcs.repository.name"):
+        value = repo_ctx.get(key)
+        if value:
+            attrs[key] = value
+    return attrs
+
+
+def _collect_user_identity_attributes(data: Optional[dict]) -> dict:
+    if not _safe_bool(os.getenv("IDE_OTEL_CAPTURE_USER_IDENTITY", "")):
+        return {}
+    attrs = {}
+    user_id = None
+    user_email = None
+    user = data.get("user") if isinstance(data, dict) else None
+    if isinstance(user, dict):
+        user_id = _first_present(user, ("user_id", "id", "login", "username", "user_name", "actor_id"))
+        user_email = _first_present(user, ("user_email", "email"))
+    sources = []
+    if isinstance(data, dict):
+        sources.append(data)
+        metadata = data.get("metadata")
+        if isinstance(metadata, dict):
+            sources.append(metadata)
+    for source in sources:
+        if user_id is None:
+            user_id = _first_present(source, ("user_id", "login", "username", "user_name", "actor_id"))
+        if user_email is None:
+            user_email = _first_present(source, ("user_email", "email"))
+        if user_id is not None and user_email is not None:
+            break
+    user_id = _coerce_attribute_value(user_id)
+    if user_id is not None:
+        attrs["user.id"] = str(user_id)
+    user_email = _coerce_attribute_value(user_email)
+    if isinstance(user_email, str):
+        if _safe_bool(os.getenv("IDE_OTEL_MASK_PROMPTS", "")):
+            user_email = _mask_text(user_email)
+        attrs["user.email"] = user_email
+    return attrs
+
+
+def _collect_governance_attributes(data: Optional[dict]) -> dict:
+    if not isinstance(data, dict):
+        return {}
+    attrs = {}
+    attr_map = (
+        (("permission_mode",), "gen_ai.client.permission_mode"),
+        (("permission_decision", "approval_decision"), "gen_ai.client.approval.decision"),
+        (("approval_policy",), "gen_ai.client.approval.policy"),
+        (("approval_required", "requires_approval"), "gen_ai.client.approval.required"),
+        (("sandbox_mode",), "gen_ai.client.sandbox.mode"),
+        (("sandbox_policy",), "gen_ai.client.sandbox.policy"),
+        (("sandbox_enabled", "is_sandboxed", "sandboxed"), "gen_ai.client.sandbox.enabled"),
+        (("tool_choice",), "gen_ai.client.tool_choice"),
+        (("tool_decision",), "gen_ai.client.tool_decision"),
+    )
+    for source in _iter_enrichment_sources(data, include_tool_payloads=True):
+        for keys, attr_name in attr_map:
+            if attr_name in attrs:
+                continue
+            value = _coerce_attribute_value(_first_present(source, keys))
+            if value is not None:
+                attrs[attr_name] = value
+    return attrs
+
+
+def _collect_event_enrichment_attributes(data: Optional[dict] = None, session_ctx: Optional[dict] = None) -> dict:
+    attrs = _collect_repository_attributes(data, session_ctx=session_ctx)
+    attrs.update(_collect_user_identity_attributes(data))
+    attrs.update(_collect_governance_attributes(data))
+    return attrs
+
+
+def _apply_enrichment_attributes(span, data: Optional[dict] = None, session_ctx: Optional[dict] = None) -> None:
+    for key, value in _collect_event_enrichment_attributes(data, session_ctx=session_ctx).items():
+        _set_if_present(span, key, value)
 
 
 def _normalize_genai_output_type(value) -> Optional[str]:
@@ -781,9 +1015,8 @@ def _resolved_agent_engine(
         return resolved
     if session_ctx:
         session_engine = _normalize_ide_name(session_ctx.get("agent_engine"))
-        if session_engine and ide and session_engine != ide and not _has_strong_engine_signal(payload, session_engine):
-            return None
-        return session_engine
+        if session_engine and session_ctx.get("agent_engine_confirmed"):
+            return session_engine
     return None
 
 def _resolve_client_name(
@@ -1578,7 +1811,11 @@ def _force_flush_provider(timeout_millis: int = 500) -> None:
         _LOGGER.warning("log force_flush failed: %s", exc)
 
 
-def _init_tracing(ide: str = "cursor", client_name: Optional[str] = None) -> bool:
+def _init_tracing(
+    ide: str = "cursor",
+    client_name: Optional[str] = None,
+    resource_attributes: Optional[dict] = None,
+) -> bool:
     global _TRACING_INITIALIZED
     if _TRACING_INITIALIZED:
         return True
@@ -1593,6 +1830,10 @@ def _init_tracing(ide: str = "cursor", client_name: Optional[str] = None) -> boo
     app_name = os.getenv("IDE_OTEL_APP_NAME") or os.getenv("OTEL_SERVICE_NAME") or "ide-agent"
     resolved_client_name = client_name or ide
     resource_attrs = _parse_resource_attributes(os.getenv("OTEL_RESOURCE_ATTRIBUTES", ""))
+    if isinstance(resource_attributes, dict):
+        for key, value in resource_attributes.items():
+            if key and value is not None:
+                resource_attrs.setdefault(key, value)
     resource_attrs.setdefault("service.name", app_name)
     resource_attrs.setdefault("gen_ai.client.name", resolved_client_name)
     resource_attrs.setdefault("gen_ai.system", resolved_client_name)
@@ -1715,7 +1956,7 @@ def _fmt_duration(duration) -> str:
     return f"{duration}ms"
 
 
-def _emit_mcp_log(event_name: str, data: dict) -> None:
+def _emit_mcp_log(event_name: str, data: dict, session_ctx: Optional[dict] = None) -> None:
     """Emit a structured OTel log record for MCP events with full I/O payload.
 
     Cursor sends MCP events with these field names:
@@ -1738,6 +1979,7 @@ def _emit_mcp_log(event_name: str, data: dict) -> None:
         "gen_ai.client.mcp_tool": tool,
         "gen_ai.client.hook.event": event_name,
     }
+    attrs.update(_collect_event_enrichment_attributes(data, session_ctx=session_ctx))
     _tid, _sid = _inject_trace_context(attrs)
 
     # Capture input payload
@@ -1794,7 +2036,7 @@ def _emit_mcp_log(event_name: str, data: dict) -> None:
         logger.info("[%s] MCP result: %s/%s duration=%s", _sid, server, tool, _fmt_duration(duration), extra=attrs)
 
 
-def _emit_shell_log(event_name: str, data: dict) -> None:
+def _emit_shell_log(event_name: str, data: dict, session_ctx: Optional[dict] = None) -> None:
     """Emit a structured OTel log record for shell execution events."""
     if not _LOGS_INITIALIZED:
         return
@@ -1808,6 +2050,7 @@ def _emit_shell_log(event_name: str, data: dict) -> None:
         "gen_ai.client.command": command,
         "gen_ai.client.cwd": cwd,
     }
+    attrs.update(_collect_event_enrichment_attributes(data, session_ctx=session_ctx))
     _tid, _sid = _inject_trace_context(attrs)
 
     exit_code = data.get("exit_code")
@@ -1838,7 +2081,7 @@ def _emit_shell_log(event_name: str, data: dict) -> None:
         logger.info("[%s] Shell result: %s exit=%s duration=%s", _sid, command, exit_code, _fmt_duration(duration), extra=attrs)
 
 
-def _emit_tool_log(event_name: str, data: dict) -> None:
+def _emit_tool_log(event_name: str, data: dict, session_ctx: Optional[dict] = None) -> None:
     """Emit a structured OTel log record for tool use events."""
     if not _LOGS_INITIALIZED:
         return
@@ -1850,6 +2093,7 @@ def _emit_tool_log(event_name: str, data: dict) -> None:
         "gen_ai.client.hook.event": event_name,
         "gen_ai.client.tool_name": tool_name,
     }
+    attrs.update(_collect_event_enrichment_attributes(data, session_ctx=session_ctx))
     _tid, _sid = _inject_trace_context(attrs)
 
     for key in ("tool_id", "tool_use_id"):
@@ -1888,19 +2132,20 @@ def _emit_tool_log(event_name: str, data: dict) -> None:
         logger.info("[%s] Tool result: %s duration=%s", _sid, tool_name, _fmt_duration(duration), extra=attrs)
 
 
-def _emit_event_log(event_name: str, data: dict) -> None:
+def _emit_event_log(event_name: str, data: dict, session_ctx: Optional[dict] = None) -> None:
     """Emit OTel log records for hook events (dispatcher)."""
     if not _LOGS_INITIALIZED:
         return
     if event_name in _MCP_EVENTS:
-        _emit_mcp_log(event_name, data)
+        _emit_mcp_log(event_name, data, session_ctx=session_ctx)
     elif event_name in _SHELL_EVENTS:
-        _emit_shell_log(event_name, data)
+        _emit_shell_log(event_name, data, session_ctx=session_ctx)
     elif event_name in _TOOL_EVENTS:
-        _emit_tool_log(event_name, data)
+        _emit_tool_log(event_name, data, session_ctx=session_ctx)
     elif _safe_bool(os.getenv("IDE_OTEL_LOG_ALL_EVENTS", "")):
         logger = _get_otel_logger("events")
         all_attrs = {"gen_ai.client.hook.event": event_name}
+        all_attrs.update(_collect_event_enrichment_attributes(data, session_ctx=session_ctx))
         _tid, _sid = _inject_trace_context(all_attrs)
         logger.info("[%s] Hook event: %s", _sid, event_name, extra=all_attrs)
 
@@ -2061,9 +2306,12 @@ def _create_session_context(session_key: str, data: dict, ide: str) -> dict:
     if model := _first_present(data, ("request_model", "model", "model_name")):
         ctx["last_known_model"] = model
 
-    agent_engine = _detect_agent_engine(data)
+    ctx.update(_resolve_repository_context(data))
+
+    agent_engine = _resolved_agent_engine(data, ide=ide)
     if agent_engine and agent_engine != ide:
         ctx["agent_engine"] = agent_engine
+        ctx["agent_engine_confirmed"] = True
     lock_path = os.path.join(_LOCK_DIR, f"{re.sub(r'[^A-Za-z0-9_.-]+', '_', session_key)}.lock")
     with _acquire_lock(lock_path):
         _atomic_write_json(_session_path(session_key), ctx)
@@ -2088,6 +2336,27 @@ def _write_session_context(session_key: str, ctx: dict) -> None:
     lock_path = os.path.join(_LOCK_DIR, f"{re.sub(r'[^A-Za-z0-9_.-]+', '_', session_key)}.lock")
     with _acquire_lock(lock_path):
         _atomic_write_json(_session_path(session_key), ctx)
+
+
+def _maybe_enrich_session_context(session_key: Optional[str], session_ctx: Optional[dict], data: dict) -> Optional[dict]:
+    if not session_key or not session_ctx:
+        return session_ctx
+    repo_ctx = _resolve_repository_context(data, session_ctx=session_ctx)
+    changed = False
+    for key in ("repo_root", "vcs.repository.owner", "vcs.repository.name"):
+        value = repo_ctx.get(key)
+        if value and session_ctx.get(key) != value:
+            session_ctx[key] = value
+            changed = True
+    repo_root = session_ctx.get("repo_root")
+    if repo_root and isinstance(session_ctx.get("memory"), dict):
+        before = json.dumps(session_ctx["memory"], sort_keys=True)
+        normalize_memory_summary(session_ctx["memory"], repo_root=repo_root)
+        if json.dumps(session_ctx["memory"], sort_keys=True) != before:
+            changed = True
+    if changed:
+        _write_session_context(session_key, session_ctx)
+    return session_ctx
 
 
 def _maybe_bind_session_to_upstream_context(session_key: Optional[str], session_ctx: Optional[dict], data: dict) -> Optional[dict]:
@@ -2617,6 +2886,7 @@ def _populate_span(span, event_name: str, data: dict, ide: str, session_ctx: Opt
     """Attach all attributes to a span and emit OTel log records."""
     span.set_attribute("gen_ai.client.hook.event", event_name)
     _set_client_identity_attributes(span, ide, data=data, session_ctx=session_ctx)
+    _apply_enrichment_attributes(span, data, session_ctx=session_ctx)
 
     # Optionally attach OS / host attributes on every span.
     # These are already present as resource attributes via OTEL_RESOURCE_ATTRIBUTES,
@@ -2631,7 +2901,7 @@ def _populate_span(span, event_name: str, data: dict, ide: str, session_ctx: Opt
     _set_if_present(span, "gen_ai.client.version", client_version)
 
     # Emit structured OTel log record (MCP, shell, tool — correlated with this span)
-    _emit_event_log(event_name, data)
+    _emit_event_log(event_name, data, session_ctx=session_ctx)
     _set_if_present(span, "gen_ai.client.session_id", data.get("session_id") or data.get("conversation_id"))
     _set_if_present(span, "gen_ai.client.generation_id", data.get("generation_id"))
     _set_if_present(span, "gen_ai.client.turn_id", data.get("turn_id"))
@@ -2745,9 +3015,9 @@ def _extract_event_memory_facts(event_name: str, data: dict) -> dict:
     return extract_event_memory_facts(event_name, data)
 
 
-def _aggregate_generation_memory(batch: list) -> dict:
+def _aggregate_generation_memory(batch: list, repo_root: Optional[str] = None) -> dict:
     """Backward-compatible wrapper for connector-based enrichment."""
-    return aggregate_generation_memory(batch)
+    return aggregate_generation_memory(batch, repo_root=repo_root)
 
 
 def _apply_memory_summary_attrs(span, prefix: str, summary: dict) -> None:
@@ -2801,7 +3071,8 @@ def _flush_generation(tracer, gen_key: str, session_ctx: Optional[dict], ide: st
          if _first_present(e["data"], ("request_model", "model", "model_name"))),
         None
     )
-    memory_summary = _aggregate_generation_memory(batch)
+    repo_root = (session_ctx or {}).get("repo_root")
+    memory_summary = _aggregate_generation_memory(batch, repo_root=repo_root)
 
     span_kind = SpanKind.INTERNAL if SpanKind is not None else None
     gen_span = tracer.start_span(
@@ -2814,7 +3085,8 @@ def _flush_generation(tracer, gen_key: str, session_ctx: Optional[dict], ide: st
         gen_span.set_attribute("gen_ai.client.event.count", len(batch))
         _set_if_present(gen_span, "gen_ai.request.model", batch_model)
         _apply_memory_summary_attrs(gen_span, "gen_ai.client.memory", memory_summary)
-        _set_client_identity_attributes(gen_span, ide, agent_engine=(session_ctx or {}).get("agent_engine"))
+        _set_client_identity_attributes(gen_span, ide, session_ctx=session_ctx)
+        _apply_enrichment_attributes(gen_span, batch[0].get("data") if batch else {}, session_ctx=session_ctx)
         _log_with_span(_LOGGER, logging.INFO, gen_span, "Generation span: gen_key=%s events=%d", gen_key, len(batch))
 
         for idx, entry in enumerate(batch):
@@ -2836,7 +3108,7 @@ def _flush_generation(tracer, gen_key: str, session_ctx: Optional[dict], ide: st
 
     if session_ctx is not None:
         session_memory = session_ctx.setdefault("memory", {})
-        merge_memory_summaries(session_memory, memory_summary)
+        merge_memory_summaries(session_memory, memory_summary, repo_root=repo_root)
 
     if flush:
         _force_flush_provider()
@@ -2857,9 +3129,10 @@ def _flush_session(tracer, session_key: str, session_ctx: dict, ide: str, flush:
     )
     with _span_context(session_span):
         session_span.set_attribute("gen_ai.client.session_id", session_key)
-        _set_client_identity_attributes(session_span, ide, agent_engine=session_ctx.get("agent_engine"))
+        _set_client_identity_attributes(session_span, ide, session_ctx=session_ctx)
         session_span.set_attribute("gen_ai.client.generation_count", session_ctx.get("generation_count", 0))
         session_span.set_attribute("gen_ai.client.session.duration_ms", (end_ns - start_ns) // 1_000_000)
+        _apply_enrichment_attributes(session_span, {}, session_ctx=session_ctx)
         _apply_memory_summary_attrs(session_span, "gen_ai.client.memory", session_ctx.get("memory", {}))
         _log_with_span(_LOGGER, logging.INFO, session_span, "Session span: session=%s", session_key)
         session_span.end(end_time=end_ns)
@@ -2891,6 +3164,7 @@ def main() -> int:
     sk = _session_key(data)
     session_ctx = _load_session_context(sk)
     session_ctx = _maybe_bind_session_to_upstream_context(sk, session_ctx, data)
+    session_ctx = _maybe_enrich_session_context(sk, session_ctx, data)
     agent_engine = _resolved_agent_engine(data, session_ctx, ide=ide)
 
     if _safe_bool(os.getenv("IDE_OTEL_LOG_EVENTS", "")):
@@ -2925,7 +3199,11 @@ def main() -> int:
                 _emit_stdout_response(event_name, ide, data)
                 return 0
 
-    if not _init_tracing(ide, client_name=_resolve_client_name(ide, data=data, agent_engine=agent_engine, session_ctx=session_ctx)):
+    if not _init_tracing(
+        ide,
+        client_name=_resolve_client_name(ide, data=data, agent_engine=agent_engine, session_ctx=session_ctx),
+        resource_attributes=_collect_repository_attributes(data, session_ctx=session_ctx),
+    ):
         _emit_stdout_response(event_name, ide, data)
         return 0
 
@@ -2936,9 +3214,11 @@ def main() -> int:
     _flush_stale_sessions(tracer)
 
     try:
-        if sk and session_ctx and agent_engine and agent_engine != ide and session_ctx.get("agent_engine") != agent_engine:
-            session_ctx["agent_engine"] = agent_engine
-            _write_session_context(sk, session_ctx)
+        if sk and session_ctx and agent_engine and agent_engine != ide:
+            if session_ctx.get("agent_engine") != agent_engine or not session_ctx.get("agent_engine_confirmed"):
+                session_ctx["agent_engine"] = agent_engine
+                session_ctx["agent_engine_confirmed"] = True
+                _write_session_context(sk, session_ctx)
 
         # Update last_known_model if present in current event (Fix A)
         if sk and session_ctx:

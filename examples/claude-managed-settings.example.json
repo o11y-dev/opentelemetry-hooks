@@ -1,0 +1,13 @@
+{
+  "_comment": "Minimal Claude Code managed-settings.json snippet for org-wide Claude telemetry.",
+  "_comment_2": "This configures Claude Code itself. otel-hook still reads its own otel_config.json because Claude strips OTEL_* from hook subprocesses.",
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "env": {
+    "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+    "OTEL_METRICS_EXPORTER": "otlp",
+    "OTEL_LOGS_EXPORTER": "otlp",
+    "OTEL_EXPORTER_OTLP_PROTOCOL": "grpc",
+    "OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector.example.com:4317",
+    "OTEL_EXPORTER_OTLP_HEADERS": "Authorization=******"
+  }
+}

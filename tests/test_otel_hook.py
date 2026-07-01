@@ -117,6 +117,21 @@ class TestMemoryAggregation:
         assert session["commands"] == ["pytest -q"]
         assert session["tool_counts"]["read"] == 2
 
+    def test_connector_normalizes_repo_relative_paths(self, tmp_path):
+        repo_root = tmp_path / "repo"
+        file_path = repo_root / "src" / "main.py"
+        summary = enrichment_connectors.aggregate_generation_memory(
+            [{"event": "AfterFileEdit", "data": {"file_path": str(file_path)}}],
+            repo_root=str(repo_root),
+        )
+        assert summary["files"] == ["src/main.py"]
+
+    def test_merge_normalizes_existing_files_once_repo_root_known(self, tmp_path):
+        repo_root = tmp_path / "repo"
+        target = {"files": [str(repo_root / "README.md")], "tool_counts": {}}
+        enrichment_connectors.merge_memory_summaries(target, {"files": [], "tool_counts": {}}, repo_root=str(repo_root))
+        assert target["files"] == ["README.md"]
+
 # ── Event normalization ───────────────────────────────────────────────────
 
 
@@ -155,6 +170,12 @@ class TestNormalizeInputData:
             "cacheCreationInputTokens": 3,
             "cacheReadInputTokens": 2,
             "agentName": "planner",
+            "userId": "user-1",
+            "userEmail": "user@example.com",
+            "permissionMode": "acceptEdits",
+            "approvalDecision": "approved",
+            "sandboxMode": "workspace-write",
+            "toolChoice": "required",
             "hookEventType": "PreToolUse",
             "traceId": "a" * 32,
             "spanId": "b" * 16,
@@ -174,6 +195,12 @@ class TestNormalizeInputData:
         assert data["cache_creation_input_tokens"] == 3
         assert data["cache_read_input_tokens"] == 2
         assert data["agent_name"] == "planner"
+        assert data["user_id"] == "user-1"
+        assert data["user_email"] == "user@example.com"
+        assert data["permission_mode"] == "acceptEdits"
+        assert data["approval_decision"] == "approved"
+        assert data["sandbox_mode"] == "workspace-write"
+        assert data["tool_choice"] == "required"
         assert data["hook_event_type"] == "PreToolUse"
         assert data["trace_id"] == "a" * 32
         assert data["span_id"] == "b" * 16
@@ -905,6 +932,62 @@ class TestClientIdentityAttributes:
         assert "gen_ai.client.wrapper" not in attrs
         assert "gen_ai.client.agent_engine" not in attrs
 
+    def test_session_context_engine_promotes_nested_client_identity(self):
+        span = mock.MagicMock()
+
+        otel_hook._set_client_identity_attributes(
+            span,
+            "claude",
+            data={"session_id": "sess-1"},
+            session_ctx={"agent_engine": "gemini", "agent_engine_confirmed": True},
+        )
+
+        attrs = self._attrs(span)
+        assert attrs["gen_ai.client.name"] == "gemini"
+        assert attrs["gen_ai.client.wrapper"] == "claude"
+        assert attrs["gen_ai.client.agent_engine"] == "gemini"
+
+
+class TestRepositoryEnrichment:
+    def test_resolve_repository_context_uses_git_remote(self, monkeypatch, tmp_path):
+        repo_root = tmp_path / "repo"
+        repo_root.mkdir()
+        (repo_root / ".git").mkdir()
+
+        def fake_run(args, **kwargs):
+            if args == ["git", "rev-parse", "--show-toplevel"]:
+                return mock.Mock(returncode=0, stdout=f"{repo_root}\n")
+            if args == ["git", "config", "--get", "remote.origin.url"]:
+                return mock.Mock(returncode=0, stdout="git@github.com:o11y-dev/opentelemetry-hooks.git\n")
+            raise AssertionError(f"unexpected git command: {args}")
+
+        monkeypatch.setattr(otel_hook, "_find_repo_root", lambda _cwd: str(repo_root))
+        monkeypatch.setattr(otel_hook.subprocess, "run", fake_run)
+
+        ctx = otel_hook._resolve_repository_context({"cwd": str(repo_root)})
+
+        assert ctx["repo_root"] == str(repo_root)
+        assert ctx["vcs.repository.owner"] == "o11y-dev"
+        assert ctx["vcs.repository.name"] == "opentelemetry-hooks"
+
+    def test_resolve_repository_context_skips_vcs_attrs_for_marker_only_project(self, monkeypatch, tmp_path):
+        project_root = tmp_path / "project"
+        project_root.mkdir()
+        (project_root / ".claude").mkdir()
+
+        monkeypatch.setattr(otel_hook, "_find_repo_root", lambda _cwd: str(project_root))
+        monkeypatch.setattr(
+            otel_hook,
+            "_git_command_output",
+            lambda args, cwd: None if args[:3] == ["git", "rev-parse", "--show-toplevel"] else None,
+        )
+
+        ctx = otel_hook._resolve_repository_context({"cwd": str(project_root)})
+
+        assert ctx["repo_root"] == str(project_root)
+        assert "vcs.repository.owner" not in ctx
+        assert "vcs.repository.name" not in ctx
+
 
 # ── Log endpoint derivation ───────────────────────────────────────────────
 
@@ -1070,6 +1153,16 @@ class TestSessionContext:
                 loaded = otel_hook._load_session_context("sess-bind")
                 assert loaded["trace_id"] == "d" * 32
                 assert loaded["upstream_parent_span_id"] == "e" * 16
+
+    def test_create_session_context_requires_confirmed_nested_engine(self, tmp_path):
+        with mock.patch.object(otel_hook, "_SESSION_DIR", str(tmp_path)):
+            with mock.patch.object(otel_hook, "_LOCK_DIR", str(tmp_path / "locks")):
+                ctx = otel_hook._create_session_context(
+                    "sess-engine",
+                    {"transcript_path": "/tmp/transcript.jsonl"},
+                    "cursor",
+                )
+                assert "agent_engine" not in ctx
 
 
 class TestUpstreamTraceContext:
@@ -1808,6 +1901,74 @@ class TestSetCodexToolAttrs:
 
     def test_permission_request_in_tool_events(self):
         assert "PermissionRequest" in otel_hook._TOOL_EVENTS
+
+
+class TestEventEnrichmentAttributes:
+    def test_user_identity_capture_is_opt_in(self, monkeypatch):
+        monkeypatch.delenv("IDE_OTEL_CAPTURE_USER_IDENTITY", raising=False)
+        attrs = otel_hook._collect_event_enrichment_attributes({
+            "user_id": "user-1",
+            "user_email": "user@example.com",
+        })
+        assert "user.id" not in attrs
+        assert "user.email" not in attrs
+
+    def test_collects_user_and_governance_attributes(self, monkeypatch):
+        monkeypatch.setenv("IDE_OTEL_CAPTURE_USER_IDENTITY", "1")
+        attrs = otel_hook._collect_event_enrichment_attributes({
+            "user": {"id": "user-1", "email": "user@example.com"},
+            "permission_mode": "acceptEdits",
+            "permission_decision": "approved",
+            "approval_policy": "manual",
+            "approval_required": True,
+            "sandbox_mode": "workspace-write",
+            "sandbox_policy": "strict",
+            "tool_choice": "required",
+            "tool_decision": "auto",
+        })
+        assert attrs["user.id"] == "user-1"
+        assert attrs["user.email"] == "user@example.com"
+        assert attrs["gen_ai.client.permission_mode"] == "acceptEdits"
+        assert attrs["gen_ai.client.approval.decision"] == "approved"
+        assert attrs["gen_ai.client.approval.policy"] == "manual"
+        assert attrs["gen_ai.client.approval.required"] is True
+        assert attrs["gen_ai.client.sandbox.mode"] == "workspace-write"
+        assert attrs["gen_ai.client.sandbox.policy"] == "strict"
+        assert attrs["gen_ai.client.tool_choice"] == "required"
+        assert attrs["gen_ai.client.tool_decision"] == "auto"
+
+    def test_nested_user_id_wins_over_top_level_object_id(self, monkeypatch):
+        monkeypatch.setenv("IDE_OTEL_CAPTURE_USER_IDENTITY", "1")
+        attrs = otel_hook._collect_event_enrichment_attributes({
+            "id": "response-123",
+            "user": {"id": "user-1", "email": "user@example.com"},
+        })
+        assert attrs["user.id"] == "user-1"
+        assert attrs["user.email"] == "user@example.com"
+
+    def test_tool_logs_include_enrichment_attributes(self, monkeypatch):
+        monkeypatch.setenv("IDE_OTEL_CAPTURE_USER_IDENTITY", "1")
+        monkeypatch.setattr(otel_hook, "_LOGS_INITIALIZED", True)
+        monkeypatch.setattr(otel_hook, "_inject_trace_context", lambda attrs: ("trace", "span"))
+        logger = mock.MagicMock()
+        monkeypatch.setattr(otel_hook, "_get_otel_logger", lambda _name: logger)
+
+        otel_hook._emit_tool_log(
+            "PermissionRequest",
+            {
+                "tool_name": "bash",
+                "user_id": "user-1",
+                "permission_mode": "acceptEdits",
+                "sandbox_mode": "workspace-write",
+            },
+            session_ctx={"vcs.repository.name": "opentelemetry-hooks"},
+        )
+
+        extra = logger.info.call_args.kwargs["extra"]
+        assert extra["user.id"] == "user-1"
+        assert extra["gen_ai.client.permission_mode"] == "acceptEdits"
+        assert extra["gen_ai.client.sandbox.mode"] == "workspace-write"
+        assert extra["vcs.repository.name"] == "opentelemetry-hooks"
 
 
 # ── New IDE name aliases ─────────────────────────────────────────────────
