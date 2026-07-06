@@ -18,6 +18,11 @@ import enrichment_connectors
 import otel_hook
 
 
+@pytest.fixture(autouse=True)
+def _disable_process_tree_detection(monkeypatch):
+    monkeypatch.setattr(otel_hook, "_detect_ide_from_process_tree", lambda: None)
+
+
 # ── Helper functions ──────────────────────────────────────────────────────
 
 
@@ -833,7 +838,7 @@ class TestGenAISemconv:
         attrs = self._attrs(span)
         assert attrs["gen_ai.system"] == "gemini"
 
-    def test_cursor_with_claude_engine_keeps_cursor_as_genai_system(self):
+    def test_cursor_with_unconfirmed_claude_engine_keeps_cursor_as_genai_system(self):
         span = mock.MagicMock()
 
         otel_hook._apply_genai_semconv(
@@ -841,7 +846,7 @@ class TestGenAISemconv:
             "PreToolUse",
             {"transcript_path": "/tmp/transcript.jsonl"},
             "cursor",
-            session_ctx={"agent_engine": "claude"},
+            session_ctx={"agent_engine": "claude", "agent_engine_confirmed": False},
         )
 
         attrs = self._attrs(span)
@@ -947,6 +952,36 @@ class TestClientIdentityAttributes:
         assert attrs["gen_ai.client.wrapper"] == "claude"
         assert attrs["gen_ai.client.agent_engine"] == "gemini"
 
+    def test_legacy_session_context_engine_promotes_nested_client_identity(self):
+        span = mock.MagicMock()
+
+        otel_hook._set_client_identity_attributes(
+            span,
+            "claude",
+            data={"session_id": "sess-1"},
+            session_ctx={"agent_engine": "gemini"},
+        )
+
+        attrs = self._attrs(span)
+        assert attrs["gen_ai.client.name"] == "gemini"
+        assert attrs["gen_ai.client.wrapper"] == "claude"
+        assert attrs["gen_ai.client.agent_engine"] == "gemini"
+
+    def test_unconfirmed_session_context_engine_keeps_outer_client_identity(self):
+        span = mock.MagicMock()
+
+        otel_hook._set_client_identity_attributes(
+            span,
+            "claude",
+            data={"session_id": "sess-1"},
+            session_ctx={"agent_engine": "gemini", "agent_engine_confirmed": False},
+        )
+
+        attrs = self._attrs(span)
+        assert attrs["gen_ai.client.name"] == "claude"
+        assert "gen_ai.client.wrapper" not in attrs
+        assert "gen_ai.client.agent_engine" not in attrs
+
 
 class TestRepositoryEnrichment:
     def test_resolve_repository_context_uses_git_remote(self, monkeypatch, tmp_path):
@@ -970,6 +1005,28 @@ class TestRepositoryEnrichment:
         assert ctx["vcs.repository.owner"] == "o11y-dev"
         assert ctx["vcs.repository.name"] == "opentelemetry-hooks"
 
+    def test_resolve_repository_context_reuses_complete_session_context(self, monkeypatch, tmp_path):
+        repo_root = tmp_path / "repo"
+        session_ctx = {
+            "repo_root": str(repo_root),
+            "vcs.repository.owner": "o11y-dev",
+            "vcs.repository.name": "opentelemetry-hooks",
+        }
+        monkeypatch.setattr(
+            otel_hook,
+            "_find_repo_root",
+            mock.Mock(side_effect=AssertionError("unexpected root lookup")),
+        )
+        monkeypatch.setattr(
+            otel_hook,
+            "_git_command_output",
+            mock.Mock(side_effect=AssertionError("unexpected git lookup")),
+        )
+
+        ctx = otel_hook._resolve_repository_context({"cwd": str(repo_root)}, session_ctx=session_ctx)
+
+        assert ctx == session_ctx
+
     def test_resolve_repository_context_skips_vcs_attrs_for_marker_only_project(self, monkeypatch, tmp_path):
         project_root = tmp_path / "project"
         project_root.mkdir()
@@ -979,7 +1036,7 @@ class TestRepositoryEnrichment:
         monkeypatch.setattr(
             otel_hook,
             "_git_command_output",
-            lambda args, cwd: None if args[:3] == ["git", "rev-parse", "--show-toplevel"] else None,
+            mock.Mock(side_effect=AssertionError("unexpected git lookup")),
         )
 
         ctx = otel_hook._resolve_repository_context({"cwd": str(project_root)})

@@ -29,7 +29,8 @@ def normalize_memory_path(path: str, repo_root: str | None = None) -> str:
             if os.path.commonpath([candidate_abs, repo_root_abs]) == repo_root_abs:
                 normalized = os.path.relpath(candidate_abs, repo_root_abs)
         except ValueError:
-            pass
+            # Paths on different drives cannot be relativized; keep the absolute candidate.
+            normalized = candidate_abs
     normalized = os.path.normpath(normalized)
     return normalized.replace(os.sep, "/")
 

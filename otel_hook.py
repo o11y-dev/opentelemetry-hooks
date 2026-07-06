@@ -685,6 +685,8 @@ def _resolve_repository_context(data: Optional[dict] = None, session_ctx: Option
             value = session_ctx.get(key)
             if isinstance(value, str) and value.strip():
                 repo_ctx[key] = value.strip()
+    if repo_ctx.get("repo_root") and repo_ctx.get("vcs.repository.name"):
+        return repo_ctx
     if "repo_root" not in repo_ctx:
         for candidate in _candidate_repo_paths(data):
             search_root = _path_search_root(candidate)
@@ -696,6 +698,8 @@ def _resolve_repository_context(data: Optional[dict] = None, session_ctx: Option
                 break
     repo_root = repo_ctx.get("repo_root")
     if not repo_root:
+        return repo_ctx
+    if not os.path.exists(os.path.join(repo_root, ".git")):
         return repo_ctx
     git_root = _git_command_output(["git", "rev-parse", "--show-toplevel"], cwd=repo_root)
     if git_root:
@@ -1015,7 +1019,7 @@ def _resolved_agent_engine(
         return resolved
     if session_ctx:
         session_engine = _normalize_ide_name(session_ctx.get("agent_engine"))
-        if session_engine and session_ctx.get("agent_engine_confirmed"):
+        if session_engine and session_ctx.get("agent_engine_confirmed", True):
             return session_engine
     return None
 
@@ -2350,9 +2354,10 @@ def _maybe_enrich_session_context(session_key: Optional[str], session_ctx: Optio
             changed = True
     repo_root = session_ctx.get("repo_root")
     if repo_root and isinstance(session_ctx.get("memory"), dict):
-        before = json.dumps(session_ctx["memory"], sort_keys=True)
+        memory_files = session_ctx["memory"].get("files")
+        files_before = list(memory_files) if isinstance(memory_files, list) else memory_files
         normalize_memory_summary(session_ctx["memory"], repo_root=repo_root)
-        if json.dumps(session_ctx["memory"], sort_keys=True) != before:
+        if session_ctx["memory"].get("files") != files_before:
             changed = True
     if changed:
         _write_session_context(session_key, session_ctx)
