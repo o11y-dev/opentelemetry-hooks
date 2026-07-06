@@ -6,6 +6,7 @@ additional enrichers can be added without growing the main hook runtime.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable
 
 MemoryFacts = dict[str, list[str]]
@@ -15,6 +16,40 @@ MemorySummary = dict[str, object]
 
 def _empty_facts() -> MemoryFacts:
     return {"files": [], "tools": [], "entities": [], "commands": []}
+
+
+def normalize_memory_path(path: str, repo_root: str | None = None) -> str:
+    normalized = path.strip()
+    if not normalized:
+        return normalized
+    if repo_root and os.path.isabs(normalized):
+        repo_root_abs = os.path.abspath(repo_root)
+        candidate_abs = os.path.abspath(normalized)
+        try:
+            if os.path.commonpath([candidate_abs, repo_root_abs]) == repo_root_abs:
+                normalized = os.path.relpath(candidate_abs, repo_root_abs)
+        except ValueError:
+            # Paths on different drives cannot be relativized; keep the absolute candidate.
+            normalized = candidate_abs
+    normalized = os.path.normpath(normalized)
+    return normalized.replace(os.sep, "/")
+
+
+def normalize_memory_summary(summary: dict, repo_root: str | None = None) -> dict:
+    files = summary.get("files")
+    if not isinstance(files, list):
+        return summary
+    normalized_files: list[str] = []
+    seen: set[str] = set()
+    for value in files:
+        if not isinstance(value, str):
+            continue
+        normalized = normalize_memory_path(value, repo_root=repo_root)
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            normalized_files.append(normalized)
+    summary["files"] = normalized_files
+    return summary
 
 
 def file_connector(_event_name: str, data: dict) -> MemoryFacts:
@@ -86,6 +121,7 @@ def extract_event_memory_facts(
 def aggregate_generation_memory(
     batch: list,
     connectors: tuple[MemoryConnector, ...] = DEFAULT_MEMORY_CONNECTORS,
+    repo_root: str | None = None,
 ) -> MemorySummary:
     files: list[str] = []
     tools: list[str] = []
@@ -105,6 +141,7 @@ def aggregate_generation_memory(
         facts = extract_event_memory_facts(event_name, data, connectors=connectors)
 
         for value in facts["files"]:
+            value = normalize_memory_path(value, repo_root=repo_root)
             if value not in seen["files"]:
                 seen["files"].add(value)
                 files.append(value)
@@ -131,11 +168,14 @@ def aggregate_generation_memory(
     }
 
 
-def merge_memory_summaries(target: dict, source: MemorySummary) -> dict:
+def merge_memory_summaries(target: dict, source: MemorySummary, repo_root: str | None = None) -> dict:
+    normalize_memory_summary(target, repo_root=repo_root)
     for key in ("files", "tools", "entities", "commands"):
         existing = target.setdefault(key, [])
         seen = set(existing)
         for value in source.get(key, []):
+            if key == "files" and isinstance(value, str):
+                value = normalize_memory_path(value, repo_root=repo_root)
             if value not in seen:
                 seen.add(value)
                 existing.append(value)

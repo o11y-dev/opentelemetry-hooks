@@ -46,6 +46,7 @@ py-modules = ["otel_hook", "enrichment_connectors"]
 "share/opentelemetry-hooks/plugin" = ["plugin/opencode.ts"]
 "share/opentelemetry-hooks/examples" = [
     "examples/antigravity-workflow.example.md",
+    "examples/claude-managed-settings.example.json",
     "examples/claude-hooks.example.json",
     "examples/codex-hooks.example.json",
     "examples/copilot-hooks.example.json",

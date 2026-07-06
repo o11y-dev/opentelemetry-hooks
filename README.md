@@ -50,6 +50,8 @@ gen_ai.client.session (root)
 
 - **Structured OTel Logs**: Emits trace-correlated log records for MCP calls, shell executions, and tool usage — with full I/O payloads, server output, and duration. Logs are exported via OTLP alongside spans.
 
+- **Repo-Aware Context**: Enriches telemetry with repository metadata such as `vcs.repository.name` when a git root can be resolved, and normalizes stored file-memory facts to repo-relative paths.
+
 - **Zero Setup**: Auto-provisions a Python virtual environment on first run. No manual install needed.
 
 - **Privacy Controls**: Built-in masking of emails, tokens, and usernames. Text capture is opt-in.
@@ -261,6 +263,17 @@ otel-hook
 The bundled Claude example and `setup.sh --claude` both invoke `otel-hook` directly without an IDE override env var.
 Claude Code is auto-detected from the parent process tree first; hook metadata such as `session_id`, `transcript_path`, `permission_mode`, and `notification_type` is used as a fallback. The camelCase alias handling is mainly for compatible third-party hook runners and mixed payload formats.
 
+##### Managed settings / enterprise rollout
+
+If your org already deploys Claude Code managed settings (server-managed, MDM/registry, or file-based `managed-settings.json`), keep hook registration and hook exporter config as two separate concerns:
+
+- Register `otel-hook` with the usual Claude `hooks` block (in project/user settings, or in managed settings if your org centrally manages hooks).
+- Configure this hook's exporter in `otel_config.json` or this repo's own MDM/registry settings — not in Claude Code's `env` block.
+
+Claude Code intentionally strips `OTEL_*` env vars from hook subprocesses, Bash, MCP servers, and language servers. `otel-hook` handles that safely by loading its own `otel_config.json`, then hook-side managed config, and only then filling any still-unset variables from the live process environment.
+
+See `examples/claude-managed-settings.example.json` for a minimal managed-settings snippet for Claude Code's own telemetry.
+
 #### Gemini CLI
 
 ```bash
@@ -278,6 +291,8 @@ bash setup.sh --gemini --global
 ```
 
 Gemini CLI emits model, tool, and agent lifecycle events. The hook maps `BeforeModel` / `AfterModel` to prompt and stop spans, `BeforeTool` / `AfterTool` to tool spans, and `BeforeAgent` / `AfterAgent` to subagent spans.
+
+> **Privacy note:** Avoid putting sensitive prompts directly on the command line with `gemini -p "..."`. Like most CLI arguments, the prompt can end up in shell history and may be visible in process lists while the command is running. Prefer interactive mode, stdin, or prompt files for sensitive input.
 
 #### Antigravity
 
@@ -388,6 +403,8 @@ Edit the hook config file. For pip/pipx installs this lives at `~/.local/share/o
 
 Then restart your agent or IDE.
 
+> **Why the config file matters:** `otel-hook` reads its own `otel_config.json` on every invocation, overlays this repo's MDM/registry policy, and only fills variables that are still unset from the live process environment. Explicit env vars still win, but the hook does not depend on parent-process `OTEL_*` inheritance. This is the safe path for Claude Code hooks, because Claude does not forward `OTEL_*` to hook subprocesses.
+
 ## Configuration Reference
 
 ### OTLP Exporter
@@ -409,6 +426,7 @@ Then restart your agent or IDE.
 | `IDE_OTEL_IDE_NAME` | Force the detected IDE name (`codex`, `cursor`, `copilot`, `claude`, `gemini`, `antigravity`, `opencode`) for generic hook runners; common labels like `OpenAI Codex`, `Codex CLI`, `GitHub Copilot`, `Claude Code`, `Cursor IDE` / `Cursor CLI`, `Gemini CLI`, `Anti Gravity`, `OpenCode`, and their `... CLI` / `... IDE` variants normalize automatically | auto-detect |
 | `IDE_OTEL_LOCAL_SPANS` | Save hook spans locally as JSONL files for agent analysis (`.state/local_spans/*.jsonl`) | unset |
 | `IDE_OTEL_CAPTURE_TEXT` | Include prompt/response text in spans | `false` |
+| `IDE_OTEL_CAPTURE_USER_IDENTITY` | Include opt-in `user.id` / `user.email` payload fields in spans and logs | `false` |
 | `IDE_OTEL_MASK_PROMPTS` | Redact emails, tokens, usernames from text | `false` |
 | `IDE_OTEL_TEXT_MAX_CHARS` | Max characters for captured text | `4000` |
 | `IDE_OTEL_CAPTURE_TOOL_INPUT_CONTENT` | Include tool input content in logs | `false` |
@@ -447,7 +465,7 @@ These settings have sensible defaults and typically don't need to be changed:
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `OTEL_EXPORTER_OTLP_INSECURE` | **gRPC only**: `true` for plaintext, `false` for TLS | `true` |
-| `IDE_OTEL_DISABLE_BATCH` | Disable OpenTelemetry batch span processor | `false` |
+| `IDE_OTEL_DISABLE_BATCH` | Disable OpenTelemetry batch processors and export immediately (useful for tests / short-lived debugging) | `false` |
 | `IDE_OTEL_STATE_TTL_SECONDS` | TTL for state files before cleanup | `86400` |
 | `IDE_OTEL_STATE_CLEANUP_INTERVAL_SECONDS` | Minimum interval between cleanup runs | `3600` |
 | `IDE_OTEL_STATE_LOCK_TIMEOUT_SECONDS` | Max time to wait for state file locks | `2` |
@@ -809,6 +827,7 @@ The hook still detects the outer wrapper IDE/process, but the emitted canonical 
         │   ├── cursor-hooks.example.json       # Minimal Cursor hooks template
         │   ├── copilot-hooks.example.json      # GitHub Copilot hooks template
         │   ├── claude-hooks.example.json       # Claude Code hooks template
+        │   ├── claude-managed-settings.example.json # Minimal Claude managed-settings snippet
         │   ├── opencode-plugin.example.ts      # OpenCode plugin template
         │   └── antigravity-workflow.example.md # Antigravity workflow template
         ├── .gitignore                          # Excludes secrets, venv, state
@@ -867,6 +886,14 @@ tail -f ./otel_hook.log
 ```bash
 echo '{"hook_event_name":"SessionStart","session_id":"test-123"}' | otel-hook
 ```
+
+For deterministic local export checks, disable the SDK batch processor for just the hook process:
+
+```bash
+printf '%s\n' '{"hook_event_name":"SessionStart","session_id":"test-123"}' | env IDE_OTEL_DISABLE_BATCH=1 otel-hook
+```
+
+This bypasses the SDK's background exporter only; `IDE_OTEL_BATCH_ON_STOP` still controls the hook's own session-level buffering.
 
 ### Common issues
 
