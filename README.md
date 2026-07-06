@@ -7,7 +7,7 @@
 
 > Observability for AI coding agents — any OTLP-compatible backend.
 
-An open-source OpenTelemetry integration that captures AI coding agent activity as structured **traces and logs** and exports them to any OTLP-compatible backend. Works with **any AI coding agent** — today: **Antigravity**, **Claude Code**, **Codex**, **Cursor IDE / Cursor CLI**, **Gemini CLI**, **GitHub Copilot**, and **OpenCode** — using [OpenTelemetry GenAI semantic conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/).
+An open-source OpenTelemetry integration that captures AI coding agent activity as structured **traces and logs** and exports them to any OTLP-compatible backend. Works with **any AI coding agent** — today: **Antigravity**, **Claude Code**, **Codex**, **Cursor IDE / Cursor CLI**, **Gemini CLI**, **GitHub Copilot**, **OpenCode**, and **Windsurf** — using [OpenTelemetry GenAI semantic conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/).
 
 Every hook event — prompt submissions, tool calls, shell commands, MCP interactions, file edits, subagent orchestration — becomes an OpenTelemetry span you can query, alert on, and visualize in Jaeger, Grafana, Datadog, Honeycomb, Coralogix, or any OTLP-compatible backend.
 
@@ -25,7 +25,7 @@ IDE Event → stdin (JSON) → otel-hook → OpenTelemetry SDK → OTLP Backend
 
 ## Features
 
-- **Multi-agent support**: One hook command, multiple agent integrations. The CLI and `setup.sh` can register Codex, Cursor, Claude Code, Gemini CLI, GitHub Copilot, and OpenCode. Antigravity and compatible hook runners can call the same hook command directly. Runtime detection prefers parent-process discovery first, then explicit overrides, then self-reported payload fields, and finally heuristics when needed.
+- **Multi-agent support**: One hook command, multiple agent integrations. The CLI can register Codex, Cursor, Claude Code, Gemini CLI, GitHub Copilot, OpenCode, and Windsurf. `setup.sh` covers the source-checkout setup flow for Codex, Cursor, Claude Code, Gemini CLI, GitHub Copilot, and OpenCode. Antigravity and compatible hook runners can call the same hook command directly. Runtime detection prefers parent-process discovery first, then explicit overrides, then self-reported payload fields, and finally heuristics when needed.
 
 - **Session-level Traces**: Groups all events within a session into a single trace with a 3-tier hierarchy:
 
@@ -67,13 +67,14 @@ gen_ai.client.session (root)
 | Gemini CLI | `otel-hook setup --agent gemini` | Global by default; use `--no-global` for project scope | `~/.gemini/settings.json` or `.gemini/settings.json` |
 | GitHub Copilot coding agent | `otel-hook setup --agent copilot --no-global` | Repository only | `.github/hooks/otel-hooks.json` |
 | OpenCode | `otel-hook setup --agent opencode` | Global by default; use `--no-global` for project scope | `~/.config/opencode/plugins/otel-hook.ts` or `.opencode/plugins/otel-hook.ts` |
+| Windsurf | `otel-hook setup --agent windsurf` | Global by default; use `--no-global` for project scope | `~/.codeium/windsurf/settings.json` or `.windsurf/settings.json` |
 | Antigravity / compatible runners | Manual hook command | Runner-defined | Runner workflow/config |
 
 Run `otel-hook diagnose` to see what is currently registered, and `otel-hook uninstall --agent <agent>` to remove this hook from an agent config.
 
 ## Supported Events
 
-| Canonical Name | Antigravity / Claude Code | Codex | Cursor IDE / CLI | Gemini CLI | GitHub Copilot | OpenCode (plugin) |
+| Canonical Name | Antigravity / Claude Code | Codex | Cursor IDE / CLI / Windsurf | Gemini CLI | GitHub Copilot | OpenCode (plugin) |
 |---|---|---|---|---|---|---|
 | `SessionStart` | `SessionStart` | `SessionStart` | `sessionStart` | `SessionStart` | `sessionStart` | `session.created` |
 | `SessionEnd` | `SessionEnd` | — | `sessionEnd` | `SessionEnd` | `sessionEnd` | `session.deleted`, `session.error` |
@@ -140,10 +141,12 @@ otel-hook setup --agent copilot --no-global   # project-scoped (run from repo ro
 otel-hook setup --agent gemini
 otel-hook setup --agent codex
 otel-hook setup --agent opencode
+otel-hook setup --agent windsurf
 
 # Project-scoped instead of global
 otel-hook setup --agent cursor --no-global
 otel-hook setup --agent codex --no-global
+otel-hook setup --agent windsurf --no-global
 
 # Check registration status
 otel-hook diagnose
@@ -163,11 +166,12 @@ vim ~/.local/share/opentelemetry-hooks/otel_config.json
 The setup functions are importable for programmatic use:
 
 ```python
-from otel_hook import setup_claude, setup_cursor, setup_gemini
+from otel_hook import setup_claude, setup_cursor, setup_gemini, setup_windsurf
 
 setup_claude(global_=True)   # ~/.claude/settings.json
 setup_cursor(global_=True)   # ~/.cursor/hooks.json
 setup_gemini(global_=True)   # ~/.gemini/settings.json
+setup_windsurf(global_=True) # ~/.codeium/windsurf/settings.json
 ```
 
 ### Source Checkout Setup
@@ -222,6 +226,20 @@ rm -rf /tmp/otel-hook-source
 #### Cursor CLI
 
 Cursor CLI uses the same `.cursor/hooks.json` configuration and hook payload shape as Cursor IDE, so the Cursor IDE setup above in [Quick Start](#quick-start) also covers Cursor CLI. Its spans are recorded with the canonical `gen_ai.client.name=cursor`.
+
+#### Windsurf
+
+Windsurf uses a Cursor-compatible hook payload schema and is configured through its `settings.json` file:
+
+```bash
+# Global Windsurf settings (~/.codeium/windsurf/settings.json)
+otel-hook setup --agent windsurf
+
+# Project-scoped Windsurf settings (.windsurf/settings.json)
+otel-hook setup --agent windsurf --no-global
+```
+
+Windsurf spans are recorded with the canonical `gen_ai.client.name=windsurf`.
 
 #### GitHub Copilot
 
@@ -423,7 +441,7 @@ Then restart your agent or IDE.
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `IDE_OTEL_BATCH_ON_STOP` | Enable session-level batching (recommended) | `false` |
-| `IDE_OTEL_IDE_NAME` | Force the detected IDE name (`codex`, `cursor`, `copilot`, `claude`, `gemini`, `antigravity`, `opencode`) for generic hook runners; common labels like `OpenAI Codex`, `Codex CLI`, `GitHub Copilot`, `Claude Code`, `Cursor IDE` / `Cursor CLI`, `Gemini CLI`, `Anti Gravity`, `OpenCode`, and their `... CLI` / `... IDE` variants normalize automatically | auto-detect |
+| `IDE_OTEL_IDE_NAME` | Force the detected IDE name (`codex`, `cursor`, `copilot`, `claude`, `gemini`, `antigravity`, `opencode`, `windsurf`) for generic hook runners; common labels like `OpenAI Codex`, `Codex CLI`, `GitHub Copilot`, `Claude Code`, `Cursor IDE` / `Cursor CLI`, `Gemini CLI`, `Anti Gravity`, `OpenCode`, `Windsurf IDE`, `Codeium Windsurf`, and their `... CLI` / `... IDE` variants normalize automatically | auto-detect |
 | `IDE_OTEL_LOCAL_SPANS` | Save hook spans locally as JSONL files for agent analysis (`.state/local_spans/*.jsonl`) | unset |
 | `IDE_OTEL_CAPTURE_TEXT` | Include prompt/response text in spans | `false` |
 | `IDE_OTEL_CAPTURE_USER_IDENTITY` | Include opt-in `user.id` / `user.email` payload fields in spans and logs | `false` |
@@ -798,9 +816,9 @@ The hook auto-detects which IDE is calling it:
 
 | Signal | IDE |
 |--------|-----|
-| Parent process tree (`ps` parent-chain walk) | Preferred detection for supported IDEs such as Cursor, Copilot / VS Code, Claude Code, and OpenCode |
+| Parent process tree (`ps` parent-chain walk) | Preferred detection for supported IDEs such as Cursor, Copilot / VS Code, Claude Code, OpenCode, and Windsurf |
 | `IDE_OTEL_IDE_NAME` env var | Explicit override for generic hook runners or manual debugging |
-| Self-reported `ide_name`, `client`, or `source_app` values such as `OpenAI Codex`, `Codex CLI`, `GitHub Copilot`, `GitHub Copilot CLI`, `GitHub Copilot Chat`, `Claude Code`, `Claude Code CLI`, `Anthropic Claude Code`, `Cursor IDE`, `Cursor CLI`, `Anti Gravity`, `Anti Gravity CLI`, or `OpenCode` / `OpenCode CLI` (case-insensitive, hyphen/space-insensitive) | Normalized to the canonical `gen_ai.client.name` |
+| Self-reported `ide_name`, `client`, or `source_app` values such as `OpenAI Codex`, `Codex CLI`, `GitHub Copilot`, `GitHub Copilot CLI`, `GitHub Copilot Chat`, `Claude Code`, `Claude Code CLI`, `Anthropic Claude Code`, `Cursor IDE`, `Cursor CLI`, `Anti Gravity`, `Anti Gravity CLI`, `OpenCode` / `OpenCode CLI`, `Windsurf IDE`, or `Codeium Windsurf` (case-insensitive, hyphen/space-insensitive) | Normalized to the canonical `gen_ai.client.name` |
 | `conversation_id` or `generation_id` in input | Cursor |
 | `transcript_path`, `permission_mode`, or `notification_type` | Claude Code |
 | `turn_id`, `tool_response`, or `last_assistant_message` | Codex |
@@ -924,7 +942,7 @@ Please open an issue first if you plan a large change.
 
 - Built on pure [OpenTelemetry Python SDK](https://opentelemetry.io/docs/languages/python/)
 - Uses [OpenTelemetry GenAI Semantic Conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/)
-- Supports [GitHub Copilot hooks](https://docs.github.com/en/copilot/concepts/agents/coding-agent/about-hooks), Cursor IDE / CLI hook payloads, Claude Code hook payloads, and compatible runners such as OpenCode
+- Supports [GitHub Copilot hooks](https://docs.github.com/en/copilot/concepts/agents/coding-agent/about-hooks), Cursor IDE / CLI and Windsurf hook payloads, Claude Code hook payloads, and compatible runners such as OpenCode
 
 ## License
 

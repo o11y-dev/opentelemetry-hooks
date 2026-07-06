@@ -3334,7 +3334,7 @@ def main() -> int:
 # Setup CLI: helpers
 # ---------------------------------------------------------------------------
 
-_REPO_MARKERS = (".git", ".github", ".cursor", ".claude", ".gemini", ".codex", ".opencode")
+_REPO_MARKERS = (".git", ".github", ".cursor", ".claude", ".gemini", ".codex", ".opencode", ".windsurf")
 
 
 def _find_repo_root(cwd: str) -> str:
@@ -3490,6 +3490,8 @@ def _detect_available_agents() -> list:
         found.append("gemini")
     if shutil.which("opencode") or os.path.isdir(os.path.join(home, ".config", "opencode")):
         found.append("opencode")
+    if os.path.isdir(os.path.join(home, ".codeium", "windsurf")) or shutil.which("windsurf"):
+        found.append("windsurf")
     if os.path.isdir(os.path.join(home, ".codex")) or shutil.which("codex"):
         found.append("codex")
     return found
@@ -3570,6 +3572,45 @@ def setup_cursor(global_: bool = True, cwd: str = ".") -> None:
 
     _write_json_file(hooks_path, doc)
     _log_setup_result("cursor", hooks_path, added, updated, skipped)
+
+
+def setup_windsurf(global_: bool = True, cwd: str = ".") -> None:
+    """Register otel-hook in Windsurf's settings.json."""
+    hook_cmd = _resolve_hook_cmd()
+    if global_:
+        hooks_path = os.path.join(os.path.expanduser("~"), ".codeium", "windsurf", "settings.json")
+    else:
+        repo = _find_repo_root(cwd)
+        hooks_path = os.path.join(repo, ".windsurf", "settings.json")
+
+    doc = _load_json_file(hooks_path)
+    # Windsurf uses settings.json, but protocol is same as cursor
+    doc.setdefault("version", 1)
+    hooks = doc.setdefault("hooks", {})
+    added, updated, skipped = [], [], []
+
+    for event in _CURSOR_EVENTS:
+        event_hooks = hooks.setdefault(event, [])
+        matches = [h for h in event_hooks if "otel-hook" in h.get("command", "") or "otel_hook" in h.get("command", "")]
+        if matches:
+            changed = False
+            for hook in matches:
+                env = hook.get("env")
+                if isinstance(env, dict) and "IDE_OTEL_IDE_NAME" in env:
+                    env = dict(env)
+                    env.pop("IDE_OTEL_IDE_NAME", None)
+                    if env:
+                        hook["env"] = env
+                    else:
+                        hook.pop("env", None)
+                    changed = True
+            (updated if changed else skipped).append(event)
+        else:
+            event_hooks.append({"command": hook_cmd})
+            added.append(event)
+
+    _write_json_file(hooks_path, doc)
+    _log_setup_result("windsurf", hooks_path, added, updated, skipped)
 
 
 def setup_claude(global_: bool = True, cwd: str = ".") -> None:
@@ -3827,6 +3868,8 @@ def setup_agent(agent: str, global_: bool = True, cwd: str = ".") -> None:
     """Dispatcher: configure hooks for a single agent by name."""
     if agent == "cursor":
         setup_cursor(global_=global_, cwd=cwd)
+    elif agent == "windsurf":
+        setup_windsurf(global_=global_, cwd=cwd)
     elif agent == "claude":
         setup_claude(global_=global_, cwd=cwd)
     elif agent == "copilot":
@@ -3872,7 +3915,7 @@ def cli(ctx: click.Context) -> None:
 @cli.command("setup")
 @click.option(
     "--agent", "agents",
-    type=click.Choice(["cursor", "claude", "copilot", "gemini", "codex", "opencode"]),
+    type=click.Choice(["cursor", "windsurf", "claude", "copilot", "gemini", "codex", "opencode"]),
     multiple=True,
     help="Agent to configure. Omit to auto-detect all available agents.",
 )
@@ -3884,7 +3927,7 @@ def setup_cmd(agents: tuple, global_: bool, cwd: str) -> None:
     """Register otel-hook in one or more AI agent configs."""
     targets = list(agents) or _detect_available_agents()
     if not targets:
-        click.echo("No agents detected. Use --agent cursor|claude|copilot|gemini|codex|opencode to specify one.", err=True)
+        click.echo("No agents detected. Use --agent cursor|windsurf|claude|copilot|gemini|codex|opencode to specify one.", err=True)
         raise SystemExit(1)
     errors = []
     for agent in targets:
@@ -3903,7 +3946,7 @@ def setup_cmd(agents: tuple, global_: bool, cwd: str) -> None:
 @cli.command("diagnose")
 @click.option(
     "--agent", "agents",
-    type=click.Choice(["cursor", "claude", "copilot", "gemini", "codex", "opencode"]),
+    type=click.Choice(["cursor", "windsurf", "claude", "copilot", "gemini", "codex", "opencode"]),
     multiple=True,
     help="Agent to check. Omit to check all.",
 )
@@ -3911,7 +3954,7 @@ def setup_cmd(agents: tuple, global_: bool, cwd: str) -> None:
 @click.option("--cwd", default=".")
 def diagnose_cmd(agents: tuple, global_: bool, cwd: str) -> None:
     """Show hook registration status for each agent."""
-    targets = list(agents) or ["cursor", "claude", "copilot", "gemini", "codex", "opencode"]
+    targets = list(agents) or ["cursor", "windsurf", "claude", "copilot", "gemini", "codex", "opencode"]
     home = os.path.expanduser("~")
 
     paths = {
@@ -3960,7 +4003,7 @@ def diagnose_cmd(agents: tuple, global_: bool, cwd: str) -> None:
 @cli.command("uninstall")
 @click.option(
     "--agent", "agents",
-    type=click.Choice(["cursor", "claude", "copilot", "gemini", "codex", "opencode"]),
+    type=click.Choice(["cursor", "windsurf", "claude", "copilot", "gemini", "codex", "opencode"]),
     multiple=True,
     required=True,
 )
