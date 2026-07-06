@@ -1,5 +1,3 @@
-import re
-
 with open("otel_hook.py", "r") as f:
     content = f.read()
 
