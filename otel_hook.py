@@ -443,6 +443,8 @@ _IDE_NAME_ALIASES = {
     "google gemini": "gemini",
 }
 _IDE_NAME_NORM_PATTERN = re.compile(r"[-_\s]+")
+_MANAGED_HOOK_SOURCE_ENV = "IDE_OTEL_HOOK_SOURCE"
+_CLI_HOOK_SOURCE: Optional[str] = None
 
 # Session boundary events
 _SESSION_START_EVENTS = {"SessionStart"}
@@ -1003,6 +1005,13 @@ def _has_strong_engine_signal(data: dict, resolved_engine: str) -> bool:
         return True
     if resolved_engine == "cursor" and (data.get("conversation_id") or data.get("generation_id")):
         return True
+    if resolved_engine == "codex" and (
+        data.get("turn_id")
+        or data.get("last_assistant_message") is not None
+        or data.get("tool_response") is not None
+        or _get_event_name(data) in _CODEX_EVENTS
+    ):
+        return True
     return False
 
 
@@ -1017,6 +1026,8 @@ def _resolved_agent_engine(
         resolved = None
     if resolved:
         return resolved
+    if ide and _has_strong_engine_signal(payload, ide):
+        return None
     if session_ctx:
         session_engine = _normalize_ide_name(session_ctx.get("agent_engine"))
         if session_engine and session_ctx.get("agent_engine_confirmed", True):
@@ -2213,32 +2224,44 @@ def _detect_ide(data: dict) -> str:
     """Detect which IDE is calling this hook.
 
     Detection order (highest to lowest confidence):
-    1. Process tree inspection (outermost IDE in parent chain)
-    2. Explicit override via IDE_OTEL_IDE_NAME env var
-    3. Self-reported payload fields (ide_name, ide, client, source_app)
-    4. Heuristic fallback (Claude env/payload/event casing, Cursor fields)
-    5. Default: cursor
+    1. Managed hook source flag stamped by `otel-hook setup` (for example --codex)
+    2. Managed hook source env from legacy setup-generated configs
+    3. Explicit override via IDE_OTEL_IDE_NAME env var
+    4. Process tree inspection fallback for legacy/unmanaged hooks
+    5. Self-reported payload fields (ide_name, ide, client, source_app)
+    6. Heuristic fallback (Claude env/payload/event casing, Cursor fields)
+    7. Default: cursor
     """
-    # Level 1: Process tree — most reliable, immune to env-var leakage.
-    ptree_ide = _detect_ide_from_process_tree()
-    if ptree_ide:
-        return ptree_ide
+    # Level 1: explicit source flag stamped into hook command by setup_*.
+    cli_source = _normalize_ide_name(_CLI_HOOK_SOURCE)
+    if cli_source:
+        return cli_source
 
-    # Level 2: Explicit override from hook config env block.
+    # Level 2: env source stamped by older setup_* versions.
+    managed_source = _normalize_ide_name(os.getenv(_MANAGED_HOOK_SOURCE_ENV))
+    if managed_source:
+        return managed_source
+
+    # Level 3: Explicit override from hook config env block.
     override = _normalize_ide_name(os.getenv("IDE_OTEL_IDE_NAME"))
     if override:
         return override
 
-    # Level 3: Self-reported payload fields.
+    # Level 4: Process tree — fallback for legacy hooks that predate the source flag.
+    ptree_ide = _detect_ide_from_process_tree()
+    if ptree_ide:
+        return ptree_ide
+
+    # Level 5: Self-reported payload fields.
     payload_client = _detect_payload_client_name(data, include_session_fallback=False)
     if payload_client:
         return payload_client
 
-    # Level 4: Heuristic fallback — Claude-specific signals.
+    # Level 6: Heuristic fallback — Claude-specific signals.
     if os.getenv("CLAUDE_CODE_ENTRYPOINT"):
         return "claude"
 
-    # Level 5: Copilot (session_id without other indicators).
+    # Level 7: Copilot (session_id without other indicators).
     if data.get("session_id"):
         return "copilot"
 
@@ -3078,6 +3101,7 @@ def _flush_generation(tracer, gen_key: str, session_ctx: Optional[dict], ide: st
     )
     repo_root = (session_ctx or {}).get("repo_root")
     memory_summary = _aggregate_generation_memory(batch, repo_root=repo_root)
+    first_event_data = batch[0].get("data") if batch else {}
 
     span_kind = SpanKind.INTERNAL if SpanKind is not None else None
     gen_span = tracer.start_span(
@@ -3090,8 +3114,8 @@ def _flush_generation(tracer, gen_key: str, session_ctx: Optional[dict], ide: st
         gen_span.set_attribute("gen_ai.client.event.count", len(batch))
         _set_if_present(gen_span, "gen_ai.request.model", batch_model)
         _apply_memory_summary_attrs(gen_span, "gen_ai.client.memory", memory_summary)
-        _set_client_identity_attributes(gen_span, ide, session_ctx=session_ctx)
-        _apply_enrichment_attributes(gen_span, batch[0].get("data") if batch else {}, session_ctx=session_ctx)
+        _set_client_identity_attributes(gen_span, ide, data=first_event_data, session_ctx=session_ctx)
+        _apply_enrichment_attributes(gen_span, first_event_data, session_ctx=session_ctx)
         _log_with_span(_LOGGER, logging.INFO, gen_span, "Generation span: gen_key=%s events=%d", gen_key, len(batch))
 
         for idx, entry in enumerate(batch):
@@ -3124,6 +3148,11 @@ def _flush_session(tracer, session_key: str, session_ctx: dict, ide: str, flush:
     """Emit the root session span covering the full session duration."""
     start_ns = session_ctx.get("start_time_ns") or time.time_ns()
     end_ns = time.time_ns()
+    session_batch = sorted(
+        _load_batch_events(f"{session_key}_session"),
+        key=lambda e: e.get("timestamp_ns") or 0,
+    )
+    first_event_data = session_batch[0].get("data") if session_batch else {}
 
     parent_ctx = _session_trace_context(session_ctx)
 
@@ -3134,10 +3163,10 @@ def _flush_session(tracer, session_key: str, session_ctx: dict, ide: str, flush:
     )
     with _span_context(session_span):
         session_span.set_attribute("gen_ai.client.session_id", session_key)
-        _set_client_identity_attributes(session_span, ide, session_ctx=session_ctx)
+        _set_client_identity_attributes(session_span, ide, data=first_event_data, session_ctx=session_ctx)
         session_span.set_attribute("gen_ai.client.generation_count", session_ctx.get("generation_count", 0))
         session_span.set_attribute("gen_ai.client.session.duration_ms", (end_ns - start_ns) // 1_000_000)
-        _apply_enrichment_attributes(session_span, {}, session_ctx=session_ctx)
+        _apply_enrichment_attributes(session_span, first_event_data, session_ctx=session_ctx)
         _apply_memory_summary_attrs(session_span, "gen_ai.client.memory", session_ctx.get("memory", {}))
         _log_with_span(_LOGGER, logging.INFO, session_span, "Session span: session=%s", session_key)
         session_span.end(end_time=end_ns)
@@ -3374,6 +3403,10 @@ def _resolve_hook_cmd() -> str:
     return shutil.which("otel-hook") or "otel-hook"
 
 
+def _hook_cmd_for_agent(agent: str) -> str:
+    return f"{_resolve_hook_cmd()} --{agent}"
+
+
 def _load_json_file(path: str) -> dict:
     if os.path.exists(path):
         with open(path) as f:
@@ -3536,6 +3569,28 @@ def _find_opencode_plugin_source() -> Optional[str]:
 # Setup CLI: per-agent setup functions (public API, importable)
 # ---------------------------------------------------------------------------
 
+def _configure_managed_hook_command(hook: dict, source: str) -> bool:
+    """Stamp a setup-managed hook command with the source-agent CLI flag."""
+    desired_cmd = _hook_cmd_for_agent(source)
+    changed = False
+    if hook.get("command") != desired_cmd:
+        hook["command"] = desired_cmd
+        changed = True
+    env = hook.get("env")
+    if isinstance(env, dict):
+        next_env = dict(env)
+        next_env.pop("IDE_OTEL_IDE_NAME", None)
+        next_env.pop(_MANAGED_HOOK_SOURCE_ENV, None)
+        if next_env:
+            if next_env != env:
+                hook["env"] = next_env
+                changed = True
+        else:
+            hook.pop("env", None)
+            changed = True
+    return changed
+
+
 def setup_cursor(global_: bool = True, cwd: str = ".") -> None:
     """Register otel-hook in Cursor's hooks.json."""
     hook_cmd = _resolve_hook_cmd()
@@ -3556,18 +3611,12 @@ def setup_cursor(global_: bool = True, cwd: str = ".") -> None:
         if matches:
             changed = False
             for hook in matches:
-                env = hook.get("env")
-                if isinstance(env, dict) and "IDE_OTEL_IDE_NAME" in env:
-                    env = dict(env)
-                    env.pop("IDE_OTEL_IDE_NAME", None)
-                    if env:
-                        hook["env"] = env
-                    else:
-                        hook.pop("env", None)
-                    changed = True
+                changed = _configure_managed_hook_command(hook, "cursor") or changed
             (updated if changed else skipped).append(event)
         else:
-            event_hooks.append({"command": hook_cmd})
+            hook = {"command": hook_cmd}
+            _configure_managed_hook_command(hook, "cursor")
+            event_hooks.append(hook)
             added.append(event)
 
     _write_json_file(hooks_path, doc)
@@ -3595,18 +3644,12 @@ def setup_windsurf(global_: bool = True, cwd: str = ".") -> None:
         if matches:
             changed = False
             for hook in matches:
-                env = hook.get("env")
-                if isinstance(env, dict) and "IDE_OTEL_IDE_NAME" in env:
-                    env = dict(env)
-                    env.pop("IDE_OTEL_IDE_NAME", None)
-                    if env:
-                        hook["env"] = env
-                    else:
-                        hook.pop("env", None)
-                    changed = True
+                changed = _configure_managed_hook_command(hook, "windsurf") or changed
             (updated if changed else skipped).append(event)
         else:
-            event_hooks.append({"command": hook_cmd})
+            hook = {"command": hook_cmd}
+            _configure_managed_hook_command(hook, "windsurf")
+            event_hooks.append(hook)
             added.append(event)
 
     _write_json_file(hooks_path, doc)
@@ -3629,42 +3672,29 @@ def setup_claude(global_: bool = True, cwd: str = ".") -> None:
     for event in _CLAUDE_EVENTS:
         event_list = hooks.setdefault(event, [])
         others, exact = [], []
+        desired_cmd = _hook_cmd_for_agent("claude")
         for entry in event_list:
             for h in entry.get("hooks", []):
                 cmd = h.get("command", "")
                 if "otel_hook" in cmd or "otel-hook" in cmd:
-                    (exact if cmd == hook_cmd else others).append(h)
+                    (exact if cmd == desired_cmd else others).append(h)
 
         if exact:
             changed = False
             for hook in exact:
-                env = hook.get("env")
-                if isinstance(env, dict) and "IDE_OTEL_IDE_NAME" in env:
-                    env = dict(env)
-                    env.pop("IDE_OTEL_IDE_NAME", None)
-                    if env:
-                        hook["env"] = env
-                    else:
-                        hook.pop("env", None)
-                    changed = True
+                changed = _configure_managed_hook_command(hook, "claude") or changed
             (updated if changed else skipped).append(event)
             continue
 
         if others:
             for hook in others:
-                hook["command"] = hook_cmd
-                env = hook.get("env")
-                if isinstance(env, dict) and "IDE_OTEL_IDE_NAME" in env:
-                    env = dict(env)
-                    env.pop("IDE_OTEL_IDE_NAME", None)
-                    if env:
-                        hook["env"] = env
-                    else:
-                        hook.pop("env", None)
+                _configure_managed_hook_command(hook, "claude")
             updated.append(event)
             continue
 
-        hook_entry: dict = {"hooks": [{"type": "command", "command": hook_cmd}]}
+        hook = {"type": "command", "command": hook_cmd}
+        _configure_managed_hook_command(hook, "claude")
+        hook_entry: dict = {"hooks": [hook]}
         if event in _CLAUDE_MATCHER_EVENTS:
             hook_entry["matcher"] = "*"
         event_list.append(hook_entry)
@@ -3676,7 +3706,7 @@ def setup_claude(global_: bool = True, cwd: str = ".") -> None:
 
 def setup_copilot(cwd: str = ".") -> None:
     """Register otel-hook in GitHub Copilot's otel-hooks.json."""
-    hook_cmd = _resolve_hook_cmd()
+    hook_cmd = _hook_cmd_for_agent("copilot")
     repo = _find_repo_root(cwd)
     hooks_path = os.path.join(repo, ".github", "hooks", "otel-hooks.json")
 
@@ -3689,8 +3719,9 @@ def setup_copilot(cwd: str = ".") -> None:
         event_hooks = hooks.setdefault(event, [])
         plain = [h for h in event_hooks if "otel-hook" in h.get("bash", "") or "otel_hook" in h.get("bash", "")]
         if plain:
-            changed = any("timeoutSec" not in h for h in plain)
+            changed = any("timeoutSec" not in h or h.get("bash") != hook_cmd for h in plain)
             for h in plain:
+                h["bash"] = hook_cmd
                 h.setdefault("timeoutSec", 30)
             (updated if changed else skipped).append(event)
             continue
@@ -3726,23 +3757,29 @@ def setup_gemini(global_: bool = True, cwd: str = ".") -> None:
     for event in _GEMINI_EVENTS:
         event_list = hooks.setdefault(event, [])
         others, exact = [], []
+        desired_cmd = _hook_cmd_for_agent("gemini")
         for entry in event_list:
             for h in entry.get("hooks", []):
                 cmd = h.get("command", "")
                 if "otel_hook" in cmd or "otel-hook" in cmd:
-                    (exact if cmd == hook_cmd else others).append(h)
+                    (exact if cmd == desired_cmd else others).append(h)
 
         if exact:
-            skipped.append(event)
+            changed = False
+            for hook in exact:
+                changed = _configure_managed_hook_command(hook, "gemini") or changed
+            (updated if changed else skipped).append(event)
             continue
 
         if others:
             for hook in others:
-                hook["command"] = hook_cmd
+                _configure_managed_hook_command(hook, "gemini")
             updated.append(event)
             continue
 
-        hook_entry: dict = {"hooks": [{"type": "command", "command": hook_cmd, "name": "otel-hook"}]}
+        hook = {"type": "command", "command": hook_cmd, "name": "otel-hook"}
+        _configure_managed_hook_command(hook, "gemini")
+        hook_entry: dict = {"hooks": [hook]}
         if event in _GEMINI_MATCHER_EVENTS:
             hook_entry["matcher"] = "*"
         event_list.append(hook_entry)
@@ -3786,9 +3823,10 @@ def setup_codex(global_: bool = True, cwd: str = ".") -> None:
 
         if matches:
             changed = False
+            desired_cmd = _hook_cmd_for_agent("codex")
             for hook in matches:
-                if hook.get("command") != hook_cmd:
-                    hook["command"] = hook_cmd
+                if hook.get("command") != desired_cmd:
+                    hook["command"] = desired_cmd
                     changed = True
                 if hook.get("type") != "command":
                     hook["type"] = "command"
@@ -3796,20 +3834,14 @@ def setup_codex(global_: bool = True, cwd: str = ".") -> None:
                 if "timeout" not in hook:
                     hook["timeout"] = 30
                     changed = True
-                env = hook.get("env")
-                if isinstance(env, dict) and "IDE_OTEL_IDE_NAME" in env:
-                    env = dict(env)
-                    env.pop("IDE_OTEL_IDE_NAME", None)
-                    if env:
-                        hook["env"] = env
-                    else:
-                        hook.pop("env", None)
-                    changed = True
+                changed = _configure_managed_hook_command(hook, "codex") or changed
             (updated if changed else skipped).append(event)
             continue
 
+        hook = {"type": "command", "command": hook_cmd, "timeout": 30}
+        _configure_managed_hook_command(hook, "codex")
         hook_entry: dict = {
-            "hooks": [{"type": "command", "command": hook_cmd, "timeout": 30}]
+            "hooks": [hook]
         }
         if matcher is not None:
             hook_entry["matcher"] = matcher
@@ -3898,13 +3930,22 @@ def _log_setup_result(agent: str, path: str, added: list, updated: list, skipped
 # ---------------------------------------------------------------------------
 
 @click.group(invoke_without_command=True)
+@click.option("--cursor", "hook_source", flag_value="cursor", default=None, help="Run hook as Cursor.")
+@click.option("--windsurf", "hook_source", flag_value="windsurf", help="Run hook as Windsurf.")
+@click.option("--claude", "hook_source", flag_value="claude", help="Run hook as Claude Code.")
+@click.option("--copilot", "hook_source", flag_value="copilot", help="Run hook as GitHub Copilot.")
+@click.option("--gemini", "hook_source", flag_value="gemini", help="Run hook as Gemini CLI.")
+@click.option("--codex", "hook_source", flag_value="codex", help="Run hook as Codex CLI.")
+@click.option("--opencode", "hook_source", flag_value="opencode", help="Run hook as OpenCode.")
 @click.pass_context
-def cli(ctx: click.Context) -> None:
+def cli(ctx: click.Context, hook_source: Optional[str]) -> None:
     """otel-hook — OpenTelemetry hook runner and setup CLI for AI coding agents.
 
     When called with no subcommand and piped stdin, runs as the hook runner
     (IDE event JSON → OTel spans). Use subcommands to configure agent hooks.
     """
+    global _CLI_HOOK_SOURCE
+    _CLI_HOOK_SOURCE = hook_source
     if ctx.invoked_subcommand is None:
         if not sys.stdin.isatty():
             raise SystemExit(main())

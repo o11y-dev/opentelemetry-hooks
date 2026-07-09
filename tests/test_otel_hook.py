@@ -1,5 +1,6 @@
 """Meaningful tests for otel_hook.py — focused on core logic, not too many."""
 
+import contextlib
 import hashlib
 import json
 import os
@@ -326,6 +327,21 @@ class TestDetectIDE:
 
     def test_codex_env_override(self, monkeypatch):
         monkeypatch.setenv("IDE_OTEL_IDE_NAME", "OpenAI Codex")
+        assert otel_hook._detect_ide({"session_id": "sess-1"}) == "codex"
+
+    def test_cli_hook_source_beats_leaked_claude_env(self, monkeypatch):
+        monkeypatch.setattr(otel_hook, "_CLI_HOOK_SOURCE", "codex")
+        monkeypatch.setenv("CLAUDE_CODE_ENTRYPOINT", "1")
+        assert otel_hook._detect_ide({"session_id": "sess-1"}) == "codex"
+
+    def test_cli_hook_source_beats_legacy_ide_override(self, monkeypatch):
+        monkeypatch.setattr(otel_hook, "_CLI_HOOK_SOURCE", "codex")
+        monkeypatch.setenv("IDE_OTEL_IDE_NAME", "claude")
+        assert otel_hook._detect_ide({"session_id": "sess-1"}) == "codex"
+
+    def test_legacy_managed_hook_source_still_supported(self, monkeypatch):
+        monkeypatch.setenv("IDE_OTEL_HOOK_SOURCE", "codex")
+        monkeypatch.setenv("CLAUDE_CODE_ENTRYPOINT", "1")
         assert otel_hook._detect_ide({"session_id": "sess-1"}) == "codex"
 
     def test_codex_cli_self_reported_name(self):
@@ -982,6 +998,43 @@ class TestClientIdentityAttributes:
         assert "gen_ai.client.wrapper" not in attrs
         assert "gen_ai.client.agent_engine" not in attrs
 
+    def test_codex_payload_suppresses_stale_claude_session_engine(self):
+        span = mock.MagicMock()
+
+        otel_hook._set_client_identity_attributes(
+            span,
+            "codex",
+            data={
+                "hook_event_name": "PostToolUse",
+                "session_id": "sess-1",
+                "turn_id": "turn-1",
+                "tool_name": "Bash",
+                "command": "gh pr checks 56",
+            },
+            session_ctx={"agent_engine": "claude", "agent_engine_confirmed": True},
+        )
+
+        attrs = self._attrs(span)
+        assert attrs["gen_ai.client.name"] == "codex"
+        assert "gen_ai.client.wrapper" not in attrs
+        assert "gen_ai.client.agent_engine" not in attrs
+
+    def test_codex_event_suppresses_leaked_claude_env_and_session_engine(self, monkeypatch):
+        monkeypatch.setenv("CLAUDE_CODE_ENTRYPOINT", "1")
+        span = mock.MagicMock()
+
+        otel_hook._set_client_identity_attributes(
+            span,
+            "codex",
+            data={"hook_event_name": "SessionStart", "session_id": "sess-1"},
+            session_ctx={"agent_engine": "claude", "agent_engine_confirmed": True},
+        )
+
+        attrs = self._attrs(span)
+        assert attrs["gen_ai.client.name"] == "codex"
+        assert "gen_ai.client.wrapper" not in attrs
+        assert "gen_ai.client.agent_engine" not in attrs
+
 
 class TestRepositoryEnrichment:
     def test_resolve_repository_context_uses_git_remote(self, monkeypatch, tmp_path):
@@ -1331,6 +1384,104 @@ class TestAdvanceGeneration:
                 ctx = otel_hook._load_session_context("sess-adv")
                 gen2 = otel_hook._advance_generation("sess-adv", ctx)
                 assert gen2 == "sess-adv_gen_2"
+
+
+class _AggregateFakeSpan:
+    def __init__(self, name):
+        self.name = name
+        self.attrs = {}
+
+    def set_attribute(self, key, value):
+        self.attrs[key] = value
+
+    def end(self, *args, **kwargs):
+        pass
+
+
+class _AggregateFakeTracer:
+    def __init__(self):
+        self.spans = []
+
+    def start_span(self, name, **kwargs):
+        span = _AggregateFakeSpan(name)
+        self.spans.append(span)
+        return span
+
+
+class TestFlushAggregateIdentity:
+    def test_generation_span_uses_codex_batch_payload_over_stale_claude_session_engine(self, monkeypatch):
+        tracer = _AggregateFakeTracer()
+        batch = [
+            {
+                "event": "UserPromptSubmit",
+                "timestamp_ns": 100,
+                "data": {
+                    "hook_event_name": "UserPromptSubmit",
+                    "session_id": "sess-1",
+                    "turn_id": "turn-1",
+                    "model": "gpt-5.5",
+                },
+            },
+            {
+                "event": "Stop",
+                "timestamp_ns": 200,
+                "data": {
+                    "hook_event_name": "Stop",
+                    "session_id": "sess-1",
+                    "turn_id": "turn-1",
+                },
+            },
+        ]
+        session_ctx = {
+            "trace_id": "a" * 32,
+            "phantom_parent_id": "b" * 16,
+            "agent_engine": "claude",
+            "agent_engine_confirmed": True,
+        }
+        monkeypatch.setattr(otel_hook, "_load_batch_events", lambda key: batch)
+        monkeypatch.setattr(otel_hook, "_clear_batch_events", lambda key: None)
+        monkeypatch.setattr(otel_hook, "_session_trace_context", lambda ctx: None)
+        monkeypatch.setattr(otel_hook.trace, "set_span_in_context", lambda span: None)
+        monkeypatch.setattr(otel_hook, "_span_context", lambda span: contextlib.nullcontext(span))
+        monkeypatch.setattr(otel_hook, "_populate_span", lambda *args, **kwargs: None)
+
+        otel_hook._flush_generation(tracer, "sess-1_gen_1", session_ctx, "codex", flush=False)
+
+        attrs = tracer.spans[0].attrs
+        assert attrs["gen_ai.client.name"] == "codex"
+        assert "gen_ai.client.wrapper" not in attrs
+        assert "gen_ai.client.agent_engine" not in attrs
+
+    def test_session_span_uses_codex_session_payload_over_stale_claude_session_engine(self, monkeypatch):
+        tracer = _AggregateFakeTracer()
+        session_batch = [
+            {
+                "event": "SessionStart",
+                "timestamp_ns": 100,
+                "data": {
+                    "hook_event_name": "SessionStart",
+                    "session_id": "sess-1",
+                },
+            },
+        ]
+        session_ctx = {
+            "trace_id": "a" * 32,
+            "phantom_parent_id": "b" * 16,
+            "start_time_ns": 100,
+            "generation_count": 1,
+            "agent_engine": "claude",
+            "agent_engine_confirmed": True,
+        }
+        monkeypatch.setattr(otel_hook, "_load_batch_events", lambda key: session_batch)
+        monkeypatch.setattr(otel_hook, "_session_trace_context", lambda ctx: None)
+        monkeypatch.setattr(otel_hook, "_span_context", lambda span: contextlib.nullcontext(span))
+
+        otel_hook._flush_session(tracer, "sess-1", session_ctx, "codex", flush=False)
+
+        attrs = tracer.spans[0].attrs
+        assert attrs["gen_ai.client.name"] == "codex"
+        assert "gen_ai.client.wrapper" not in attrs
+        assert "gen_ai.client.agent_engine" not in attrs
 
 
 # ── Flush stale sessions ─────────────────────────────────────────────────
@@ -2323,6 +2474,9 @@ class TestSetupCodex:
         assert config_path.is_file()
         doc = json.loads(hooks_path.read_text())
         assert set(otel_hook._CODEX_EVENTS).issubset(doc["hooks"])
+        hook = doc["hooks"]["PostToolUse"][0]["hooks"][0]
+        assert hook["command"] == "otel-hook --codex"
+        assert "env" not in hook
         text = config_path.read_text()
         assert "hooks = true" in text
         assert "codex_hooks" not in text
