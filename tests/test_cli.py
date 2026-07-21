@@ -72,6 +72,34 @@ class TestHookRunnerBackwardCompat:
 
 
 class TestDoctor:
+    @pytest.mark.parametrize("json_output", [False, True], ids=["human", "json"])
+    def test_internal_error_report_is_safe_in_all_output_modes(
+        self,
+        monkeypatch,
+        json_output,
+    ):
+        def fail_report(*_args, **_kwargs):
+            raise RuntimeError("private diagnostic detail")
+
+        monkeypatch.setattr(otel_hook, "_doctor_report", fail_report)
+        args = ["doctor"] + (["--json"] if json_output else [])
+
+        result = CliRunner().invoke(cli, args)
+
+        assert result.exit_code == 2
+        assert "private diagnostic detail" not in result.output
+        if json_output:
+            assert json.loads(result.output) == {
+                "error": {"type": "RuntimeError"},
+                "schema_version": 1,
+                "status": "error",
+            }
+        else:
+            assert result.output.splitlines() == [
+                "otel-hook doctor: error",
+                "  error: RuntimeError",
+            ]
+
     def test_json_report_is_machine_readable_and_sanitized(self, monkeypatch, tmp_path):
         config = tmp_path / "hooks.json"
         _write(str(config), {"hooks": {"SessionStart": [{"command": "otel-hook --claude"}]}})

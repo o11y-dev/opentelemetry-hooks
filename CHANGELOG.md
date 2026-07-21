@@ -17,6 +17,7 @@
 - Split callback deduplication, tool/MCP correlation, and subagent FIFO correlation into focused session-backed services, and made the typed canonical contract privacy-safe before lifecycle processing.
 
 ### Fixed
+- Prevented human-readable `otel-hook doctor` fallback reports from raising a second exception when diagnostics fail internally; both human and JSON modes now return sanitized error-type evidence.
 - Prevented raw prompt, error, and delegation content from bypassing privacy gates through direct event attribute mappings.
 - Preserved native and hook telemetry as distinct sources while linking valid native contexts instead of deduplicating them.
 - Reserved generic trace fields for upstream parenting and required explicit native trace/span fields for native attributes and links.

@@ -5978,6 +5978,45 @@ def _doctor_report(agents: tuple, global_: bool, cwd: str) -> tuple[dict, int]:
     return report, 0
 
 
+def _doctor_human_lines(report: dict) -> list[str]:
+    """Render complete or minimal doctor reports without raising another error."""
+    status = report.get("status") or "unknown"
+    lines = [f"otel-hook doctor: {status}"]
+    error = report.get("error")
+    if status == "error" or isinstance(error, dict):
+        error_type = error.get("type") if isinstance(error, dict) else None
+        lines.append(f"  error: {error_type or 'InternalError'}")
+        return lines
+
+    package = report.get("package") or {}
+    lines.append(
+        f"  package: {package.get('version', 'unknown')} "
+        f"({package.get('executable') or 'not on PATH'})"
+    )
+    lines.append(f"  detected agent: {report.get('detected_agent') or 'unknown'}")
+    for registration in report.get("registrations") or []:
+        if not isinstance(registration, dict):
+            continue
+        lines.append(
+            f"  [{registration.get('agent', 'unknown')}] "
+            f"{registration.get('registered_events', 0)} events "
+            f"({registration.get('path') or 'unknown path'})"
+        )
+    exporter = report.get("exporter") or {}
+    lines.append(
+        f"  exporter: {exporter.get('status', 'unknown')} "
+        f"({exporter.get('endpoint') or 'no endpoint'})"
+    )
+    state = report.get("state") or {}
+    lines.append(
+        f"  state: {state.get('sessions', 0)} sessions, "
+        f"{state.get('batches', 0)} batches"
+    )
+    for warning in report.get("warnings") or []:
+        lines.append(f"  warning: {warning}")
+    return lines
+
+
 @cli.command("doctor")
 @click.option(
     "--agent", "agents",
@@ -6002,23 +6041,8 @@ def doctor_cmd(agents: tuple, global_: bool, cwd: str, json_output: bool) -> Non
     if json_output:
         click.echo(json.dumps(report, ensure_ascii=True, sort_keys=True))
     else:
-        click.echo(f"otel-hook doctor: {report['status']}")
-        click.echo(
-            f"  package: {report['package']['version']} ({report['package']['executable'] or 'not on PATH'})"
-        )
-        click.echo(f"  detected agent: {report['detected_agent']}")
-        for registration in report["registrations"]:
-            click.echo(
-                f"  [{registration['agent']}] {registration['registered_events']} events ({registration['path']})"
-            )
-        click.echo(
-            f"  exporter: {report['exporter']['status']} ({report['exporter']['endpoint'] or 'no endpoint'})"
-        )
-        click.echo(
-            f"  state: {report['state']['sessions']} sessions, {report['state']['batches']} batches"
-        )
-        for warning in report.get("warnings", []):
-            click.echo(f"  warning: {warning}")
+        for line in _doctor_human_lines(report):
+            click.echo(line)
     if exit_code:
         raise SystemExit(exit_code)
 
