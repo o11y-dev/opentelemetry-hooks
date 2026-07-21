@@ -22,6 +22,7 @@ import contextlib
 import hashlib
 import importlib
 import importlib.util
+import importlib.metadata
 import json
 import logging
 import os
@@ -255,6 +256,8 @@ _LOCAL_SPANS_DIR = os.path.join(_STATE_DIR, "local_spans")
 _LOCAL_TRACE_DIR = _LOCAL_SPANS_DIR  # backward-compatible alias
 _LOCK_DIR = os.path.join(_STATE_DIR, "locks")
 _CLEANUP_MARKER = os.path.join(_STATE_DIR, "last_cleanup")
+_SESSION_EVENT_LIMIT = 512
+_SESSION_INVOCATION_LIMIT = 128
 
 # MDM (Managed Device Management) configuration
 _MDM_DOMAIN = "dev.o11y.opentelemetry-hook"  # macOS managed preferences domain
@@ -368,6 +371,9 @@ _INPUT_ALIASES = {
     "toolDefinitions": "tool_definitions",
     "toolUseId": "tool_use_id",
     "toolId": "tool_id",
+    "mcpServerName": "mcp_server_name",
+    "mcpServer": "mcp_server",
+    "mcpTool": "mcp_tool",
     "turnId": "turn_id",
     "toolResponse": "tool_response",
     "lastAssistantMessage": "last_assistant_message",
@@ -488,8 +494,8 @@ _EVENT_ATTR_MAP = {
     # Cursor-specific
     "BeforeShellExecution": {"command": "gen_ai.client.command", "cwd": "gen_ai.client.cwd"},
     "AfterShellExecution": {"command": "gen_ai.client.command", "cwd": "gen_ai.client.cwd", "exit_code": "gen_ai.client.exit_code", "duration_ms": "gen_ai.client.duration_ms"},
-    "BeforeMCPExecution": {"mcp_server": "gen_ai.client.mcp_server", "command": "gen_ai.client.mcp_server", "mcp_tool": "gen_ai.client.mcp_tool", "tool_name": "gen_ai.client.mcp_tool"},
-    "AfterMCPExecution": {"mcp_server": "gen_ai.client.mcp_server", "command": "gen_ai.client.mcp_server", "mcp_tool": "gen_ai.client.mcp_tool", "tool_name": "gen_ai.client.mcp_tool", "duration_ms": "gen_ai.client.duration_ms", "duration": "gen_ai.client.duration_ms"},
+    "BeforeMCPExecution": {"mcp_server_name": "gen_ai.client.mcp_server", "mcp_server": "gen_ai.client.mcp_server", "mcp_tool": "gen_ai.client.mcp_tool", "tool_name": "gen_ai.client.mcp_tool", "tool_use_id": "gen_ai.client.tool_use_id"},
+    "AfterMCPExecution": {"mcp_server_name": "gen_ai.client.mcp_server", "mcp_server": "gen_ai.client.mcp_server", "mcp_tool": "gen_ai.client.mcp_tool", "tool_name": "gen_ai.client.mcp_tool", "tool_use_id": "gen_ai.client.tool_use_id", "duration_ms": "gen_ai.client.duration_ms", "duration": "gen_ai.client.duration_ms", "status": "gen_ai.client.status", "error": "gen_ai.client.error"},
     "BeforeReadFile": {"file_path": "gen_ai.client.file_path"},
     "AfterFileEdit": {"file_path": "gen_ai.client.file_path", "edits": "gen_ai.client.edits"},
     # Copilot-specific
@@ -1075,6 +1081,99 @@ def _normalize_input_data(data: dict) -> dict:
     return normalized or data
 
 
+def _parse_encoded_mcp_tool_name(tool_name: object) -> Optional[Tuple[str, str]]:
+    """Parse ``mcp__<server>__<tool>`` while preserving ``__`` inside the tool."""
+    if not isinstance(tool_name, str) or not tool_name.startswith("mcp__"):
+        return None
+    parts = tool_name.split("__", 2)
+    if len(parts) != 3 or not parts[1] or not parts[2]:
+        return None
+    return parts[1], parts[2]
+
+
+def _normalize_mcp_event_data(data: dict, event_name: str, ide: Optional[str] = None) -> dict:
+    """Add a provider-neutral MCP identity without changing the original tool name."""
+    tool_name = data.get("tool_name")
+    parsed = _parse_encoded_mcp_tool_name(tool_name)
+    server = _first_present(data, ("mcp_server_name", "mcp_server"))
+    tool = data.get("mcp_tool")
+
+    if parsed:
+        server = server or parsed[0]
+        tool = tool or parsed[1]
+    elif ide == "cursor" and isinstance(tool_name, str) and tool_name.startswith("MCP:"):
+        tool = tool or tool_name.removeprefix("MCP:")
+    elif event_name in _MCP_EVENTS:
+        tool = tool or tool_name
+
+    # ``command`` is a legacy fallback for dedicated MCP events.  A real
+    # server field always wins, so executable paths never overwrite it.
+    if not server and event_name in _MCP_EVENTS:
+        server = data.get("command")
+
+    updates = {}
+    if server and data.get("mcp_server") != server:
+        updates["mcp_server"] = server
+    if tool and data.get("mcp_tool") != tool:
+        updates["mcp_tool"] = tool
+    if not updates:
+        return data
+    normalized = dict(data)
+    normalized.update(updates)
+    return normalized
+
+
+def _mcp_identity(data: dict) -> Tuple[Optional[str], Optional[str]]:
+    """Return the already-normalized MCP server and tool identity."""
+    return data.get("mcp_server"), data.get("mcp_tool")
+
+
+def _mcp_observability_attributes(event_name: str, data: dict) -> dict:
+    """Build content-safe MCP attributes shared by spans and logs."""
+    normalized = _normalize_mcp_event_data(data, event_name)
+    server, tool = _mcp_identity(normalized)
+    if not server and not tool:
+        return {}
+    attrs = {}
+    if server:
+        attrs["gen_ai.client.mcp_server"] = server
+    if tool:
+        attrs["gen_ai.client.mcp_tool"] = tool
+    invocation_id = normalized.get("tool_use_id")
+    if invocation_id:
+        attrs["gen_ai.client.tool_use_id"] = invocation_id
+    duration = _first_present(normalized, ("duration_ms", "duration"))
+    if duration is not None:
+        attrs["gen_ai.client.mcp.duration_ms"] = duration
+        attrs["gen_ai.client.duration_ms"] = duration
+    status = normalized.get("status") or normalized.get("mcp_status")
+    if event_name == "PostToolUseFailure" or normalized.get("error") is not None:
+        status = "error"
+    elif event_name in {"PostToolUse", "AfterMCPExecution"} and not status:
+        status = "success"
+    if status:
+        attrs["gen_ai.client.status"] = status
+    if normalized.get("error") is not None:
+        attrs["gen_ai.client.error"] = str(normalized["error"])
+
+    result = _first_present(normalized, ("result_json", "mcp_output", "tool_output", "output"))
+    if result is not None:
+        text = _stringify(result)
+        attrs["gen_ai.client.mcp.output.length"] = len(text)
+        attrs["gen_ai.client.mcp.output.sha256"] = _hash_text(text)
+    else:
+        if normalized.get("mcp_result_length") is not None:
+            attrs["gen_ai.client.mcp.output.length"] = normalized["mcp_result_length"]
+        if normalized.get("mcp_result_sha256") is not None:
+            attrs["gen_ai.client.mcp.output.sha256"] = normalized["mcp_result_sha256"]
+    return attrs
+
+
+def _apply_mcp_attributes(span, event_name: str, data: dict) -> None:
+    for key, value in _mcp_observability_attributes(event_name, data).items():
+        _set_if_present(span, key, value)
+
+
 def _normalize_ide_name(value: Optional[str]) -> Optional[str]:
     """Normalize IDE names to canonical identifiers using case-insensitive lookup."""
     if not isinstance(value, str):
@@ -1138,7 +1237,7 @@ def _acquire_lock(lock_path: str):
             except OSError:
                 pass
             if time.time() - start > timeout:
-                break
+                raise TimeoutError(f"timed out acquiring state lock: {lock_path}")
             time.sleep(0.01)
     try:
         yield
@@ -1181,13 +1280,21 @@ def _cleanup_state() -> None:
         return
 
     cutoff = now - ttl
-    for directory in (_SESSION_DIR, _BATCH_DIR):
-        if not os.path.isdir(directory):
-            continue
-        for name in os.listdir(directory):
-            path = os.path.join(directory, name)
+    # Session files must survive until _flush_stale_sessions can emit their
+    # pending generations and root span.  Only remove old orphan batches here.
+    if os.path.isdir(_BATCH_DIR):
+        for name in os.listdir(_BATCH_DIR):
+            path = os.path.join(_BATCH_DIR, name)
             try:
-                if os.path.isfile(path) and os.path.getmtime(path) < cutoff:
+                if not os.path.isfile(path) or os.path.getmtime(path) >= cutoff:
+                    continue
+                key = name.removesuffix(".jsonl")
+                events = _load_batch_events(key)
+                owner = next(
+                    (_session_key(entry.get("data") or {}) for entry in events if _session_key(entry.get("data") or {})),
+                    None,
+                )
+                if not owner or not os.path.exists(_session_path(owner)):
                     os.remove(path)
             except OSError:
                 continue
@@ -1221,18 +1328,18 @@ def _flush_stale_sessions(tracer) -> None:
                 continue
             session_key = name.removesuffix(".json")
             ide = ctx.get("ide", "unknown")
-            # Flush any dangling generation (Fix for Bug 4)
-            pending_gen = ctx.get("current_generation")
-            if pending_gen:
-                _flush_generation(tracer, pending_gen, ctx, ide, flush=False)
-            _flush_session(tracer, session_key, ctx, ide, flush=False)
-            os.remove(path)
-            flushed_any = True
-            _LOGGER.info("Flushed stale session %s", session_key)
+            if _local_spans_enabled():
+                _enable_file_exporter(
+                    _local_span_path(session_key),
+                    expected_session_key=session_key,
+                )
+            if _finalize_session(tracer, session_key, ctx, ide):
+                flushed_any = True
+                _LOGGER.info("Flushed stale session %s", session_key)
         except Exception:
             continue
     if flushed_any:
-        _force_flush_provider()
+        _LOGGER.info("Finished stale-session finalization")
 
 
 # ---------------------------------------------------------------------------
@@ -1578,6 +1685,15 @@ def _parse_otlp_headers(value: str) -> dict:
 # ---------------------------------------------------------------------------
 # Tracing init — pure OpenTelemetry SDK
 # ---------------------------------------------------------------------------
+def _hook_distro_attributes() -> dict:
+    attrs = {"telemetry.distro.name": "opentelemetry-hooks"}
+    try:
+        attrs["telemetry.distro.version"] = importlib.metadata.version("opentelemetry-hooks")
+    except importlib.metadata.PackageNotFoundError:
+        pass
+    return attrs
+
+
 def _init_sdk_tracer_provider(resource_attrs: dict, disable_batch: bool) -> bool:
     """Configure the OTel SDK TracerProvider with OTLP exporter.
 
@@ -1744,6 +1860,8 @@ def _enable_console_log_exporter() -> None:
 def _span_to_dict(span) -> dict:
     """Serialize an OTel ReadableSpan to a JSON-compatible dict."""
     ctx = span.context
+    resource = getattr(span, "resource", None)
+    resource_attributes = dict(getattr(resource, "attributes", {}) or {})
     parent_id = None
     parent_ctx = span.parent
     if parent_ctx is not None and getattr(parent_ctx, "span_id", 0) != 0:
@@ -1756,6 +1874,7 @@ def _span_to_dict(span) -> dict:
         "start_time_ns": span.start_time,
         "end_time_ns": span.end_time,
         "attributes": dict(span.attributes or {}),
+        "resource": resource_attributes,
         "status": span.status.status_code.name if span.status else None,
     }
 
@@ -1763,8 +1882,9 @@ def _span_to_dict(span) -> dict:
 class _FileSpanExporter:
     """OTel SpanExporter that appends spans as JSONL to a file."""
 
-    def __init__(self, path: str) -> None:
+    def __init__(self, path: str, expected_session_key: Optional[str] = None) -> None:
         self._path = path
+        self._expected_session_key = expected_session_key
         lock_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", os.path.basename(path))
         self._lock_path = os.path.join(_LOCK_DIR, f"file_exporter_{lock_name}.lock")
 
@@ -1776,6 +1896,10 @@ class _FileSpanExporter:
             with _acquire_lock(self._lock_path):
                 with open(self._path, "a", encoding="utf-8") as fh:
                     for span in spans:
+                        if self._expected_session_key is not None:
+                            attributes = dict(span.attributes or {})
+                            if attributes.get("gen_ai.client.session_id") != self._expected_session_key:
+                                continue
                         fh.write(json.dumps(_span_to_dict(span), ensure_ascii=True, default=str) + "\n")
             return SpanExportResult.SUCCESS
         except OSError as exc:
@@ -1789,7 +1913,7 @@ class _FileSpanExporter:
         return True
 
 
-def _enable_file_exporter(path: str) -> None:
+def _enable_file_exporter(path: str, expected_session_key: Optional[str] = None) -> None:
     """Add a file span exporter to the TracerProvider for local span persistence."""
     if path in _FILE_EXPORTER_PATHS:
         return
@@ -1801,29 +1925,40 @@ def _enable_file_exporter(path: str) -> None:
         return
     provider = trace.get_tracer_provider()
     if isinstance(provider, TracerProvider):
-        provider.add_span_processor(SimpleSpanProcessor(_FileSpanExporter(path)))
+        provider.add_span_processor(
+            SimpleSpanProcessor(
+                _FileSpanExporter(path, expected_session_key=expected_session_key),
+            )
+        )
         _FILE_EXPORTER_PATHS.add(path)
 
 
-def _force_flush_provider(timeout_millis: int = 500) -> None:
+def _force_flush_provider(timeout_millis: int = 500) -> bool:
     """Flush the SDK TracerProvider and LoggerProvider to push pending data.
 
     Default timeout is short (500ms) to avoid hanging the IDE hook when the
     OTLP collector is unreachable.
     """
+    success = True
     try:
         provider = trace.get_tracer_provider()
         if hasattr(provider, "force_flush"):
-            provider.force_flush(timeout_millis=timeout_millis)
+            if provider.force_flush(timeout_millis=timeout_millis) is False:
+                success = False
     except Exception as exc:
+        success = False
         _LOGGER.warning("trace force_flush failed: %s", exc)
-    try:
-        from opentelemetry._logs import get_logger_provider
-        log_provider = get_logger_provider()
-        if hasattr(log_provider, "force_flush"):
-            log_provider.force_flush(timeout_millis=timeout_millis)
-    except Exception as exc:
-        _LOGGER.warning("log force_flush failed: %s", exc)
+    if _LOGS_INITIALIZED:
+        try:
+            from opentelemetry._logs import get_logger_provider
+            log_provider = get_logger_provider()
+            if hasattr(log_provider, "force_flush"):
+                if log_provider.force_flush(timeout_millis=timeout_millis) is False:
+                    success = False
+        except Exception as exc:
+            success = False
+            _LOGGER.warning("log force_flush failed: %s", exc)
+    return success
 
 
 def _init_tracing(
@@ -1854,6 +1989,7 @@ def _init_tracing(
     resource_attrs.setdefault("gen_ai.system", resolved_client_name)
     if ide != resolved_client_name:
         resource_attrs.setdefault("gen_ai.client.wrapper", ide)
+    resource_attrs.update(_hook_distro_attributes())
 
     # OS / host resource attributes (OTel semantic conventions)
     os_info = _get_os_info()
@@ -1974,26 +2110,24 @@ def _fmt_duration(duration) -> str:
 def _emit_mcp_log(event_name: str, data: dict, session_ctx: Optional[dict] = None) -> None:
     """Emit a structured OTel log record for MCP events with full I/O payload.
 
-    Cursor sends MCP events with these field names:
-    - ``command``    → MCP server name  (e.g. "gitlab-mcp", "atlassian")
-    - ``tool_name``  → MCP tool name    (e.g. "get_merge_requests", "jira_search")
-    - ``tool_input`` → input payload    (dict)
-    - ``result_json``→ output payload   (JSON string)
-    - ``duration``   → duration in ms   (float)
+    Cursor's current dedicated callbacks provide ``mcp_server_name`` and
+    ``tool_name``.  Older payloads may only provide ``command``; normalization
+    uses it strictly as a fallback and never over a real server field.
     """
     if not _LOGS_INITIALIZED:
         return
 
     logger = _get_otel_logger("mcp")
-    # Cursor uses "command" for server, "tool_name" for tool; fall back to mcp_server/mcp_tool
-    server = _first_present(data, ("mcp_server", "command")) or "unknown"
-    tool = _first_present(data, ("mcp_tool", "tool_name")) or "unknown"
+    data = _normalize_mcp_event_data(data, event_name)
+    server = data.get("mcp_server") or "unknown"
+    tool = data.get("mcp_tool") or "unknown"
 
     attrs = {
         "gen_ai.client.mcp_server": server,
         "gen_ai.client.mcp_tool": tool,
         "gen_ai.client.hook.event": event_name,
     }
+    attrs.update(_mcp_observability_attributes(event_name, data))
     attrs.update(_collect_event_enrichment_attributes(data, session_ctx=session_ctx))
     _tid, _sid = _inject_trace_context(attrs)
 
@@ -2027,7 +2161,7 @@ def _emit_mcp_log(event_name: str, data: dict, session_ctx: Optional[dict] = Non
                 attrs["gen_ai.client.mcp.output"] = text[:max_chars]
             break
 
-    # Duration — Cursor uses "duration" (float ms), fallback to "duration_ms"
+    # Keep the existing duration_ms attribute contract for both source keys.
     duration = _first_present(data, ("duration_ms", "duration"))
     if duration is not None:
         attrs["gen_ai.client.mcp.duration_ms"] = duration
@@ -2102,12 +2236,14 @@ def _emit_tool_log(event_name: str, data: dict, session_ctx: Optional[dict] = No
         return
 
     logger = _get_otel_logger("tool")
+    data = _normalize_mcp_event_data(data, event_name)
     tool_name = data.get("tool_name") or "unknown"
 
     attrs = {
         "gen_ai.client.hook.event": event_name,
         "gen_ai.client.tool_name": tool_name,
     }
+    attrs.update(_mcp_observability_attributes(event_name, data))
     attrs.update(_collect_event_enrichment_attributes(data, session_ctx=session_ctx))
     _tid, _sid = _inject_trace_context(attrs)
 
@@ -2139,6 +2275,14 @@ def _emit_tool_log(event_name: str, data: dict, session_ctx: Optional[dict] = No
                 attrs["gen_ai.client.tool.input"] = text[:max_chars]
             break
 
+    if data.get("mcp_tool"):
+        result = _first_present(data, ("result_json", "mcp_output", "tool_output", "output"))
+        if result is not None and capture_payload:
+            text = _stringify(result)
+            if mask:
+                text = _mask_text(text)
+            attrs["gen_ai.client.mcp.output"] = text[:max_chars]
+
     if event_name == "PostToolUseFailure":
         logger.warning("[%s] Tool failed: %s error=%s", _sid, tool_name, error, extra=attrs)
     elif event_name == "PreToolUse":
@@ -2163,6 +2307,21 @@ def _emit_event_log(event_name: str, data: dict, session_ctx: Optional[dict] = N
         all_attrs.update(_collect_event_enrichment_attributes(data, session_ctx=session_ctx))
         _tid, _sid = _inject_trace_context(all_attrs)
         logger.info("[%s] Hook event: %s", _sid, event_name, extra=all_attrs)
+
+
+def _emit_event_log_with_context(
+    event_name: str,
+    data: dict,
+    session_ctx: Optional[dict],
+    parent_ctx,
+) -> None:
+    """Emit log-only lifecycle evidence under the restored session trace context."""
+    if parent_ctx is None or _REAL_TRACE is None:
+        _emit_event_log(event_name, data, session_ctx=session_ctx)
+        return
+    parent_span = _REAL_TRACE.get_current_span(parent_ctx)
+    with _span_context(parent_span):
+        _emit_event_log(event_name, data, session_ctx=session_ctx)
 
 
 # ---------------------------------------------------------------------------
@@ -2310,9 +2469,8 @@ def _session_path(session_key: str) -> str:
     return os.path.join(_SESSION_DIR, f"{safe_key}.json")
 
 
-def _create_session_context(session_key: str, data: dict, ide: str) -> dict:
-    """Create and persist a new session context with upstream or synthetic trace IDs."""
-    os.makedirs(_SESSION_DIR, exist_ok=True)
+def _new_session_context(data: dict, ide: str) -> dict:
+    """Build a new session context without writing it."""
     upstream_ctx = _resolve_upstream_trace_context(data)
     ctx = {
         "phantom_parent_id": f"{random.getrandbits(64):016x}",
@@ -2339,8 +2497,24 @@ def _create_session_context(session_key: str, data: dict, ide: str) -> dict:
     if agent_engine and agent_engine != ide:
         ctx["agent_engine"] = agent_engine
         ctx["agent_engine_confirmed"] = True
-    lock_path = os.path.join(_LOCK_DIR, f"{re.sub(r'[^A-Za-z0-9_.-]+', '_', session_key)}.lock")
+    return ctx
+
+
+def _session_lock_path(session_key: str) -> str:
+    safe_key = re.sub(r"[^A-Za-z0-9_.-]+", "_", session_key)
+    return os.path.join(_LOCK_DIR, f"{safe_key}.lock")
+
+
+def _create_session_context(session_key: str, data: dict, ide: str) -> dict:
+    """Idempotently create and persist a session context."""
+    os.makedirs(_SESSION_DIR, exist_ok=True)
+    lock_path = _session_lock_path(session_key)
     with _acquire_lock(lock_path):
+        existing = _load_session_context(session_key)
+        if existing:
+            return existing
+        ctx = _new_session_context(data, ide)
+        ctx["session_id"] = session_key
         _atomic_write_json(_session_path(session_key), ctx)
     return ctx
 
@@ -2360,31 +2534,39 @@ def _load_session_context(session_key: Optional[str]) -> Optional[dict]:
 
 def _write_session_context(session_key: str, ctx: dict) -> None:
     os.makedirs(_SESSION_DIR, exist_ok=True)
-    lock_path = os.path.join(_LOCK_DIR, f"{re.sub(r'[^A-Za-z0-9_.-]+', '_', session_key)}.lock")
+    lock_path = _session_lock_path(session_key)
     with _acquire_lock(lock_path):
         _atomic_write_json(_session_path(session_key), ctx)
+
+
+def _update_session_context(session_key: str, mutator):
+    """Atomically reload, mutate, and persist one session record."""
+    os.makedirs(_SESSION_DIR, exist_ok=True)
+    with _acquire_lock(_session_lock_path(session_key)):
+        ctx = _load_session_context(session_key)
+        if not ctx:
+            return None, None
+        result = mutator(ctx)
+        _atomic_write_json(_session_path(session_key), ctx)
+        return ctx, result
 
 
 def _maybe_enrich_session_context(session_key: Optional[str], session_ctx: Optional[dict], data: dict) -> Optional[dict]:
     if not session_key or not session_ctx:
         return session_ctx
-    repo_ctx = _resolve_repository_context(data, session_ctx=session_ctx)
-    changed = False
-    for key in ("repo_root", "vcs.repository.owner", "vcs.repository.name"):
-        value = repo_ctx.get(key)
-        if value and session_ctx.get(key) != value:
-            session_ctx[key] = value
-            changed = True
-    repo_root = session_ctx.get("repo_root")
-    if repo_root and isinstance(session_ctx.get("memory"), dict):
-        memory_files = session_ctx["memory"].get("files")
-        files_before = list(memory_files) if isinstance(memory_files, list) else memory_files
-        normalize_memory_summary(session_ctx["memory"], repo_root=repo_root)
-        if session_ctx["memory"].get("files") != files_before:
-            changed = True
-    if changed:
-        _write_session_context(session_key, session_ctx)
-    return session_ctx
+
+    def mutate(latest: dict) -> None:
+        repo_ctx = _resolve_repository_context(data, session_ctx=latest)
+        for key in ("repo_root", "vcs.repository.owner", "vcs.repository.name"):
+            value = repo_ctx.get(key)
+            if value:
+                latest[key] = value
+        repo_root = latest.get("repo_root")
+        if repo_root and isinstance(latest.get("memory"), dict):
+            normalize_memory_summary(latest["memory"], repo_root=repo_root)
+
+    latest, _result = _update_session_context(session_key, mutate)
+    return latest or session_ctx
 
 
 def _maybe_bind_session_to_upstream_context(session_key: Optional[str], session_ctx: Optional[dict], data: dict) -> Optional[dict]:
@@ -2393,16 +2575,21 @@ def _maybe_bind_session_to_upstream_context(session_key: Optional[str], session_
     upstream_ctx = _resolve_upstream_trace_context(data)
     if upstream_ctx is None:
         return session_ctx
-    session_ctx["trace_id"] = upstream_ctx["trace_id"]
-    session_ctx["upstream_parent_span_id"] = upstream_ctx["parent_span_id"]
-    session_ctx["trace_flags"] = upstream_ctx.get("trace_flags", "01")
-    if upstream_ctx.get("tracestate"):
-        session_ctx["tracestate"] = upstream_ctx["tracestate"]
-    else:
-        session_ctx.pop("tracestate", None)
-    session_ctx["context_origin"] = "upstream"
-    _write_session_context(session_key, session_ctx)
-    return session_ctx
+
+    def mutate(latest: dict) -> None:
+        if latest.get("context_origin") == "upstream":
+            return
+        latest["trace_id"] = upstream_ctx["trace_id"]
+        latest["upstream_parent_span_id"] = upstream_ctx["parent_span_id"]
+        latest["trace_flags"] = upstream_ctx.get("trace_flags", "01")
+        if upstream_ctx.get("tracestate"):
+            latest["tracestate"] = upstream_ctx["tracestate"]
+        else:
+            latest.pop("tracestate", None)
+        latest["context_origin"] = "upstream"
+
+    latest, _result = _update_session_context(session_key, mutate)
+    return latest or session_ctx
 
 
 def _clear_session_context(session_key: Optional[str]) -> None:
@@ -2416,14 +2603,36 @@ def _clear_session_context(session_key: Optional[str]) -> None:
         pass
 
 
-def _advance_generation(session_key: str, session_ctx: dict) -> str:
-    """Start a new generation within the session. Returns the generation key."""
+def _remember_pending_generation(session_ctx: dict, gen_key: str, *, make_current: bool = True) -> str:
+    pending = session_ctx.setdefault("pending_generations", [])
+    if gen_key not in pending:
+        pending.append(gen_key)
+        session_ctx["generation_count"] = session_ctx.get("generation_count", 0) + 1
+    if make_current:
+        session_ctx["current_generation"] = gen_key
+    return gen_key
+
+
+def _new_generation_key(session_key: str, session_ctx: dict) -> str:
     count = session_ctx.get("generation_count", 0) + 1
     gen_key = f"{session_key}_gen_{count}"
     session_ctx["generation_count"] = count
+    pending = session_ctx.setdefault("pending_generations", [])
+    if gen_key not in pending:
+        pending.append(gen_key)
     session_ctx["current_generation"] = gen_key
-    _write_session_context(session_key, session_ctx)
     return gen_key
+
+
+def _advance_generation(session_key: str, session_ctx: dict) -> str:
+    """Atomically start a new generation within the session."""
+    _ctx, gen_key = _update_session_context(
+        session_key,
+        lambda latest: _new_generation_key(session_key, latest),
+    )
+    if gen_key:
+        return gen_key
+    return _new_generation_key(session_key, session_ctx)
 
 
 def _resolve_generation_key(data: dict, session_ctx: Optional[dict]) -> Optional[str]:
@@ -2649,6 +2858,482 @@ def _clear_batch_events(key: str) -> None:
             os.remove(path)
     except OSError:
         pass
+
+
+@dataclass(slots=True)
+class _BufferedEventDecision:
+    generation_key: Optional[str]
+    data: dict
+    duplicate: bool = False
+    correlated: bool = False
+
+
+def _event_tool_key(data: dict) -> Optional[str]:
+    _server, mcp_tool = _mcp_identity(data)
+    value = mcp_tool or data.get("tool_name")
+    if not isinstance(value, str) or not value:
+        return None
+    return value
+
+
+def _prune_session_event_state(session_ctx: dict, now_ns: int) -> None:
+    cutoff_ns = now_ns - max(1, _state_ttl_seconds()) * 1_000_000_000
+    seen = session_ctx.get("seen_events")
+    if isinstance(seen, list):
+        session_ctx["seen_events"] = [
+            entry for entry in seen[-_SESSION_EVENT_LIMIT:]
+            if isinstance(entry, dict) and entry.get("seen_at_ns", now_ns) >= cutoff_ns
+        ]
+    invocations = session_ctx.get("tool_invocations")
+    if isinstance(invocations, list):
+        session_ctx["tool_invocations"] = [
+            entry for entry in invocations[-_SESSION_INVOCATION_LIMIT:]
+            if isinstance(entry, dict) and entry.get("updated_at_ns", now_ns) >= cutoff_ns
+        ]
+
+
+def _mark_event_seen(
+    session_ctx: dict,
+    key: str,
+    now_ns: int,
+    generation_key: Optional[str],
+    *,
+    window_seconds: Optional[float] = None,
+) -> bool:
+    """Return True for a duplicate and remember new observations in bounded state."""
+    _prune_session_event_state(session_ctx, now_ns)
+    seen = session_ctx.setdefault("seen_events", [])
+    for entry in reversed(seen):
+        if entry.get("key") != key:
+            continue
+        if window_seconds is None:
+            return True
+        age_ns = now_ns - entry.get("seen_at_ns", now_ns)
+        if age_ns <= int(window_seconds * 1_000_000_000):
+            return True
+        break
+    seen.append({"key": key, "seen_at_ns": now_ns, "generation_key": generation_key})
+    del seen[:-_SESSION_EVENT_LIMIT]
+    return False
+
+
+def _no_id_mcp_fingerprint(event_name: str, data: dict, generation_key: Optional[str]) -> str:
+    server, tool = _mcp_identity(data)
+    result = _first_present(data, ("result_json", "mcp_output", "tool_output", "output"))
+    result_hash = _hash_text(_stringify(result)) if result is not None else ""
+    error = data.get("error")
+    error_hash = _hash_text(str(error)) if error is not None else ""
+    supplied_time = _first_present(data, ("timestamp_ns", "timestamp", "event_time"))
+    payload = "|".join(str(value or "") for value in (
+        event_name,
+        server,
+        tool,
+        generation_key,
+        data.get("duration_ms") or data.get("duration"),
+        data.get("status"),
+        result_hash,
+        error_hash,
+        supplied_time,
+    ))
+    return f"mcp-fingerprint:{hashlib.sha256(payload.encode('utf-8')).hexdigest()}"
+
+
+def _store_mcp_result(invocation: dict, data: dict) -> None:
+    duration = _first_present(data, ("duration_ms", "duration"))
+    if duration is not None:
+        invocation["duration_ms"] = duration
+    if data.get("status") is not None:
+        invocation["mcp_status"] = data.get("status")
+    if data.get("error") is not None:
+        invocation["error"] = str(data.get("error"))
+        invocation["mcp_status"] = "error"
+    result = _first_present(data, ("result_json", "mcp_output", "tool_output", "output"))
+    if result is not None:
+        text = _stringify(result)
+        invocation["mcp_result_length"] = len(text)
+        invocation["mcp_result_sha256"] = _hash_text(text)
+        if _safe_bool(os.getenv("IDE_OTEL_MCP_LOG_PAYLOAD", "true")):
+            invocation["result_json"] = result
+
+
+def _merge_invocation_data(data: dict, invocation: dict) -> dict:
+    merged = dict(data)
+    for key in (
+        "tool_use_id",
+        "mcp_server",
+        "mcp_tool",
+        "duration_ms",
+        "mcp_status",
+        "error",
+        "mcp_result_length",
+        "mcp_result_sha256",
+        "result_json",
+    ):
+        value = invocation.get(key)
+        if value is not None and merged.get(key) is None:
+            merged[key] = value
+    if merged.get("status") is None and invocation.get("mcp_status") is not None:
+        merged["status"] = invocation["mcp_status"]
+    return merged
+
+
+def _matching_open_tools(
+    session_ctx: dict,
+    data: dict,
+    generation_key: Optional[str],
+    *,
+    mcp_only: bool = False,
+    after_mcp: bool = False,
+) -> list:
+    tool_key = _event_tool_key(data)
+    server, _tool = _mcp_identity(data)
+    candidates = []
+    for invocation in session_ctx.get("tool_invocations", []):
+        if invocation.get("state") != "open":
+            continue
+        if mcp_only and not invocation.get("is_mcp"):
+            continue
+        if tool_key and invocation.get("tool_key") != tool_key:
+            continue
+        if generation_key and invocation.get("generation_key") != generation_key:
+            continue
+        if data.get("turn_id") and invocation.get("turn_id") != data.get("turn_id"):
+            continue
+        if server and invocation.get("mcp_server") not in (None, server):
+            continue
+        if after_mcp and not invocation.get("mcp_before_seen"):
+            continue
+        if after_mcp and invocation.get("mcp_after_seen"):
+            continue
+        if not after_mcp and invocation.get("mcp_before_seen"):
+            continue
+        candidates.append(invocation)
+    return sorted(candidates, key=lambda item: item.get("started_at_ns", 0))
+
+
+class MCPInvocationCorrelator:
+    """Own bounded, session-local tool dedupe and MCP correlation state."""
+
+    def __init__(
+        self,
+        session_ctx: dict,
+        ide: str,
+        generation_key: Optional[str],
+        now_ns: int,
+    ) -> None:
+        self.session_ctx = session_ctx
+        self.ide = ide
+        self.generation_key = generation_key
+        self.now_ns = now_ns
+
+    @property
+    def invocations(self) -> list:
+        """Return the current session-owned list after any pruning replacement."""
+        return self.session_ctx.setdefault("tool_invocations", [])
+
+    def prepare(self, event_name: str, data: dict) -> _BufferedEventDecision:
+        prepared = _normalize_mcp_event_data(data, event_name, self.ide)
+        invocation_id = prepared.get("tool_use_id")
+        if self._is_duplicate(event_name, prepared, invocation_id):
+            return self._decision(prepared, duplicate=True)
+
+        if event_name == "PreToolUse" and invocation_id:
+            self._record_open_tool(prepared, invocation_id)
+        elif event_name == "PermissionRequest" and not invocation_id:
+            prepared, duplicate = self._correlate_permission(event_name, prepared)
+            if duplicate:
+                return self._decision(prepared, duplicate=True, correlated=True)
+        elif event_name in _MCP_EVENTS and self.ide == "cursor" and not invocation_id:
+            correlated = self._correlate_cursor_mcp(event_name, prepared)
+            if correlated is not None:
+                return self._decision(correlated, correlated=True)
+        elif event_name in {"PostToolUse", "PostToolUseFailure"} and invocation_id:
+            prepared = self._close_tool(event_name, prepared, invocation_id)
+
+        return self._decision(prepared)
+
+    def _decision(
+        self,
+        data: dict,
+        *,
+        duplicate: bool = False,
+        correlated: bool = False,
+    ) -> _BufferedEventDecision:
+        return _BufferedEventDecision(self.generation_key, data, duplicate=duplicate, correlated=correlated)
+
+    def _is_duplicate(self, event_name: str, data: dict, invocation_id: Optional[str]) -> bool:
+        if invocation_id:
+            return _mark_event_seen(
+                self.session_ctx,
+                f"tool:{event_name}:{invocation_id}",
+                self.now_ns,
+                self.generation_key,
+            )
+        if event_name in _GENERATION_END_EVENTS and self.generation_key:
+            return _mark_event_seen(
+                self.session_ctx,
+                f"generation-end:{event_name}:{self.generation_key}",
+                self.now_ns,
+                self.generation_key,
+            )
+        if event_name not in _MCP_EVENTS:
+            return False
+        return _mark_event_seen(
+            self.session_ctx,
+            _no_id_mcp_fingerprint(event_name, data, self.generation_key),
+            self.now_ns,
+            self.generation_key,
+            window_seconds=0.25,
+        )
+
+    def _record_open_tool(self, data: dict, invocation_id: str) -> None:
+        if any(item.get("tool_use_id") == invocation_id for item in self.invocations):
+            return
+        server, tool = _mcp_identity(data)
+        self.invocations.append({
+            "tool_use_id": invocation_id,
+            "tool_name": data.get("tool_name"),
+            "tool_key": _event_tool_key(data),
+            "mcp_server": server,
+            "mcp_tool": tool,
+            "is_mcp": bool(server or tool),
+            "generation_key": self.generation_key,
+            "turn_id": data.get("turn_id"),
+            "state": "open",
+            "started_at_ns": self.now_ns,
+            "updated_at_ns": self.now_ns,
+        })
+        del self.invocations[:-_SESSION_INVOCATION_LIMIT]
+
+    def _correlate_permission(self, event_name: str, data: dict) -> Tuple[dict, bool]:
+        candidates = _matching_open_tools(self.session_ctx, data, self.generation_key)
+        if len(candidates) != 1:
+            return data, False
+        prepared = dict(data)
+        invocation_id = candidates[0]["tool_use_id"]
+        prepared["tool_use_id"] = invocation_id
+        duplicate = _mark_event_seen(
+            self.session_ctx,
+            f"tool:{event_name}:{invocation_id}",
+            self.now_ns,
+            self.generation_key,
+        )
+        return prepared, duplicate
+
+    def _correlate_cursor_mcp(self, event_name: str, data: dict) -> Optional[dict]:
+        candidates = _matching_open_tools(
+            self.session_ctx,
+            data,
+            self.generation_key,
+            mcp_only=True,
+            after_mcp=event_name == "AfterMCPExecution",
+        )
+        if event_name == "AfterMCPExecution" and not candidates:
+            candidates = _matching_open_tools(
+                self.session_ctx,
+                data,
+                self.generation_key,
+                mcp_only=True,
+            )
+        if not candidates:
+            return None
+
+        invocation = candidates[0]
+        prepared = dict(data)
+        prepared["tool_use_id"] = invocation["tool_use_id"]
+        server, tool = _mcp_identity(prepared)
+        invocation["mcp_server"] = server or invocation.get("mcp_server")
+        invocation["mcp_tool"] = tool or invocation.get("mcp_tool")
+        invocation["is_mcp"] = True
+        invocation["updated_at_ns"] = self.now_ns
+        if event_name == "BeforeMCPExecution":
+            invocation["mcp_before_seen"] = True
+        else:
+            invocation["mcp_after_seen"] = True
+            _store_mcp_result(invocation, prepared)
+            invocation.setdefault("mcp_status", "success")
+        return prepared
+
+    def _close_tool(self, event_name: str, data: dict, invocation_id: str) -> dict:
+        invocation = next(
+            (item for item in self.invocations if item.get("tool_use_id") == invocation_id),
+            None,
+        )
+        if invocation is None:
+            return data
+        prepared = _merge_invocation_data(data, invocation)
+        invocation["state"] = "closed"
+        invocation["updated_at_ns"] = self.now_ns
+        if event_name == "PostToolUseFailure":
+            invocation["mcp_status"] = "error"
+        else:
+            invocation.setdefault("mcp_status", "success")
+        return prepared
+
+
+def _buffer_session_event(session_key: str, event_name: str, data: dict, ide: str) -> _BufferedEventDecision:
+    """Atomically prepare and append a generation-owned event."""
+    now_ns = time.time_ns()
+
+    def mutate(session_ctx: dict) -> _BufferedEventDecision:
+        if session_ctx.get("finalizing"):
+            return _BufferedEventDecision(None, data, duplicate=True)
+        explicit_gen = _generation_key_from_data(data)
+        if event_name in _GENERATION_START_EVENTS:
+            gen_key = (
+                _remember_pending_generation(session_ctx, explicit_gen)
+                if explicit_gen
+                else _new_generation_key(session_key, session_ctx)
+            )
+        elif explicit_gen:
+            gen_key = _remember_pending_generation(session_ctx, explicit_gen)
+        else:
+            gen_key = session_ctx.get("current_generation")
+            if not gen_key:
+                gen_key = _new_generation_key(session_key, session_ctx)
+
+        decision = MCPInvocationCorrelator(session_ctx, ide, gen_key, now_ns).prepare(
+            event_name,
+            data,
+        )
+        if not decision.duplicate and not decision.correlated:
+            _append_batch_event(gen_key, event_name, decision.data)
+        session_ctx["last_seen_at_ns"] = now_ns
+        return decision
+
+    _ctx, decision = _update_session_context(session_key, mutate)
+    if decision is None:
+        session_ctx = _create_session_context(session_key, data, ide)
+        _ctx, decision = _update_session_context(session_key, mutate)
+        if decision is None:
+            gen_key = _resolve_generation_key(data, session_ctx)
+            return _BufferedEventDecision(gen_key, data)
+    return decision
+
+
+def _buffer_generation_end(session_key: str, event_name: str, data: dict, ide: str) -> _BufferedEventDecision:
+    """Append a Stop event to the active generation without creating a new one."""
+    now_ns = time.time_ns()
+
+    def mutate(session_ctx: dict) -> _BufferedEventDecision:
+        if session_ctx.get("finalizing"):
+            return _BufferedEventDecision(None, data, duplicate=True)
+        gen_key = _generation_key_from_data(data) or session_ctx.get("current_generation")
+        if not gen_key:
+            pending = session_ctx.get("pending_generations") or []
+            gen_key = pending[-1] if pending else None
+        if not gen_key:
+            return _BufferedEventDecision(None, data)
+        decision = MCPInvocationCorrelator(session_ctx, ide, gen_key, now_ns).prepare(
+            event_name,
+            data,
+        )
+        if not decision.duplicate:
+            _append_batch_event(gen_key, event_name, decision.data)
+        session_ctx["last_seen_at_ns"] = now_ns
+        return decision
+
+    _ctx, decision = _update_session_context(session_key, mutate)
+    return decision or _BufferedEventDecision(None, data)
+
+
+def _prepare_streaming_session_event(
+    session_key: str,
+    event_name: str,
+    data: dict,
+    ide: str,
+) -> _BufferedEventDecision:
+    """Apply the same persisted dedupe/correlation policy without writing a batch."""
+    now_ns = time.time_ns()
+
+    def mutate(session_ctx: dict) -> _BufferedEventDecision:
+        if session_ctx.get("finalizing"):
+            return _BufferedEventDecision(None, data, duplicate=True)
+        explicit_gen = _generation_key_from_data(data)
+        if event_name in _GENERATION_START_EVENTS:
+            gen_key = (
+                _remember_pending_generation(session_ctx, explicit_gen)
+                if explicit_gen
+                else _new_generation_key(session_key, session_ctx)
+            )
+        elif event_name in _GENERATION_END_EVENTS:
+            gen_key = explicit_gen or session_ctx.get("current_generation")
+            if not gen_key:
+                return _BufferedEventDecision(None, data, duplicate=True)
+        elif explicit_gen:
+            gen_key = _remember_pending_generation(session_ctx, explicit_gen)
+        else:
+            gen_key = session_ctx.get("current_generation")
+            if not gen_key:
+                gen_key = _new_generation_key(session_key, session_ctx)
+        decision = MCPInvocationCorrelator(session_ctx, ide, gen_key, now_ns).prepare(
+            event_name,
+            data,
+        )
+        session_ctx["last_seen_at_ns"] = now_ns
+        return decision
+
+    _ctx, decision = _update_session_context(session_key, mutate)
+    return decision or _BufferedEventDecision(None, data)
+
+
+def _complete_generation_state(session_key: str, gen_key: str, memory: Optional[dict] = None) -> None:
+    def mutate(session_ctx: dict) -> None:
+        pending = session_ctx.get("pending_generations")
+        if isinstance(pending, list):
+            session_ctx["pending_generations"] = [key for key in pending if key != gen_key]
+        if session_ctx.get("current_generation") == gen_key:
+            session_ctx.pop("current_generation", None)
+        invocations = session_ctx.get("tool_invocations")
+        if isinstance(invocations, list):
+            session_ctx["tool_invocations"] = [
+                item for item in invocations if item.get("generation_key") != gen_key
+            ]
+        if isinstance(memory, dict):
+            session_ctx["memory"] = memory
+
+    _update_session_context(session_key, mutate)
+
+
+def _pending_batch_keys_for_session(session_key: str, session_ctx: Optional[dict]) -> list:
+    """Enumerate registered and discovered generation batches owned by a session."""
+    keys = []
+    if session_ctx:
+        for key in session_ctx.get("pending_generations") or []:
+            if key and key not in keys:
+                keys.append(key)
+        current = session_ctx.get("current_generation")
+        if current and current not in keys:
+            keys.append(current)
+
+    if not os.path.isdir(_BATCH_DIR):
+        return keys
+    session_batch_key = f"{session_key}_session"
+    for name in os.listdir(_BATCH_DIR):
+        if not name.endswith(".jsonl"):
+            continue
+        key = name[:-6]
+        if key == session_batch_key or key in keys:
+            continue
+        events = _load_batch_events(key)
+        if any(_session_key(entry.get("data") or {}) == session_key for entry in events):
+            keys.append(key)
+    return keys
+
+
+def _enrich_buffered_event(data: dict, event_name: str, session_ctx: Optional[dict], ide: str) -> dict:
+    enriched = _normalize_mcp_event_data(data, event_name, ide)
+    invocation_id = enriched.get("tool_use_id")
+    if not invocation_id or not session_ctx:
+        return enriched
+    invocation = next(
+        (
+            item for item in session_ctx.get("tool_invocations", [])
+            if item.get("tool_use_id") == invocation_id
+        ),
+        None,
+    )
+    return _merge_invocation_data(enriched, invocation) if invocation else enriched
 
 
 # ---------------------------------------------------------------------------
@@ -2912,6 +3597,7 @@ def _apply_genai_semconv(span, event_name: str, data: dict, ide: str, session_ct
 # ---------------------------------------------------------------------------
 def _populate_span(span, event_name: str, data: dict, ide: str, session_ctx: Optional[dict] = None, batch_model: Optional[str] = None) -> None:
     """Attach all attributes to a span and emit OTel log records."""
+    data = _normalize_mcp_event_data(data, event_name, ide)
     span.set_attribute("gen_ai.client.hook.event", event_name)
     _set_client_identity_attributes(span, ide, data=data, session_ctx=session_ctx)
     _apply_enrichment_attributes(span, data, session_ctx=session_ctx)
@@ -2951,6 +3637,7 @@ def _populate_span(span, event_name: str, data: dict, ide: str, session_ctx: Opt
     mapping = _EVENT_ATTR_MAP.get(event_name, {})
     for key, attr in mapping.items():
         _set_if_present(span, attr, data.get(key))
+    _apply_mcp_attributes(span, event_name, data)
     _set_codex_tool_attrs(span, event_name, data)
 
     # Text fields
@@ -3076,7 +3763,7 @@ def _apply_memory_summary_attrs(span, prefix: str, summary: dict) -> None:
 # ---------------------------------------------------------------------------
 # Flush helpers (session-level batching)
 # ---------------------------------------------------------------------------
-def _flush_generation(tracer, gen_key: str, session_ctx: Optional[dict], ide: str, flush: bool = True) -> None:
+def _flush_generation_unlocked(tracer, gen_key: str, session_ctx: Optional[dict], ide: str, flush: bool = True) -> bool:
     """Flush buffered generation events as a subtree under the session trace."""
     batch = sorted(
         _load_batch_events(gen_key),
@@ -3084,7 +3771,15 @@ def _flush_generation(tracer, gen_key: str, session_ctx: Optional[dict], ide: st
     )
     if not batch:
         _clear_batch_events(gen_key)
-        return
+        return True
+
+    for entry in batch:
+        entry["data"] = _enrich_buffered_event(
+            entry.get("data") or {},
+            entry.get("event") or "unknown",
+            session_ctx,
+            ide,
+        )
 
     first_ts = batch[0].get("timestamp_ns") or time.time_ns()
     last_ts = batch[-1].get("timestamp_ns") or time.time_ns()
@@ -3111,6 +3806,11 @@ def _flush_generation(tracer, gen_key: str, session_ctx: Optional[dict], ide: st
     gen_ctx = trace.set_span_in_context(gen_span)
     with _span_context(gen_span):
         gen_span.set_attribute("gen_ai.client.generation_id", gen_key)
+        _set_if_present(
+            gen_span,
+            "gen_ai.client.session_id",
+            _session_key(first_event_data) or (session_ctx or {}).get("session_id"),
+        )
         gen_span.set_attribute("gen_ai.client.event.count", len(batch))
         _set_if_present(gen_span, "gen_ai.request.model", batch_model)
         _apply_memory_summary_attrs(gen_span, "gen_ai.client.memory", memory_summary)
@@ -3133,18 +3833,27 @@ def _flush_generation(tracer, gen_key: str, session_ctx: Optional[dict], ide: st
             span.end(end_time=next_ts)
 
         gen_span.end(end_time=last_ts)
-        _clear_batch_events(gen_key)
 
     if session_ctx is not None:
         session_memory = session_ctx.setdefault("memory", {})
         merge_memory_summaries(session_memory, memory_summary, repo_root=repo_root)
 
-    if flush:
-        _force_flush_provider()
+    success = not flush or _force_flush_provider()
+    if success:
+        _clear_batch_events(gen_key)
     _LOGGER.info("Flushed generation %s (%d events)", gen_key, len(batch))
+    return success
 
 
-def _flush_session(tracer, session_key: str, session_ctx: dict, ide: str, flush: bool = True) -> None:
+def _flush_generation(tracer, gen_key: str, session_ctx: Optional[dict], ide: str, flush: bool = True) -> bool:
+    """Serialize generation flushes so duplicate Stop/SessionEnd callbacks are idempotent."""
+    safe_key = re.sub(r"[^A-Za-z0-9_.-]+", "_", gen_key)
+    lock_path = os.path.join(_LOCK_DIR, f"flush_{safe_key}.lock")
+    with _acquire_lock(lock_path):
+        return _flush_generation_unlocked(tracer, gen_key, session_ctx, ide, flush=flush)
+
+
+def _flush_session(tracer, session_key: str, session_ctx: dict, ide: str, flush: bool = True) -> bool:
     """Emit the root session span covering the full session duration."""
     start_ns = session_ctx.get("start_time_ns") or time.time_ns()
     end_ns = time.time_ns()
@@ -3171,10 +3880,41 @@ def _flush_session(tracer, session_key: str, session_ctx: dict, ide: str, flush:
         _log_with_span(_LOGGER, logging.INFO, session_span, "Session span: session=%s", session_key)
         session_span.end(end_time=end_ns)
 
-    if flush:
-        _force_flush_provider()
+    success = not flush or _force_flush_provider()
     trace_id = session_ctx.get("trace_id", "unknown")
     _LOGGER.info("Flushed session %s (trace_id=%s)", session_key, trace_id)
+    return success
+
+
+def _finalize_session(
+    tracer,
+    session_key: str,
+    session_ctx: Optional[dict],
+    ide: str,
+    *,
+    flush: bool = True,
+) -> bool:
+    """Flush every session-owned batch, emit one root, then clean all state."""
+    safe_key = re.sub(r"[^A-Za-z0-9_.-]+", "_", session_key)
+    finalize_lock = os.path.join(_LOCK_DIR, f"finalize_{safe_key}.lock")
+    with _acquire_lock(finalize_lock):
+        current_ctx, _result = _update_session_context(
+            session_key,
+            lambda latest: latest.__setitem__("finalizing", True),
+        )
+        if not current_ctx:
+            return True
+        session_ctx = current_ctx
+        pending = _pending_batch_keys_for_session(session_key, session_ctx)
+        session_ctx["generation_count"] = max(session_ctx.get("generation_count", 0), len(pending))
+        for gen_key in pending:
+            if not _flush_generation(tracer, gen_key, session_ctx, ide, flush=flush):
+                return False
+        if not _flush_session(tracer, session_key, session_ctx, ide, flush=flush):
+            return False
+        _clear_batch_events(f"{session_key}_session")
+        _clear_session_context(session_key)
+        return True
 
 
 # ---------------------------------------------------------------------------
@@ -3195,6 +3935,7 @@ def main() -> int:
     raw_event = _get_event_name(data)
     event_name = _normalize_event(raw_event)
     ide = _detect_ide(data)
+    data = _normalize_mcp_event_data(data, event_name, ide)
     sk = _session_key(data)
     session_ctx = _load_session_context(sk)
     session_ctx = _maybe_bind_session_to_upstream_context(sk, session_ctx, data)
@@ -3213,25 +3954,13 @@ def main() -> int:
         if event_name in _SESSION_START_EVENTS:
             if sk:
                 _create_session_context(sk, data, ide)
-                _append_batch_event(f"{sk}_session", event_name, data)
             _emit_stdout_response(event_name, ide, data)
             return 0
 
-        if event_name in _GENERATION_START_EVENTS:
-            gen_key = _generation_key_from_data(data)
-            if not gen_key and sk and session_ctx:
-                gen_key = _advance_generation(sk, session_ctx)
-            if gen_key:
-                _append_batch_event(gen_key, event_name, data)
+        if sk and event_name not in _GENERATION_END_EVENTS and event_name not in _SESSION_END_EVENTS:
+            _buffer_session_event(sk, event_name, data, ide)
             _emit_stdout_response(event_name, ide, data)
             return 0
-
-        if event_name not in _GENERATION_END_EVENTS and event_name not in _SESSION_END_EVENTS:
-            gen_key = _resolve_generation_key(data, session_ctx)
-            if gen_key:
-                _append_batch_event(gen_key, event_name, data)
-                _emit_stdout_response(event_name, ide, data)
-                return 0
 
     if not _init_tracing(
         ide,
@@ -3241,25 +3970,27 @@ def main() -> int:
         _emit_stdout_response(event_name, ide, data)
         return 0
 
-    if _local_spans_enabled():
-        _enable_file_exporter(_local_span_path(_session_key(data)))
-
     tracer = trace.get_tracer("ide-hooks")
     _flush_stale_sessions(tracer)
 
-    try:
-        if sk and session_ctx and agent_engine and agent_engine != ide:
-            if session_ctx.get("agent_engine") != agent_engine or not session_ctx.get("agent_engine_confirmed"):
-                session_ctx["agent_engine"] = agent_engine
-                session_ctx["agent_engine_confirmed"] = True
-                _write_session_context(sk, session_ctx)
+    if _local_spans_enabled():
+        _enable_file_exporter(
+            _local_span_path(sk),
+            expected_session_key=sk,
+        )
 
-        # Update last_known_model if present in current event (Fix A)
+    try:
         if sk and session_ctx:
-            if model := _first_present(data, ("request_model", "model", "model_name")):
-                if session_ctx.get("last_known_model") != model:
-                    session_ctx["last_known_model"] = model
-                    _write_session_context(sk, session_ctx)
+            model = _first_present(data, ("request_model", "model", "model_name"))
+
+            def update_observations(latest: dict) -> None:
+                if agent_engine and agent_engine != ide:
+                    latest["agent_engine"] = agent_engine
+                    latest["agent_engine_confirmed"] = True
+                if model:
+                    latest["last_known_model"] = model
+
+            session_ctx, _result = _update_session_context(sk, update_observations)
 
         # ── Batch mode: session-level trace hierarchy ──
         if _batch_enabled():
@@ -3268,58 +3999,34 @@ def main() -> int:
             if event_name in _SESSION_START_EVENTS:
                 if sk:
                     session_ctx = _create_session_context(sk, data, ide)
-                    _append_batch_event(f"{sk}_session", event_name, data)
-                _emit_stdout_response(event_name, ide, data)
-                return 0
-
-            # UserPromptSubmit: start a new generation
-            if event_name in _GENERATION_START_EVENTS:
-                gen_key = _generation_key_from_data(data)
-                if not gen_key and sk and session_ctx:
-                    gen_key = _advance_generation(sk, session_ctx)
-                    session_ctx = _load_session_context(sk)
-                if gen_key:
-                    _append_batch_event(gen_key, event_name, data)
                 _emit_stdout_response(event_name, ide, data)
                 return 0
 
             # Stop: flush generation
             if event_name in _GENERATION_END_EVENTS:
-                gen_key = _resolve_generation_key(data, session_ctx)
-                if gen_key:
-                    _append_batch_event(gen_key, event_name, data)
-                    _flush_generation(tracer, gen_key, session_ctx, ide)
-                    # Clear current_generation in session state
-                    if sk and session_ctx:
-                        session_ctx.pop("current_generation", None)
-                        _write_session_context(sk, session_ctx)
+                decision = _buffer_generation_end(sk, event_name, data, ide) if sk else None
+                gen_key = decision.generation_key if decision else None
+                session_ctx = _load_session_context(sk)
+                if gen_key and _flush_generation(tracer, gen_key, session_ctx, ide):
+                    memory = session_ctx.get("memory") if session_ctx else None
+                    _complete_generation_state(sk, gen_key, memory=memory)
                 _emit_stdout_response(event_name, ide, data)
                 return 0
 
             # SessionEnd: emit session root span, clean up
             if event_name in _SESSION_END_EVENTS:
-                if sk and session_ctx:
-                    # Flush any dangling generation (Fix for Bug 4)
-                    pending_gen = session_ctx.get("current_generation")
-                    if pending_gen:
-                        _flush_generation(tracer, pending_gen, session_ctx, ide)
-                    _flush_session(tracer, sk, session_ctx, ide)
-                    _clear_session_context(sk)
+                if sk:
+                    _finalize_session(tracer, sk, session_ctx, ide)
                 _emit_stdout_response(event_name, ide, data)
                 return 0
 
-            # All other events: buffer under current generation
-            gen_key = _resolve_generation_key(data, session_ctx)
-            if gen_key:
-                _append_batch_event(gen_key, event_name, data)
-            else:
-                # No generation context — emit as standalone span
-                parent_ctx = _event_parent_trace_context(data, session_ctx)
-                with tracer.start_as_current_span(
-                    f"gen_ai.client.hook.{event_name}", kind=SpanKind.INTERNAL,
-                    context=parent_ctx,
-                ) as span:
-                    _populate_span(span, event_name, data, ide, session_ctx=session_ctx)
+            # Sessionless runners cannot use the persisted batch lifecycle.
+            parent_ctx = _event_parent_trace_context(data, session_ctx)
+            with tracer.start_as_current_span(
+                f"gen_ai.client.hook.{event_name}", kind=SpanKind.INTERNAL,
+                context=parent_ctx,
+            ) as span:
+                _populate_span(span, event_name, data, ide, session_ctx=session_ctx)
 
             _emit_stdout_response(event_name, ide, data)
             return 0
@@ -3328,9 +4035,35 @@ def main() -> int:
         parent_ctx = _event_parent_trace_context(data, session_ctx)
 
         # Create session context on SessionStart even in streaming mode
-        if event_name in _SESSION_START_EVENTS and sk and not session_ctx:
+        if event_name in _SESSION_START_EVENTS and sk:
+            duplicate_start = session_ctx is not None
             session_ctx = _create_session_context(sk, data, ide)
             parent_ctx = _event_parent_trace_context(data, session_ctx)
+            if duplicate_start:
+                _emit_stdout_response(event_name, ide, data)
+                return 0
+
+        if event_name in _SESSION_END_EVENTS and sk and not session_ctx:
+            _emit_stdout_response(event_name, ide, data)
+            return 0
+
+        streaming_decision = None
+        if sk and event_name not in _SESSION_START_EVENTS and event_name not in _SESSION_END_EVENTS:
+            streaming_decision = _prepare_streaming_session_event(sk, event_name, data, ide)
+            if streaming_decision.duplicate:
+                _emit_stdout_response(event_name, ide, streaming_decision.data)
+                return 0
+            data = streaming_decision.data
+            if streaming_decision.correlated:
+                _emit_event_log_with_context(
+                    event_name,
+                    data,
+                    session_ctx,
+                    parent_ctx,
+                )
+                _force_flush_provider()
+                _emit_stdout_response(event_name, ide, data)
+                return 0
 
         with tracer.start_as_current_span(
             f"gen_ai.client.hook.{event_name}", kind=SpanKind.INTERNAL,
@@ -3338,11 +4071,17 @@ def main() -> int:
         ) as span:
             _populate_span(span, event_name, data, ide, session_ctx=session_ctx)
 
+        if (
+            event_name in _GENERATION_END_EVENTS
+            and sk
+            and streaming_decision
+            and streaming_decision.generation_key
+        ):
+            _complete_generation_state(sk, streaming_decision.generation_key)
+
         # Clean up session on SessionEnd
         if event_name in _SESSION_END_EVENTS and sk:
-            if session_ctx:
-                _flush_session(tracer, sk, session_ctx, ide)
-            _clear_session_context(sk)
+            _finalize_session(tracer, sk, session_ctx, ide)
 
         # Flush in streaming mode to ensure spans are exported
         _force_flush_provider()

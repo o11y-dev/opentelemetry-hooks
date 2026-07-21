@@ -38,6 +38,20 @@ class TestSafeBool:
         assert otel_hook._safe_bool(value) is expected
 
 
+class TestStateLocking:
+    def test_timeout_never_enters_critical_section_unlocked(self, monkeypatch, tmp_path):
+        lock_path = tmp_path / "held.lock"
+        lock_path.touch()
+        monkeypatch.setenv("IDE_OTEL_STATE_LOCK_TIMEOUT_SECONDS", "0")
+        entered = False
+
+        with pytest.raises(TimeoutError, match="timed out acquiring state lock"):
+            with otel_hook._acquire_lock(str(lock_path)):
+                entered = True
+
+        assert not entered
+
+
 class TestStringify:
     def test_dict(self):
         assert otel_hook._stringify({"a": 1}) == '{"a": 1}'
@@ -1149,6 +1163,554 @@ class TestBatchBuffer:
             assert otel_hook._load_batch_events("nonexistent") == []
 
 
+class _RecordingSpan:
+    def __init__(self, name):
+        self.name = name
+        self.attrs = {}
+        self.ended = False
+
+    def set_attribute(self, key, value):
+        self.attrs[key] = value
+
+    def get_span_context(self):
+        return mock.MagicMock(is_valid=False)
+
+    def end(self, **_kwargs):
+        self.ended = True
+
+
+class _RecordingTracer:
+    def __init__(self):
+        self.spans = []
+
+    def start_span(self, name, **_kwargs):
+        span = _RecordingSpan(name)
+        self.spans.append(span)
+        return span
+
+
+@pytest.fixture
+def isolated_hook_state(monkeypatch, tmp_path):
+    state_dir = tmp_path / "state"
+    monkeypatch.setattr(otel_hook, "_STATE_DIR", str(state_dir))
+    monkeypatch.setattr(otel_hook, "_SESSION_DIR", str(state_dir / "sessions"))
+    monkeypatch.setattr(otel_hook, "_BATCH_DIR", str(state_dir / "batches"))
+    monkeypatch.setattr(otel_hook, "_LOCK_DIR", str(state_dir / "locks"))
+    monkeypatch.setattr(otel_hook, "_CLEANUP_MARKER", str(state_dir / "last_cleanup"))
+    monkeypatch.setattr(otel_hook, "_resolve_repository_context", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(otel_hook, "_session_trace_context", lambda _ctx: None)
+    monkeypatch.setattr(otel_hook, "_span_context", lambda _span: contextlib.nullcontext())
+    monkeypatch.setattr(otel_hook, "_log_with_span", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(otel_hook, "_force_flush_provider", lambda *_args, **_kwargs: True)
+    monkeypatch.setenv("IDE_OTEL_BATCH_ON_STOP", "true")
+    return state_dir
+
+
+class TestMCPIdentityNormalization:
+    def test_encoded_name_parser_preserves_double_underscores_in_tool(self):
+        assert otel_hook._parse_encoded_mcp_tool_name(
+            "mcp__reflect__reflect__context"
+        ) == ("reflect", "reflect__context")
+
+    @pytest.mark.parametrize("event_name", ["PreToolUse", "PostToolUse", "PostToolUseFailure"])
+    def test_encoded_name_is_explicit_on_tool_events(self, event_name):
+        data = otel_hook._normalize_mcp_event_data(
+            {"tool_name": "mcp__reflect__reflect_context", "tool_use_id": "tool-1"},
+            event_name,
+            "claude",
+        )
+        attrs = otel_hook._mcp_observability_attributes(event_name, data)
+        assert data["tool_name"] == "mcp__reflect__reflect_context"
+        assert attrs["gen_ai.client.mcp_server"] == "reflect"
+        assert attrs["gen_ai.client.mcp_tool"] == "reflect_context"
+        assert attrs["gen_ai.client.tool_use_id"] == "tool-1"
+
+    def test_cursor_real_server_field_beats_executable_command(self):
+        data = otel_hook._normalize_mcp_event_data(
+            {
+                "mcp_server_name": "reflect",
+                "tool_name": "reflect_context",
+                "command": "/opt/tools/reflect-mcp",
+            },
+            "BeforeMCPExecution",
+            "cursor",
+        )
+        assert data["mcp_server"] == "reflect"
+        assert data["mcp_tool"] == "reflect_context"
+
+    def test_hook_provenance_uses_distribution_fields_only(self, monkeypatch):
+        resolved_version = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+        monkeypatch.setattr(
+            otel_hook.importlib.metadata,
+            "version",
+            lambda _name: resolved_version,
+        )
+        assert otel_hook._hook_distro_attributes() == {
+            "telemetry.distro.name": "opentelemetry-hooks",
+            "telemetry.distro.version": resolved_version,
+        }
+
+    def test_log_only_mcp_evidence_activates_restored_parent_context(self, monkeypatch):
+        parent_ctx = object()
+        parent_span = object()
+        real_trace = mock.Mock()
+        real_trace.get_current_span.return_value = parent_span
+        monkeypatch.setattr(otel_hook, "_REAL_TRACE", real_trace)
+
+        active = []
+
+        @contextlib.contextmanager
+        def activate(span):
+            active.append(span)
+            yield
+            active.pop()
+
+        emitted = []
+        monkeypatch.setattr(otel_hook, "_span_context", activate)
+        monkeypatch.setattr(
+            otel_hook,
+            "_emit_event_log",
+            lambda event_name, data, session_ctx=None: emitted.append(
+                (event_name, dict(data), session_ctx, active[-1])
+            ),
+        )
+
+        session_ctx = {"trace_id": "1" * 32}
+        otel_hook._emit_event_log_with_context(
+            "AfterMCPExecution",
+            {"tool_use_id": "tool-1"},
+            session_ctx,
+            parent_ctx,
+        )
+
+        real_trace.get_current_span.assert_called_once_with(parent_ctx)
+        assert emitted == [
+            (
+                "AfterMCPExecution",
+                {"tool_use_id": "tool-1"},
+                session_ctx,
+                parent_span,
+            )
+        ]
+
+
+class TestCrossAgentBatchLifecycle:
+    def _finalize(self, session_id, ide):
+        tracer = _RecordingTracer()
+        ctx = otel_hook._load_session_context(session_id)
+        assert otel_hook._finalize_session(tracer, session_id, ctx, ide)
+        return tracer
+
+    def test_cursor_dedupes_correlates_and_flushes_without_stop(self, isolated_hook_state):
+        session_id = "cursor-session"
+        tool_use_id = "2a7012d2-df5b-4cc9-9415-bef461a0c506"
+        start = {"session_id": session_id, "source_app": "Cursor"}
+        first_ctx = otel_hook._create_session_context(session_id, start, "cursor")
+        second_ctx = otel_hook._create_session_context(session_id, start, "cursor")
+        assert first_ctx["trace_id"] == second_ctx["trace_id"]
+        assert first_ctx["phantom_parent_id"] == second_ctx["phantom_parent_id"]
+
+        pre = {
+            "session_id": session_id,
+            "tool_name": "MCP:reflect_context",
+            "tool_use_id": tool_use_id,
+        }
+        first_pre = otel_hook._buffer_session_event(session_id, "PreToolUse", pre, "cursor")
+        duplicate_pre = otel_hook._buffer_session_event(session_id, "PreToolUse", pre, "cursor")
+        assert not first_pre.duplicate
+        assert duplicate_pre.duplicate
+
+        before = otel_hook._buffer_session_event(
+            session_id,
+            "BeforeMCPExecution",
+            {
+                "session_id": session_id,
+                "mcp_server_name": "reflect",
+                "tool_name": "reflect_context",
+                "command": "/opt/tools/reflect-mcp",
+            },
+            "cursor",
+        )
+        after = otel_hook._buffer_session_event(
+            session_id,
+            "AfterMCPExecution",
+            {
+                "session_id": session_id,
+                "mcp_server_name": "reflect",
+                "tool_name": "reflect_context",
+                "duration": 1.979,
+                "result_json": {"result": "CURSOR_MCP_OK"},
+            },
+            "cursor",
+        )
+        assert before.correlated and before.data["tool_use_id"] == tool_use_id
+        assert after.correlated and after.data["tool_use_id"] == tool_use_id
+
+        post = dict(pre)
+        first_post = otel_hook._buffer_session_event(session_id, "PostToolUse", post, "cursor")
+        duplicate_post = otel_hook._buffer_session_event(session_id, "PostToolUse", post, "cursor")
+        assert first_post.data["mcp_server"] == "reflect"
+        assert first_post.data["mcp_tool"] == "reflect_context"
+        assert duplicate_post.duplicate
+
+        batch = otel_hook._load_batch_events(first_pre.generation_key)
+        assert [entry["event"] for entry in batch] == ["PreToolUse", "PostToolUse"]
+
+        tracer = self._finalize(session_id, "cursor")
+        names = [span.name for span in tracer.spans]
+        assert names.count("gen_ai.client.generation") == 1
+        assert names.count("gen_ai.client.hook.PreToolUse") == 1
+        assert names.count("gen_ai.client.hook.PostToolUse") == 1
+        assert names.count("gen_ai.client.session") == 1
+        tool_spans = [span for span in tracer.spans if ".hook." in span.name]
+        assert {span.attrs["gen_ai.client.tool_use_id"] for span in tool_spans} == {tool_use_id}
+        assert {span.attrs["gen_ai.client.mcp_server"] for span in tool_spans} == {"reflect"}
+        assert {span.attrs["gen_ai.client.mcp_tool"] for span in tool_spans} == {"reflect_context"}
+        post_span = next(span for span in tool_spans if span.name.endswith("PostToolUse"))
+        assert post_span.attrs["gen_ai.client.status"] == "success"
+        assert post_span.attrs["gen_ai.client.mcp.duration_ms"] == 1.979
+        assert "gen_ai.client.mcp.output.sha256" in post_span.attrs
+        assert otel_hook._load_session_context(session_id) is None
+        assert not list((isolated_hook_state / "batches").glob("*.jsonl"))
+
+        # Repeated SessionEnd/finalization is a no-op and cannot emit another root.
+        assert otel_hook._finalize_session(tracer, session_id, None, "cursor")
+        assert [span.name for span in tracer.spans].count("gen_ai.client.session") == 1
+
+    def test_stop_then_session_end_flushes_generation_once(self, isolated_hook_state):
+        session_id = "cursor-stop-session"
+        otel_hook._create_session_context(session_id, {"session_id": session_id}, "cursor")
+        decision = otel_hook._buffer_session_event(
+            session_id,
+            "PreToolUse",
+            {"session_id": session_id, "tool_name": "read", "tool_use_id": "read-1"},
+            "cursor",
+        )
+        stop = otel_hook._buffer_generation_end(
+            session_id,
+            "Stop",
+            {"session_id": session_id},
+            "cursor",
+        )
+        duplicate_stop = otel_hook._buffer_generation_end(
+            session_id,
+            "Stop",
+            {"session_id": session_id},
+            "cursor",
+        )
+        assert stop.generation_key == decision.generation_key
+        assert duplicate_stop.duplicate
+        assert [
+            entry["event"] for entry in otel_hook._load_batch_events(stop.generation_key)
+        ].count("Stop") == 1
+
+        tracer = _RecordingTracer()
+        ctx = otel_hook._load_session_context(session_id)
+        assert otel_hook._flush_generation(tracer, stop.generation_key, ctx, "cursor")
+        otel_hook._complete_generation_state(session_id, stop.generation_key, memory=ctx.get("memory"))
+        assert otel_hook._load_session_context(session_id) is not None
+        assert otel_hook._finalize_session(tracer, session_id, ctx, "cursor")
+        names = [span.name for span in tracer.spans]
+        assert names.count("gen_ai.client.generation") == 1
+        assert names.count("gen_ai.client.session") == 1
+
+    def test_session_end_discovers_unregistered_owned_batch(self, isolated_hook_state):
+        session_id = "discovered-batch-session"
+        otel_hook._create_session_context(session_id, {"session_id": session_id}, "cursor")
+        otel_hook._append_batch_event(
+            "external-generation-id",
+            "PreToolUse",
+            {"session_id": session_id, "tool_name": "read", "tool_use_id": "read-2"},
+        )
+        tracer = self._finalize(session_id, "cursor")
+        assert [span.name for span in tracer.spans].count("gen_ai.client.generation") == 1
+        assert [span.name for span in tracer.spans].count("gen_ai.client.session") == 1
+        assert not list((isolated_hook_state / "batches").glob("*.jsonl"))
+
+    def test_no_id_mcp_duplicate_is_bounded(self, isolated_hook_state):
+        session_id = "no-id-mcp-session"
+        otel_hook._create_session_context(session_id, {"session_id": session_id}, "cursor")
+        payload = {
+            "session_id": session_id,
+            "mcp_server_name": "reflect",
+            "tool_name": "reflect_context",
+        }
+        first = otel_hook._buffer_session_event(
+            session_id, "BeforeMCPExecution", payload, "cursor"
+        )
+        duplicate = otel_hook._buffer_session_event(
+            session_id, "BeforeMCPExecution", payload, "cursor"
+        )
+        assert not first.duplicate
+        assert duplicate.duplicate
+        assert len(otel_hook._load_batch_events(first.generation_key)) == 1
+
+    def test_streaming_cursor_logs_correlated_dedicated_evidence(
+        self, monkeypatch, isolated_hook_state
+    ):
+        session_id = "cursor-streaming-session"
+        tool_use_id = "cursor-streaming-tool"
+        monkeypatch.setenv("IDE_OTEL_BATCH_ON_STOP", "false")
+        otel_hook._create_session_context(
+            session_id,
+            {"session_id": session_id, "source_app": "Cursor"},
+            "cursor",
+        )
+
+        monkeypatch.setattr(otel_hook, "_load_config", lambda: {})
+        monkeypatch.setattr(otel_hook, "_configure_logging", lambda: None)
+        monkeypatch.setattr(otel_hook, "_cleanup_state", lambda: None)
+        monkeypatch.setattr(otel_hook, "_init_tracing", lambda *_args, **_kwargs: True)
+        monkeypatch.setattr(otel_hook, "_local_spans_enabled", lambda: False)
+        monkeypatch.setattr(otel_hook, "_flush_stale_sessions", lambda _tracer: None)
+        monkeypatch.setattr(otel_hook, "_event_parent_trace_context", lambda *_args: None)
+        monkeypatch.setattr(otel_hook, "_emit_stdout_response", lambda *_args, **_kwargs: None)
+
+        span = mock.MagicMock()
+        span_context = mock.MagicMock()
+        span_context.__enter__.return_value = span
+        span_context.__exit__.return_value = False
+        tracer = mock.MagicMock()
+        tracer.start_as_current_span.return_value = span_context
+        trace_api = mock.MagicMock()
+        trace_api.get_tracer.return_value = tracer
+        monkeypatch.setattr(otel_hook, "trace", trace_api)
+        monkeypatch.setattr(otel_hook, "SpanKind", mock.MagicMock(INTERNAL="internal"))
+
+        emitted = []
+        logged = []
+        monkeypatch.setattr(
+            otel_hook,
+            "_populate_span",
+            lambda _span, event_name, data, *_args, **_kwargs: emitted.append(
+                (event_name, dict(data))
+            ),
+        )
+        monkeypatch.setattr(
+            otel_hook,
+            "_emit_event_log_with_context",
+            lambda event_name, data, *_args: logged.append((event_name, dict(data))),
+        )
+
+        payloads = [
+            {
+                "session_id": session_id,
+                "source_app": "Cursor",
+                "hook_event_name": "preToolUse",
+                "tool_name": "MCP:reflect_context",
+                "tool_use_id": tool_use_id,
+            },
+            {
+                "session_id": session_id,
+                "source_app": "Cursor",
+                "hook_event_name": "beforeMCPExecution",
+                "mcp_server_name": "reflect",
+                "tool_name": "reflect_context",
+            },
+            {
+                "session_id": session_id,
+                "source_app": "Cursor",
+                "hook_event_name": "beforeMCPExecution",
+                "mcp_server_name": "reflect",
+                "tool_name": "reflect_context",
+            },
+            {
+                "session_id": session_id,
+                "source_app": "Cursor",
+                "hook_event_name": "afterMCPExecution",
+                "mcp_server_name": "reflect",
+                "tool_name": "reflect_context",
+                "duration": 1.979,
+                "result_json": {"result": "CURSOR_MCP_OK"},
+            },
+            {
+                "session_id": session_id,
+                "source_app": "Cursor",
+                "hook_event_name": "postToolUse",
+                "tool_name": "MCP:reflect_context",
+                "tool_use_id": tool_use_id,
+            },
+        ]
+        for payload in payloads:
+            monkeypatch.setattr(
+                "sys.stdin",
+                __import__("io").StringIO(json.dumps(payload)),
+            )
+            assert otel_hook.main() == 0
+
+        assert [event for event, _data in emitted] == [
+            "PreToolUse",
+            "PostToolUse",
+        ]
+        assert [event for event, _data in logged] == [
+            "BeforeMCPExecution",
+            "AfterMCPExecution",
+        ]
+        dedicated = [data for _event, data in logged]
+        assert {data["tool_use_id"] for data in dedicated} == {tool_use_id}
+        assert {data["mcp_server"] for data in dedicated} == {"reflect"}
+        post = next(data for event, data in emitted if event == "PostToolUse")
+        assert post["tool_use_id"] == tool_use_id
+        assert post["mcp_server"] == "reflect"
+        assert post["mcp_tool"] == "reflect_context"
+        assert post["duration_ms"] == 1.979
+        assert post["status"] == "success"
+        assert post["mcp_result_sha256"]
+
+    def test_codex_multi_prompt_permission_and_stale_finalization(self, monkeypatch, isolated_hook_state):
+        session_id = "codex-session"
+        otel_hook._create_session_context(
+            session_id,
+            {"session_id": session_id, "source_app": "Codex"},
+            "codex",
+        )
+        tracer = _RecordingTracer()
+        for turn, tool_id in (("turn-1", "codex-tool-1"), ("turn-2", "codex-tool-2")):
+            prompt = otel_hook._buffer_session_event(
+                session_id,
+                "UserPromptSubmit",
+                {"session_id": session_id, "turn_id": turn},
+                "codex",
+            )
+            pre = otel_hook._buffer_session_event(
+                session_id,
+                "PreToolUse",
+                {
+                    "session_id": session_id,
+                    "turn_id": turn,
+                    "tool_name": "mcp__reflect__reflect_context",
+                    "tool_use_id": tool_id,
+                },
+                "codex",
+            )
+            permission = otel_hook._buffer_session_event(
+                session_id,
+                "PermissionRequest",
+                {
+                    "session_id": session_id,
+                    "turn_id": turn,
+                    "tool_name": "mcp__reflect__reflect_context",
+                },
+                "codex",
+            )
+            assert permission.data["tool_use_id"] == tool_id
+            otel_hook._buffer_session_event(
+                session_id,
+                "PostToolUse",
+                {
+                    "session_id": session_id,
+                    "turn_id": turn,
+                    "tool_name": "mcp__reflect__reflect_context",
+                    "tool_use_id": tool_id,
+                },
+                "codex",
+            )
+            stop = otel_hook._buffer_generation_end(
+                session_id,
+                "Stop",
+                {"session_id": session_id, "turn_id": turn},
+                "codex",
+            )
+            assert stop.generation_key == prompt.generation_key == pre.generation_key
+            ctx = otel_hook._load_session_context(session_id)
+            assert otel_hook._flush_generation(tracer, stop.generation_key, ctx, "codex")
+            otel_hook._complete_generation_state(session_id, stop.generation_key, memory=ctx.get("memory"))
+            assert otel_hook._load_session_context(session_id) is not None
+
+        permission_spans = [span for span in tracer.spans if span.name.endswith("PermissionRequest")]
+        assert {span.attrs["gen_ai.client.tool_use_id"] for span in permission_spans} == {
+            "codex-tool-1",
+            "codex-tool-2",
+        }
+        assert {span.attrs["gen_ai.client.mcp_server"] for span in permission_spans} == {"reflect"}
+
+        session_path = Path(otel_hook._session_path(session_id))
+        old = time.time() - 10
+        os.utime(session_path, (old, old))
+        monkeypatch.setenv("IDE_OTEL_STATE_TTL_SECONDS", "1")
+        otel_hook._flush_stale_sessions(tracer)
+        assert [span.name for span in tracer.spans].count("gen_ai.client.generation") == 2
+        assert [span.name for span in tracer.spans].count("gen_ai.client.session") == 1
+        assert otel_hook._load_session_context(session_id) is None
+        otel_hook._flush_stale_sessions(tracer)
+        assert [span.name for span in tracer.spans].count("gen_ai.client.session") == 1
+
+    def test_codex_ambiguous_permission_does_not_invent_id(self, isolated_hook_state):
+        session_id = "codex-ambiguous-session"
+        otel_hook._create_session_context(session_id, {"session_id": session_id}, "codex")
+        for tool_id in ("ambiguous-1", "ambiguous-2"):
+            otel_hook._buffer_session_event(
+                session_id,
+                "PreToolUse",
+                {
+                    "session_id": session_id,
+                    "turn_id": "turn-1",
+                    "tool_name": "mcp__reflect__reflect_context",
+                    "tool_use_id": tool_id,
+                },
+                "codex",
+            )
+        permission = otel_hook._buffer_session_event(
+            session_id,
+            "PermissionRequest",
+            {
+                "session_id": session_id,
+                "turn_id": "turn-1",
+                "tool_name": "mcp__reflect__reflect_context",
+            },
+            "codex",
+        )
+        assert "tool_use_id" not in permission.data
+
+    @pytest.mark.parametrize("with_stop", [True, False])
+    def test_claude_failure_dedupe_and_session_order(self, isolated_hook_state, with_stop):
+        session_id = f"claude-session-{with_stop}"
+        tool_id = f"claude-tool-{with_stop}"
+        otel_hook._create_session_context(session_id, {"session_id": session_id}, "claude")
+        otel_hook._buffer_session_event(
+            session_id,
+            "UserPromptSubmit",
+            {"session_id": session_id},
+            "claude",
+        )
+        pre_data = {
+            "session_id": session_id,
+            "tool_name": "mcp__reflect__reflect_context",
+            "tool_use_id": tool_id,
+        }
+        first = otel_hook._buffer_session_event(session_id, "PreToolUse", pre_data, "claude")
+        duplicate = otel_hook._buffer_session_event(session_id, "PreToolUse", pre_data, "claude")
+        assert not first.duplicate and duplicate.duplicate
+        otel_hook._buffer_session_event(
+            session_id,
+            "PostToolUseFailure",
+            {**pre_data, "error": "sanitized failure"},
+            "claude",
+        )
+
+        tracer = _RecordingTracer()
+        if with_stop:
+            stop = otel_hook._buffer_generation_end(
+                session_id,
+                "Stop",
+                {"session_id": session_id},
+                "claude",
+            )
+            ctx = otel_hook._load_session_context(session_id)
+            assert otel_hook._flush_generation(tracer, stop.generation_key, ctx, "claude")
+            otel_hook._complete_generation_state(session_id, stop.generation_key, memory=ctx.get("memory"))
+
+        ctx = otel_hook._load_session_context(session_id)
+        assert otel_hook._finalize_session(tracer, session_id, ctx, "claude")
+        assert [span.name for span in tracer.spans].count("gen_ai.client.generation") == 1
+        assert [span.name for span in tracer.spans].count("gen_ai.client.session") == 1
+        failure = next(span for span in tracer.spans if span.name.endswith("PostToolUseFailure"))
+        assert failure.attrs["gen_ai.client.tool_use_id"] == tool_id
+        assert failure.attrs["gen_ai.client.mcp_server"] == "reflect"
+        assert failure.attrs["gen_ai.client.mcp_tool"] == "reflect_context"
+        assert failure.attrs["gen_ai.client.status"] == "error"
+
+
 # ── Local trace persistence ────────────────────────────────────────────────
 
 
@@ -1163,7 +1725,15 @@ class TestLocalTracePersistence:
         span.parent = None
         span.start_time = 1_000_000_000
         span.end_time = 2_000_000_000
-        span.attributes = {"gen_ai.client.session.key": session_key}
+        span.attributes = {
+            "gen_ai.client.session.key": session_key,
+            "gen_ai.client.session_id": session_key,
+        }
+        span.resource = mock.MagicMock()
+        span.resource.attributes = {
+            "telemetry.distro.name": "opentelemetry-hooks",
+            "telemetry.distro.version": name,
+        }
         span.status = mock.MagicMock()
         span.status.status_code.name = "OK"
         return span
@@ -1179,6 +1749,7 @@ class TestLocalTracePersistence:
             rec = json.loads(f.read().strip())
         assert rec["name"] == "gen_ai.client.generation"
         assert rec["attributes"]["gen_ai.client.session.key"] == "sess-1"
+        assert rec["resource"] == span.resource.attributes
         assert rec["status"] == "OK"
 
     def test_file_span_exporter_appends_multiple_spans(self, tmp_path):
@@ -1192,6 +1763,22 @@ class TestLocalTracePersistence:
         assert len(lines) == 2
         assert json.loads(lines[0])["name"] == "span-1"
         assert json.loads(lines[1])["name"] == "span-2"
+
+    def test_file_span_exporter_routes_only_matching_session(self, tmp_path):
+        out_file = str(tmp_path / "spans.jsonl")
+        exporter = otel_hook._FileSpanExporter(
+            out_file,
+            expected_session_key="session-1",
+        )
+        matching = self._make_mock_span("matching", session_key="session-1")
+        other = self._make_mock_span("other", session_key="session-2")
+
+        with mock.patch.object(otel_hook, "_LOCK_DIR", str(tmp_path / "locks")):
+            exporter.export([matching, other])
+
+        with open(out_file) as f:
+            records = [json.loads(line) for line in f if line.strip()]
+        assert [record["name"] for record in records] == ["matching"]
 
     def test_file_span_exporter_shutdown_is_noop(self, tmp_path):
         exporter = otel_hook._FileSpanExporter(str(tmp_path / "spans.jsonl"))
@@ -1219,6 +1806,7 @@ class TestSessionContext:
                 ctx = otel_hook._create_session_context("sess-1", {}, "cursor")
                 assert "trace_id" in ctx
                 assert len(ctx["trace_id"]) == 32
+                assert ctx["session_id"] == "sess-1"
                 loaded = otel_hook._load_session_context("sess-1")
                 assert loaded["trace_id"] == ctx["trace_id"]
 
@@ -1723,12 +2311,17 @@ class TestMainFlow:
         mock_trace.get_tracer.return_value = mock_tracer
         monkeypatch.setattr(otel_hook, "trace", mock_trace)
         calls = []
-        monkeypatch.setattr(otel_hook, "_enable_file_exporter", lambda path: calls.append(path))
+        monkeypatch.setattr(
+            otel_hook,
+            "_enable_file_exporter",
+            lambda path, expected_session_key=None: calls.append((path, expected_session_key)),
+        )
         captured = []
         monkeypatch.setattr("builtins.print", lambda *a, **kw: captured.append(a[0] if a else ""))
         result = otel_hook.main()
         assert result == 0
-        assert len(calls) == 1 and calls[0].endswith(".jsonl")
+        assert len(calls) == 1 and calls[0][0].endswith(".jsonl")
+        assert calls[0][1] is None
 
     def test_empty_input(self, monkeypatch):
         """Empty stdin should not crash."""

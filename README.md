@@ -11,7 +11,7 @@ An open-source OpenTelemetry integration that captures AI coding agent activity 
 
 Every hook event — prompt submissions, tool calls, shell commands, MCP interactions, file edits, subagent orchestration — becomes an OpenTelemetry span you can query, alert on, and visualize in Jaeger, Grafana, Datadog, Honeycomb, Coralogix, or any OTLP-compatible backend.
 
-> **Note**: Claude Code and Codex have native OpenTelemetry support, but this repo can also be used as a hook target when you want the same hook-based pipeline across all agents. Avoid enabling native Codex OTel export and `otel-hook` for the same events unless you intentionally want duplicate telemetry.
+> **Note**: Claude Code and Codex native telemetry describes agent internals, while `otel-hook` describes hook lifecycle and governance. The hook tags its own provenance and does not deduplicate native signals; downstream analysis can reconcile the two sources when both are enabled.
 
 ## How It Works
 
@@ -25,7 +25,7 @@ IDE Event → stdin (JSON) → otel-hook → OpenTelemetry SDK → OTLP Backend
 
 ## Features
 
-- **Multi-agent support**: One hook command, multiple agent integrations. The CLI can register Codex, Cursor, Claude Code, Gemini CLI, GitHub Copilot, OpenCode, and Windsurf. `setup.sh` covers the source-checkout setup flow for Codex, Cursor, Claude Code, Gemini CLI, GitHub Copilot, and OpenCode. Antigravity and compatible hook runners can call the same hook command directly. Runtime detection prefers parent-process discovery first, then explicit overrides, then self-reported payload fields, and finally heuristics when needed.
+- **Multi-agent support**: One hook command, multiple agent integrations. The CLI can register Codex, Cursor, Claude Code, Gemini CLI, GitHub Copilot, OpenCode, and Windsurf. Managed setup commands stamp an explicit source flag such as `otel-hook --cursor`, `otel-hook --codex`, or `otel-hook --claude`; process-tree and payload inference remain compatibility fallbacks for legacy or unmanaged hooks.
 
 - **Session-level Traces**: Groups all events within a session into a single trace with a 3-tier hierarchy:
 
@@ -41,7 +41,6 @@ gen_ai.client.session (root)
 │   ├── gen_ai.client.hook.PreToolUse
 │   ├── gen_ai.client.hook.PostToolUse
 │   └── gen_ai.client.hook.Stop
-└── gen_ai.client.hook.SessionEnd
 ```
 
 - **GenAI Semantic Conventions**: Emits OpenTelemetry GenAI attributes aligned with v1.37+ (`gen_ai.provider.name`, `gen_ai.operation.name`, `gen_ai.request.model`, `gen_ai.usage.*`, etc.) while preserving legacy `gen_ai.system` for backward compatibility.
@@ -706,6 +705,15 @@ Requires the [Datadog Agent](https://docs.datadoghq.com/opentelemetry/) with OTL
 }
 ```
 
+## Cross-agent MCP and lifecycle contract
+
+- Codex and Claude encoded names use `mcp__<server>__<tool>`. One bounded parser preserves the original `gen_ai.client.tool_name` and exports `gen_ai.client.mcp_server` plus `gen_ai.client.mcp_tool`; `__` inside the tool portion is preserved. Parsing applies to pre, post, permission, and failure callbacks on both spans and logs.
+- Cursor dedicated MCP callbacks use `mcp_server_name` and `tool_name`. `mcp_server_name` takes precedence over `mcp_server` and the executable `command`, so a command path cannot replace a real server identity.
+- Cursor's stable generic `tool_use_id` owns the logical invocation. Session-backed FIFO correlation merges `BeforeMCPExecution` / `AfterMCPExecution` server, tool, duration, status, and result metadata into the matching generic pre/post callbacks. Batch mode folds correlated dedicated evidence into the buffered generic call; streaming mode emits trace-correlated dedicated lifecycle logs with the same ID and enriches the later generic post span. Unmatched dedicated evidence is still emitted as a span without inventing an ID.
+- Codex `PermissionRequest` reuses an open tool ID only when session, turn/generation, tool name, and event order identify one unambiguous invocation. Ambiguous permissions remain uncorrelated.
+- Duplicate session, generation-stop, and tool callbacks are suppressed with bounded session state. Stable IDs use event-plus-ID keys; no-ID MCP callbacks use a short bounded fingerprint window. Legitimate calls with distinct IDs are never collapsed.
+- Result size and digest are emitted as content-free metadata. Existing content gates remain unchanged: prompt capture is off by default, tool input content requires `IDE_OTEL_CAPTURE_TOOL_INPUT_CONTENT`, and MCP log payloads continue to follow `IDE_OTEL_MCP_LOG_PAYLOAD`.
+
 ## Span Attributes
 
 ### Common (All Spans)
@@ -721,6 +729,7 @@ Requires the [Datadog Agent](https://docs.datadoghq.com/opentelemetry/) with OTL
 | `gen_ai.client.timestamp` | Event timestamp (ISO 8601) |
 | `gen_ai.system` | Deprecated legacy GenAI system/provider attribute retained for backward compatibility |
 | `gen_ai.operation.name` | `chat`, `execute_tool`, or `invoke_agent` |
+| `telemetry.distro.name` / `telemetry.distro.version` | Hook package provenance on the OTel resource and in the local JSON span's `resource` object. The version is resolved from installed package metadata rather than duplicated in hook logic; neither field overwrites agent `service.name` or `service.version` |
 
 ### GenAI (When Available)
 
@@ -749,8 +758,8 @@ Requires the [Datadog Agent](https://docs.datadoghq.com/opentelemetry/) with OTL
 | Event | Key Attributes |
 |-------|---------------|
 | `UserPromptSubmit` | `gen_ai.client.composer_mode`, `gen_ai.request.model` |
-| `PreToolUse` / `PostToolUse` | `gen_ai.client.tool_name`, `gen_ai.client.tool_id`, `gen_ai.client.duration_ms` |
-| `PostToolUseFailure` | `gen_ai.client.tool_name`, `gen_ai.client.error` |
+| `PreToolUse` / `PostToolUse` | `gen_ai.client.tool_name`, `gen_ai.client.tool_id`, `gen_ai.client.tool_use_id`, `gen_ai.client.duration_ms`, and explicit MCP identity when encoded |
+| `PostToolUseFailure` | `gen_ai.client.tool_name`, `gen_ai.client.tool_use_id`, `gen_ai.client.status=error`, `gen_ai.client.error`, and explicit MCP identity when encoded |
 | `BeforeShellExecution` / `AfterShellExecution` | `gen_ai.client.command`, `gen_ai.client.cwd`, `gen_ai.client.exit_code` |
 | `BeforeMCPExecution` / `AfterMCPExecution` | `gen_ai.client.mcp_server`, `gen_ai.client.mcp_tool` |
 | `BeforeReadFile` / `AfterFileEdit` | `gen_ai.client.file_path`, `gen_ai.client.edits` |
@@ -801,12 +810,14 @@ Example: `https://ingress.us1.coralogix.com:443/v1/traces` → `https://ingress.
 
 When `IDE_OTEL_BATCH_ON_STOP=true` (recommended):
 
-1. **SessionStart**: If the hook receives upstream trace context (`traceparent` / `TRACEPARENT`, or explicit `trace_id` + `span_id` / `parent_span_id`), it adopts that real `trace_id` and parent span for the session. Otherwise it pre-generates a synthetic `trace_id`. State is stored in `.state/sessions/`.
-2. **Generation events**: Buffered to `.state/batches/<generation_id>.jsonl`.
-3. **Stop**: Flushes the generation's events as a `gen_ai.client.generation` span with child event spans. All share the session's `trace_id`. Exported immediately to avoid data loss.
-4. **SessionEnd**: Emits the root `gen_ai.client.session` span covering the full session duration. Cleans up state files.
+1. **SessionStart**: Creates the persisted trace/session record once. Duplicate starts reuse the same trace and phantom parent and do not emit another root.
+2. **Generation events**: Buffer to `.state/batches/<generation_id>.jsonl`. Explicit generation IDs and implicit fallback generations are both registered as session-owned pending batches, so Cursor sessions without `UserPromptSubmit` are still flushable.
+3. **Stop**: Flushes the current generation exactly once and removes only that generation's pending/correlation state. The session remains open; this is required for multi-prompt Codex and Claude sessions.
+4. **SessionEnd**: Discovers and flushes every registered or on-disk batch owned by the session, then emits one `gen_ai.client.session` root. Batch, dedupe, correlation, and session state are removed only after successful flushes.
 
-For IDEs without a `generation_id` (Copilot), the hook auto-derives generation boundaries from `UserPromptSubmit` → `Stop` cycles using an internal counter.
+For IDEs without a `generation_id`, the hook derives generation boundaries from `UserPromptSubmit` → `Stop` cycles. If a provider emits neither a prompt boundary nor a generation ID, the first generation-owned event creates an implicit fallback generation. Codex currently has no hook-level `SessionEnd`; bounded stale-session finalization emits its root later and is idempotent.
+
+Local JSON export routes spans by `gen_ai.client.session_id`, including roots emitted during stale-session finalization. A sessionless cleanup trigger therefore cannot move a stale root into `unscoped.jsonl` or copy it into another session's file.
 
 When upstream context is present, hook spans keep the real `trace_id` and attach to the real upstream parent span. The hook still cannot force a specific emitted `span_id` for its own spans because the Python OpenTelemetry SDK assigns span IDs when spans are started.
 
@@ -816,15 +827,17 @@ The hook auto-detects which IDE is calling it:
 
 | Signal | IDE |
 |--------|-----|
-| Parent process tree (`ps` parent-chain walk) | Preferred detection for supported IDEs such as Cursor, Copilot / VS Code, Claude Code, OpenCode, and Windsurf |
+| Managed command source flag (`otel-hook --cursor`, `--codex`, `--claude`, etc.) | Preferred identity for setup-generated hooks |
+| Legacy managed `IDE_OTEL_HOOK_SOURCE` env | Compatibility identity for older setup-generated hooks |
 | `IDE_OTEL_IDE_NAME` env var | Explicit override for generic hook runners or manual debugging |
+| Parent process tree (`ps` parent-chain walk) | Compatibility fallback for legacy/unmanaged hooks |
 | Self-reported `ide_name`, `client`, or `source_app` values such as `OpenAI Codex`, `Codex CLI`, `GitHub Copilot`, `GitHub Copilot CLI`, `GitHub Copilot Chat`, `Claude Code`, `Claude Code CLI`, `Anthropic Claude Code`, `Cursor IDE`, `Cursor CLI`, `Anti Gravity`, `Anti Gravity CLI`, `OpenCode` / `OpenCode CLI`, `Windsurf IDE`, or `Codeium Windsurf` (case-insensitive, hyphen/space-insensitive) | Normalized to the canonical `gen_ai.client.name` |
 | `conversation_id` or `generation_id` in input | Cursor |
 | `transcript_path`, `permission_mode`, or `notification_type` | Claude Code |
 | `turn_id`, `tool_response`, or `last_assistant_message` | Codex |
 | `session_id` only (no Cursor-specific fields) | GitHub Copilot |
 
-Detection order is: (1) parent process tree, (2) explicit `IDE_OTEL_IDE_NAME`, (3) self-reported payload fields, then (4) heuristics. `setup.sh` now relies on process discovery for generated Cursor, Copilot, and Claude configs, while the env var remains available as an escape hatch for generic runners and debugging.
+Detection order is: (1) managed command source flag, (2) legacy managed source env, (3) explicit `IDE_OTEL_IDE_NAME`, (4) process-tree fallback, (5) self-reported payload fields, then (6) heuristics. Setup-generated hooks therefore do not depend on process-tree or ambient environment inference for their primary identity.
 
 The hook still detects the outer wrapper IDE/process, but the emitted canonical client identity usually prefers a distinct inner engine when one is present (for example Gemini running under Claude Code). In those cases, spans/resources use the inner engine for `gen_ai.client.name` and `gen_ai.system`, keep `gen_ai.client.agent_engine` for compatibility, and record the wrapper as `gen_ai.client.wrapper`. Cross-engine promotion is now gated on strong payload evidence (explicit engine fields, self-reported client identity, or corroborated semantic fields), so weak hints such as leaked wrapper env vars do not relabel Cursor events and create duplicate workspace-context telemetry for the same hook event. Native payload signals beat leaked wrapper-only env hints, so Cursor-specific fields such as `conversation_id` / `generation_id` still emit `gen_ai.client.name=cursor` when stale Claude-specific hints are present. When the hook can infer a provider from the payload, it also sets `gen_ai.provider.name` as the canonical provider attribute (v1.37+).
 
