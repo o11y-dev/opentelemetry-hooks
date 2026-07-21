@@ -709,18 +709,18 @@ Requires the [Datadog Agent](https://docs.datadoghq.com/opentelemetry/) with OTL
 
 ## Hook fact contract and provider adapters
 
-- Provider-specific payload interpretation lives behind Cursor, Windsurf, Claude, Codex, Gemini/Antigravity, Copilot, and OpenCode adapters. Every adapter produces the same canonical event, conversation, relationship, workspace, and native-context model before batching or streaming logic runs.
+- Provider-specific payload interpretation lives behind Cursor, Windsurf, Claude, Codex, Gemini/Antigravity, Copilot, and OpenCode adapters. Every adapter produces the same typed canonical event, privacy-safe conversation/relationship facts, workspace identity, and explicit native context before lifecycle services receive a normalized dictionary.
 - Spans are the authoritative/default signal. Prompt, assistant-response, stop-message, error, and delegation facts emit length plus SHA-256 metadata by default. Raw content requires `IDE_OTEL_CAPTURE_CONVERSATION_CONTENT=true` or the legacy `IDE_OTEL_CAPTURE_TEXT=true`; masking and truncation still apply.
 - Optional conversation logs are disabled by default. `IDE_OTEL_ENABLE_CONVERSATION_LOGS=true` mirrors the normalized span facts as trace-correlated structured logs using the same hook event ID.
-- Subagent callbacks preserve provider IDs or receive a session-persisted hook ID, emit `parent_agent_id`, correlate concurrent start/stop callbacks in bounded order, and add delegation links when a valid start context is available.
-- Workspace identity includes the explicit workspace, working directory, repository root/name/owner, `vcs.ref.head.name`, and a SHA-256 of a credential-free normalized Git remote. Raw remotes are never emitted.
-- Hook signals carry `gen_ai.client.telemetry_source=hook` and `gen_ai.client.hook_schema_version=1`. Valid native trace/span IDs are preserved and linked; native and hook telemetry are intentionally not deduplicated.
+- Subagent callbacks preserve provider IDs or receive a session-persisted hook ID, emit `parent_agent_id`, correlate concurrent start/stop callbacks in FIFO order, and add delegation links when a valid start context is available. No-ID identical starts are kept as distinct invocations because suppressing them would discard legitimate concurrent agents; stable provider callback IDs remain idempotent.
+- Workspace identity includes only observed workspace, working directory, repository root/name/owner, `vcs.ref.head.name`, and a SHA-256 of a credential-free normalized Git remote. The hook process's own current directory is not substituted when the event supplies no workspace evidence. Raw remotes are never emitted.
+- Hook signals carry `gen_ai.client.telemetry_source=hook` and `gen_ai.client.hook_schema_version=1`. Native trace/span IDs are preserved and linked only when supplied through explicit `native_trace_id`, `native_span_id`, and optional `native_parent_span_id` fields (camelCase aliases are accepted). Generic `trace_id` / `span_id` fields remain upstream parent context and are never double-classified as native evidence. Native and hook telemetry are intentionally not deduplicated.
 
 ## Cross-agent MCP and lifecycle contract
 
 - Codex and Claude encoded names use `mcp__<server>__<tool>`. One bounded parser preserves the original `gen_ai.client.tool_name` and exports `gen_ai.client.mcp_server` plus `gen_ai.client.mcp_tool`; `__` inside the tool portion is preserved. Parsing applies to pre, post, permission, and failure callbacks on both spans and logs.
 - Cursor dedicated MCP callbacks use `mcp_server_name` and `tool_name`. `mcp_server_name` takes precedence over `mcp_server` and the executable `command`, so a command path cannot replace a real server identity.
-- Cursor's stable generic `tool_use_id` owns the logical invocation. Session-backed FIFO correlation merges `BeforeMCPExecution` / `AfterMCPExecution` server, tool, duration, status, and result metadata into the matching generic pre/post callbacks. Batch mode folds correlated dedicated evidence into the buffered generic call; streaming mode emits trace-correlated dedicated lifecycle logs with the same ID and enriches the later generic post span. Unmatched dedicated evidence is still emitted as a span without inventing an ID.
+- Cursor's stable generic `tool_use_id` owns the logical invocation. Session-backed FIFO correlation merges `BeforeMCPExecution` / `AfterMCPExecution` server, tool, duration, status, and result metadata into the matching generic pre/post callbacks. Cursor's dedicated `duration` value is seconds and is normalized to the `duration_ms` contract. Batch mode folds correlated dedicated evidence into the buffered generic call; streaming mode emits dedicated lifecycle evidence spans (and logs when enabled) with the same ID and enriches the later generic post span. `gen_ai.client.mcp.correlated_evidence=true` distinguishes those callback spans from the logical generic tool span. Unmatched dedicated evidence is still emitted as a span without inventing an ID.
 - Codex `PermissionRequest` reuses an open tool ID only when session, turn/generation, tool name, and event order identify one unambiguous invocation. Ambiguous permissions remain uncorrelated.
 - Duplicate session, prompt, generation-stop, tool, error, subagent, compaction, and permission callbacks are suppressed with bounded session state. Stable IDs use event-plus-ID keys; no-ID callbacks use lifecycle-scoped fingerprints and short bounded windows. Legitimate calls across completed generation boundaries are preserved.
 - Result size and digest are emitted as content-free metadata. Existing content gates remain unchanged: prompt capture is off by default, tool input content requires `IDE_OTEL_CAPTURE_TOOL_INPUT_CONTENT`, and MCP log payloads continue to follow `IDE_OTEL_MCP_LOG_PAYLOAD`.
@@ -742,7 +742,7 @@ Requires the [Datadog Agent](https://docs.datadoghq.com/opentelemetry/) with OTL
 | `gen_ai.client.cwd` / `gen_ai.client.repository_root` | Event working directory and resolved repository root |
 | `vcs.repository.name` / `vcs.ref.head.name` | Repository and Git branch identity |
 | `gen_ai.client.repository.remote.sha256` | SHA-256 of the credential-free normalized Git remote |
-| `gen_ai.client.native_trace_id` / `gen_ai.client.native_span_id` | Valid native source identifiers when supplied by the agent |
+| `gen_ai.client.native_trace_id` / `gen_ai.client.native_span_id` | Valid explicit native source identifiers; generic trace fields are reserved for upstream parenting |
 | `gen_ai.client.timestamp` | Event timestamp (ISO 8601) |
 | `gen_ai.system` | Deprecated legacy GenAI system/provider attribute retained for backward compatibility |
 | `gen_ai.operation.name` | `chat`, `execute_tool`, or `invoke_agent` |
@@ -783,6 +783,8 @@ Requires the [Datadog Agent](https://docs.datadoghq.com/opentelemetry/) with OTL
 | `SubagentStart` / `SubagentStop` | `gen_ai.client.subagent_type`, `gen_ai.client.agent_id`, `gen_ai.client.parent_agent_id`, ID source, delegation length/hash, and status |
 | `Stop` | `gen_ai.client.status`, `gen_ai.client.loop_count` |
 | `ErrorOccurred` | `error.type`, `error.code`, `gen_ai.client.error.length`, `gen_ai.client.error.sha256`, and `gen_ai.client.is_interrupt` |
+
+Real error and failure callbacks set the OpenTelemetry span status to `ERROR` without placing raw error content in the status description. Intentional callbacks marked `is_interrupt=true` retain `UNSET` status and use `gen_ai.client.status=interrupted`.
 
 ## OTel Logs (MCP, Shell, Tool Events)
 
@@ -831,7 +833,7 @@ When `IDE_OTEL_BATCH_ON_STOP=true` (recommended):
 1. **SessionStart**: Creates the persisted trace/session record once. Duplicate starts reuse the same trace and phantom parent and do not emit another root.
 2. **Generation events**: Buffer to `.state/batches/<generation_id>.jsonl`. Explicit generation IDs and implicit fallback generations are both registered as session-owned pending batches, so Cursor sessions without `UserPromptSubmit` are still flushable.
 3. **Stop**: Flushes the current generation exactly once and removes only that generation's pending/dedupe/correlation state. The session remains open; this is required for multi-prompt Codex and Claude sessions.
-4. **SessionEnd**: Discovers and flushes every registered or on-disk batch owned by the session, then emits one `gen_ai.client.session` root. Batch, dedupe, correlation, and session state are removed only after successful flushes.
+4. **SessionEnd**: Discovers and flushes every registered or on-disk batch owned by the session, then emits one `gen_ai.client.session` root. Batch, dedupe, correlation, and session state are removed after the authoritative trace flush succeeds. Logs are flushed and diagnosed independently, so a log-only exporter failure cannot replay spans that were already delivered.
 
 For IDEs without a `generation_id`, the hook derives generation boundaries from `UserPromptSubmit` → `Stop` cycles. If a provider emits neither a prompt boundary nor a generation ID, the first generation-owned event creates an implicit fallback generation. Codex currently has no hook-level `SessionEnd`; bounded stale-session finalization emits its root later and is idempotent.
 

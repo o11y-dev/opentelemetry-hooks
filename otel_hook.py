@@ -436,6 +436,10 @@ _INPUT_ALIASES = {
     "traceId": "trace_id",
     "spanId": "span_id",
     "parentSpanId": "parent_span_id",
+    "nativeTraceId": "native_trace_id",
+    "nativeSpanId": "native_span_id",
+    "nativeParentSpanId": "native_parent_span_id",
+    "nativeSource": "native_source",
     "traceFlags": "trace_flags",
     "traceState": "tracestate",
 }
@@ -826,10 +830,10 @@ def _workspace_observability_attributes(data: Optional[dict], session_ctx: Optio
     if not isinstance(cwd, str) or not cwd.strip():
         cwd = None
     workspace = _first_present(data, ("workspace_path",)) or repo_ctx.get("workspace_path")
-    workspace = workspace or repo_ctx.get("repo_root") or cwd or os.getcwd()
-    attrs = {
-        "gen_ai.client.workspace": os.path.abspath(os.path.expanduser(str(workspace))),
-    }
+    workspace = workspace or repo_ctx.get("repo_root") or cwd
+    attrs = {}
+    if workspace:
+        attrs["gen_ai.client.workspace"] = os.path.abspath(os.path.expanduser(str(workspace)))
     if cwd:
         attrs["gen_ai.client.cwd"] = os.path.abspath(os.path.expanduser(cwd))
     if repo_ctx.get("repo_root"):
@@ -1213,10 +1217,16 @@ class ConversationRecord:
     length: int = 0
     sha256: str = ""
 
-    def __post_init__(self) -> None:
-        if self.text is not None:
-            object.__setattr__(self, "length", len(self.text))
-            object.__setattr__(self, "sha256", _hash_text(self.text))
+    @classmethod
+    def from_text(cls, kind: str, role: str, text: str) -> "ConversationRecord":
+        """Build a content fact without retaining raw text unless capture is enabled."""
+        return cls(
+            kind=kind,
+            role=role,
+            text=text if _conversation_content_enabled() else None,
+            length=len(text),
+            sha256=_hash_text(text),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1226,6 +1236,8 @@ class AgentRelationship:
     agent_id: Optional[str] = None
     parent_agent_id: Optional[str] = None
     task: Optional[str] = None
+    task_length: int = 0
+    task_sha256: str = ""
     status: Optional[str] = None
 
 
@@ -1264,14 +1276,18 @@ class CanonicalHookEvent:
     relationship: AgentRelationship
     workspace: WorkspaceIdentity
     native: NativeTelemetryContext
-    data: dict
+    lifecycle_data: dict
+
+    def to_lifecycle_data(self) -> dict:
+        """Return the normalized, privacy-safe payload used by lifecycle services."""
+        return dict(self.lifecycle_data)
 
 
 class ProviderEventAdapter:
     """Translate one provider payload into the canonical hook event model."""
 
     provider = "unknown"
-    event_aliases = _CANONICAL_EVENT
+    event_aliases: dict[str, str] = {}
     response_fields = ("response", "last_assistant_message", "assistant_response")
     stop_message_fields = ("stop_message",)
 
@@ -1300,10 +1316,13 @@ class ProviderEventAdapter:
         task = _first_present(normalized, ("delegation_task", "subagent_task", "task"))
         if task is not None and not isinstance(task, str):
             task = _stringify(task)
+        task_text = task if isinstance(task, str) else None
         relationship = AgentRelationship(
             agent_id=self._text_value(normalized.get("agent_id")),
             parent_agent_id=self._text_value(normalized.get("parent_agent_id")),
-            task=task,
+            task=task_text if task_text and _conversation_content_enabled() else None,
+            task_length=len(task_text) if task_text else 0,
+            task_sha256=_hash_text(task_text) if task_text else "",
             status=self._text_value(normalized.get("status")),
         )
         workspace = WorkspaceIdentity(
@@ -1311,10 +1330,12 @@ class ProviderEventAdapter:
             cwd=self._text_value(normalized.get("cwd")),
         )
         native = NativeTelemetryContext(
-            source=self.provider if self._native_trace_id(normalized.get("trace_id")) else None,
-            trace_id=self._native_trace_id(normalized.get("trace_id")),
-            span_id=self._native_span_id(normalized.get("span_id")),
-            parent_span_id=self._native_span_id(normalized.get("parent_span_id")),
+            source=self._text_value(normalized.get("native_source")) or (
+                self.provider if self._native_trace_id(normalized.get("native_trace_id")) else None
+            ),
+            trace_id=self._native_trace_id(normalized.get("native_trace_id")),
+            span_id=self._native_span_id(normalized.get("native_span_id")),
+            parent_span_id=self._native_span_id(normalized.get("native_parent_span_id")),
         )
         self._store_privacy_safe_conversation(event_name, normalized, conversation)
         return CanonicalHookEvent(
@@ -1331,7 +1352,7 @@ class ProviderEventAdapter:
             relationship=relationship,
             workspace=workspace,
             native=native,
-            data=normalized,
+            lifecycle_data=normalized,
         )
 
     def _normalize_provider_fields(self, event_name: str, data: dict) -> None:
@@ -1342,22 +1363,22 @@ class ProviderEventAdapter:
         if event_name == "UserPromptSubmit":
             prompt = self._first_text(data, ("prompt", "user_prompt", "input"))
             if prompt:
-                yield ConversationRecord("prompt", "user", prompt)
+                yield ConversationRecord.from_text("prompt", "user", prompt)
         if event_name == "Stop":
             response = self._first_text(data, self.response_fields)
             if response:
-                yield ConversationRecord("response", "assistant", response)
+                yield ConversationRecord.from_text("response", "assistant", response)
             stop_message = self._first_text(data, self.stop_message_fields)
             if stop_message and stop_message != response:
-                yield ConversationRecord("stop_message", "system", stop_message)
+                yield ConversationRecord.from_text("stop_message", "system", stop_message)
         if event_name in {"ErrorOccurred", "PostToolUseFailure"} or data.get("error") is not None:
             error = self._first_text(data, ("error_message", "error"))
             if error:
-                yield ConversationRecord("error", "error", error)
+                yield ConversationRecord.from_text("error", "error", error)
         if event_name in {"SubagentStart", "SubagentStop"}:
             task = self._first_text(data, ("delegation_task", "subagent_task", "task"))
             if task:
-                yield ConversationRecord("delegation.task", "system", task)
+                yield ConversationRecord.from_text("delegation.task", "system", task)
 
     def _store_privacy_safe_conversation(
         self,
@@ -1467,6 +1488,24 @@ class ProviderEventAdapter:
 
 class CursorEventAdapter(ProviderEventAdapter):
     provider = "cursor"
+    event_aliases = {
+        key: value
+        for key, value in _CANONICAL_EVENT.items()
+        if key[:1].islower() and key not in {"userPromptSubmitted", "errorOccurred"}
+    }
+
+    def _normalize_provider_fields(self, event_name: str, data: dict) -> None:
+        """Normalize Cursor MCP durations from seconds to the millisecond contract."""
+        super()._normalize_provider_fields(event_name, data)
+        if (
+            self.provider != "cursor"
+            or event_name != "AfterMCPExecution"
+            or data.get("duration_ms") is not None
+        ):
+            return
+        duration = data.get("duration")
+        if isinstance(duration, (int, float)) and not isinstance(duration, bool):
+            data["duration_ms"] = float(duration) * 1000
 
 
 class WindsurfEventAdapter(CursorEventAdapter):
@@ -1484,6 +1523,9 @@ class CodexEventAdapter(ProviderEventAdapter):
 
 class GeminiEventAdapter(ProviderEventAdapter):
     provider = "gemini"
+    event_aliases = {
+        key: value for key, value in _CANONICAL_EVENT.items() if key.startswith(("Before", "After"))
+    }
     response_fields = ("response", "output", "last_assistant_message")
 
 
@@ -1493,6 +1535,10 @@ class AntigravityEventAdapter(GeminiEventAdapter):
 
 class CopilotEventAdapter(ProviderEventAdapter):
     provider = "copilot"
+    event_aliases = {
+        key: _CANONICAL_EVENT[key]
+        for key in ("sessionStart", "sessionEnd", "userPromptSubmitted", "preToolUse", "postToolUse", "errorOccurred")
+    }
 
 
 class OpenCodeEventAdapter(ProviderEventAdapter):
@@ -1551,6 +1597,10 @@ def _normalize_mcp_event_data(data: dict, event_name: str, ide: Optional[str] = 
         updates["mcp_server"] = server
     if tool and data.get("mcp_tool") != tool:
         updates["mcp_tool"] = tool
+    if ide == "cursor" and event_name == "AfterMCPExecution" and data.get("duration_ms") is None:
+        duration = data.get("duration")
+        if isinstance(duration, (int, float)) and not isinstance(duration, bool):
+            updates["duration_ms"] = float(duration) * 1000
     if not updates:
         return data
     normalized = dict(data)
@@ -2480,20 +2530,27 @@ def _enable_file_exporter(path: str, expected_session_key: Optional[str] = None)
         _FILE_EXPORTER_PATHS.add(path)
 
 
-def _force_flush_provider(timeout_millis: int = 500) -> bool:
+def _force_flush_provider(
+    timeout_millis: int = 500,
+    *,
+    authoritative_signal: Optional[str] = None,
+) -> bool:
     """Flush the SDK TracerProvider and LoggerProvider to push pending data.
 
     Default timeout is short (500ms) to avoid hanging the IDE hook when the
-    OTLP collector is unreachable.
+    OTLP collector is unreachable. Batch lifecycle callers use traces as the
+    authoritative signal so a best-effort log failure cannot replay spans that
+    were already exported successfully.
     """
-    success = True
+    trace_success = True
+    log_success = True
     try:
         provider = trace.get_tracer_provider()
         if hasattr(provider, "force_flush"):
             if provider.force_flush(timeout_millis=timeout_millis) is False:
-                success = False
+                trace_success = False
     except Exception as exc:
-        success = False
+        trace_success = False
         _LOGGER.warning("trace force_flush failed: %s", exc)
     if _LOGS_INITIALIZED:
         try:
@@ -2501,11 +2558,15 @@ def _force_flush_provider(timeout_millis: int = 500) -> bool:
             log_provider = get_logger_provider()
             if hasattr(log_provider, "force_flush"):
                 if log_provider.force_flush(timeout_millis=timeout_millis) is False:
-                    success = False
+                    log_success = False
         except Exception as exc:
-            success = False
+            log_success = False
             _LOGGER.warning("log force_flush failed: %s", exc)
-    return success
+    if authoritative_signal == "traces":
+        return trace_success
+    if authoritative_signal == "logs":
+        return log_success
+    return trace_success and log_success
 
 
 def _init_tracing(
@@ -2632,7 +2693,7 @@ def _conversation_records_from_data(data: dict) -> tuple[ConversationRecord, ...
         if not isinstance(kind, str) or not isinstance(role, str):
             continue
         if isinstance(text, str) and text:
-            records.append(ConversationRecord(kind, role, text))
+            records.append(ConversationRecord.from_text(kind, role, text))
         elif isinstance(length, int) and length >= 0 and isinstance(sha256, str) and sha256:
             records.append(ConversationRecord(kind, role, None, length, sha256))
     return tuple(records)
@@ -2658,7 +2719,24 @@ def _apply_conversation_attributes(span, event_name: str, data: dict) -> None:
     _set_if_present(span, "error.type", data.get("error_type"))
     _set_if_present(span, "error.code", data.get("error_code"))
     if event_name in {"ErrorOccurred", "PostToolUseFailure"} or error is not None:
-        span.set_attribute("gen_ai.client.status", "error")
+        span.set_attribute(
+            "gen_ai.client.status",
+            "interrupted" if data.get("is_interrupt") else "error",
+        )
+
+
+def _apply_operation_status(span, event_name: str, data: dict) -> None:
+    """Set OTel status for real failures without leaking error descriptions."""
+    if data.get("is_interrupt"):
+        return
+    status = _lower_or_none(data.get("status") or data.get("mcp_status"))
+    is_error = bool(
+        event_name in {"ErrorOccurred", "PostToolUseFailure"}
+        or data.get("error") is not None
+        or status in {"error", "failed", "failure"}
+    )
+    if is_error and Status is not None and StatusCode is not None and hasattr(span, "set_status"):
+        span.set_status(Status(StatusCode.ERROR))
 
 
 def _maybe_attach_text(span, label: str, text: str) -> None:
@@ -3592,70 +3670,159 @@ def _mark_event_seen(
     return False
 
 
-def _prepare_agent_relationship(
-    session_ctx: dict,
-    event_name: str,
-    data: dict,
-    now_ns: int,
-    generation_key: Optional[str] = None,
-) -> dict:
-    """Persist stable subagent identities and correlate start/stop callbacks."""
-    if event_name not in {"SubagentStart", "SubagentStop"}:
-        return data
-    prepared = dict(data)
-    invocations = session_ctx.setdefault("agent_invocations", [])
-    agent_id = prepared.get("agent_id")
-    agent_type = _first_present(prepared, ("subagent_type", "agent_type", "agent_name"))
-    task = _first_present(prepared, ("delegation_task", "subagent_task", "task"))
+class SessionEventDeduplicator:
+    """Own bounded callback idempotency independently of invocation matching."""
 
-    if event_name == "SubagentStart":
+    def __init__(self, session_ctx: dict, generation_key: Optional[str], now_ns: int) -> None:
+        self.session_ctx = session_ctx
+        self.generation_key = generation_key
+        self.now_ns = now_ns
+
+    def seen(self, key: str, *, window_seconds: Optional[float] = None) -> bool:
+        return _mark_event_seen(
+            self.session_ctx,
+            key,
+            self.now_ns,
+            self.generation_key,
+            window_seconds=window_seconds,
+        )
+
+    def is_duplicate(
+        self,
+        event_name: str,
+        data: dict,
+        invocation_id: Optional[str],
+    ) -> bool:
+        """Apply event-specific keys without owning correlation state."""
+        if invocation_id:
+            return self.seen(f"tool:{event_name}:{invocation_id}")
+        if event_name in _GENERATION_END_EVENTS and self.generation_key:
+            return self.seen(f"generation-end:{event_name}:{self.generation_key}")
+        if event_name not in _MCP_EVENTS:
+            event_id = data.get("_hook_event_id")
+            if event_id and event_name in {
+                "ErrorOccurred",
+                "PostToolUseFailure",
+                "PreCompact",
+                "PostCompact",
+                "PermissionRequest",
+            }:
+                window = None if data.get("_hook_event_id_source") == "provider" else 1.0
+                return self.seen(
+                    f"event:{event_name}:{self.generation_key}:{event_id}",
+                    window_seconds=window,
+                )
+            return False
+        return self.seen(
+            _no_id_mcp_fingerprint(event_name, data, self.generation_key),
+            window_seconds=0.25,
+        )
+
+
+class SubagentInvocationCorrelator:
+    """Correlate concurrent subagent callbacks before applying deduplication."""
+
+    def __init__(
+        self,
+        session_ctx: dict,
+        generation_key: Optional[str],
+        now_ns: int,
+    ) -> None:
+        self.session_ctx = session_ctx
+        self.generation_key = generation_key
+        self.now_ns = now_ns
+        self.deduplicator = SessionEventDeduplicator(session_ctx, generation_key, now_ns)
+
+    @property
+    def invocations(self) -> list:
+        return self.session_ctx.setdefault("agent_invocations", [])
+
+    def prepare(self, event_name: str, data: dict) -> tuple[dict, bool]:
+        if event_name not in {"SubagentStart", "SubagentStop"}:
+            return data, False
+        prepared = dict(data)
+        callback_id = prepared.get("_hook_event_id")
+        if prepared.get("_hook_event_id_source") == "provider" and callback_id:
+            if self.deduplicator.seen(f"subagent-callback:{event_name}:{callback_id}"):
+                return prepared, True
+
+        agent_id = prepared.get("agent_id")
+        if agent_id and self.deduplicator.seen(f"subagent:{event_name}:{agent_id}"):
+            return prepared, True
+        if event_name == "SubagentStart":
+            return self._start(prepared, agent_id), False
+        return self._stop(prepared, agent_id)
+
+    def _start(self, prepared: dict, agent_id: Optional[str]) -> dict:
         if not agent_id:
             agent_id = f"hook:{uuid.uuid4()}"
             prepared["agent_id"] = agent_id
             prepared["agent_id_source"] = "hook"
         else:
             prepared["agent_id_source"] = "provider"
-        parent_id = prepared.get("parent_agent_id")
-        if not parent_id:
-            # Do not infer nesting from event order: concurrent sibling agents
-            # can overlap. A provider-supplied parent wins; otherwise the
-            # session root is the only relationship we can state reliably.
-            parent_id = session_ctx.get("root_agent_id")
-            if parent_id:
-                prepared["parent_agent_id"] = parent_id
-        invocations.append({
+        parent_id = prepared.get("parent_agent_id") or self.session_ctx.get("root_agent_id")
+        if parent_id:
+            prepared["parent_agent_id"] = parent_id
+        agent_type = _first_present(prepared, ("subagent_type", "agent_type", "agent_name"))
+        task = _first_present(prepared, ("delegation_task", "subagent_task", "task"))
+        self.invocations.append({
             "agent_id": agent_id,
             "agent_id_source": prepared.get("agent_id_source"),
             "parent_agent_id": parent_id,
             "agent_type": agent_type,
             "task": _stringify(task) if task is not None else None,
-            "generation_key": generation_key,
+            "generation_key": self.generation_key,
             "state": "open",
-            "started_at_ns": now_ns,
-            "updated_at_ns": now_ns,
+            "started_at_ns": self.now_ns,
+            "updated_at_ns": self.now_ns,
         })
-        del invocations[:-_AGENT_INVOCATION_LIMIT]
+        del self.invocations[:-_AGENT_INVOCATION_LIMIT]
         return prepared
 
-    candidates = [
-        item for item in invocations
-        if item.get("state") == "open"
-        and (not agent_id or item.get("agent_id") == agent_id)
-        and (not agent_type or item.get("agent_type") in (None, agent_type))
-    ]
-    if candidates:
-        invocation = sorted(candidates, key=lambda item: item.get("started_at_ns", 0))[0]
+    def _matches(self, invocation: dict, agent_id: Optional[str], agent_type, task) -> bool:
+        return bool(
+            invocation.get("state") == "open"
+            and (not agent_id or invocation.get("agent_id") == agent_id)
+            and (not agent_type or invocation.get("agent_type") in (None, agent_type))
+            and (task is None or invocation.get("task") in (None, _stringify(task)))
+        )
+
+    def _stop(self, prepared: dict, agent_id: Optional[str]) -> tuple[dict, bool]:
+        agent_type = _first_present(prepared, ("subagent_type", "agent_type", "agent_name"))
+        task = _first_present(prepared, ("delegation_task", "subagent_task", "task"))
+        candidates = [
+            item for item in self.invocations if self._matches(item, agent_id, agent_type, task)
+        ]
+        if not candidates:
+            recent_cutoff = self.now_ns - 1_000_000_000
+            recently_closed = any(
+                item.get("state") == "closed"
+                and item.get("updated_at_ns", 0) >= recent_cutoff
+                and (not agent_id or item.get("agent_id") == agent_id)
+                and (not agent_type or item.get("agent_type") in (None, agent_type))
+                and (task is None or item.get("task") in (None, _stringify(task)))
+                for item in self.invocations
+            )
+            if recently_closed:
+                return prepared, True
+            event_id = prepared.get("_hook_event_id")
+            if event_id:
+                return prepared, self.deduplicator.seen(
+                    f"subagent-unmatched-stop:{self.generation_key}:{event_id}",
+                    window_seconds=1.0,
+                )
+            return prepared, False
+
+        invocation = candidates[0]
         prepared.setdefault("agent_id", invocation.get("agent_id"))
         prepared.setdefault("agent_id_source", invocation.get("agent_id_source"))
         prepared.setdefault("parent_agent_id", invocation.get("parent_agent_id"))
         if task is None and invocation.get("task") is not None:
             prepared["delegation_task"] = invocation["task"]
         invocation["state"] = "closed"
-        invocation["updated_at_ns"] = now_ns
+        invocation["updated_at_ns"] = self.now_ns
         invocation["status"] = prepared.get("status") or "success"
-    return prepared
-
-
+        return prepared, False
 def _no_id_mcp_fingerprint(event_name: str, data: dict, generation_key: Optional[str]) -> str:
     server, tool = _mcp_identity(data)
     result = _first_present(data, ("result_json", "mcp_output", "tool_output", "output"))
@@ -3753,11 +3920,11 @@ def _matching_open_tools(
         if not after_mcp and invocation.get("mcp_before_seen"):
             continue
         candidates.append(invocation)
-    return sorted(candidates, key=lambda item: item.get("started_at_ns", 0))
+    return candidates
 
 
-class MCPInvocationCorrelator:
-    """Own bounded, session-local tool dedupe and MCP correlation state."""
+class ToolInvocationCorrelator:
+    """Own bounded, session-local tool, permission, and MCP correlation state."""
 
     def __init__(
         self,
@@ -3770,6 +3937,7 @@ class MCPInvocationCorrelator:
         self.ide = ide
         self.generation_key = generation_key
         self.now_ns = now_ns
+        self.deduplicator = SessionEventDeduplicator(session_ctx, generation_key, now_ns)
 
     @property
     def invocations(self) -> list:
@@ -3778,17 +3946,17 @@ class MCPInvocationCorrelator:
 
     def prepare(self, event_name: str, data: dict) -> _BufferedEventDecision:
         prepared = _normalize_mcp_event_data(data, event_name, self.ide)
+        if event_name in {"SubagentStart", "SubagentStop"}:
+            prepared, duplicate = SubagentInvocationCorrelator(
+                self.session_ctx,
+                self.generation_key,
+                self.now_ns,
+            ).prepare(event_name, prepared)
+            return self._decision(prepared, duplicate=duplicate)
+
         invocation_id = prepared.get("tool_use_id")
         if self._is_duplicate(event_name, prepared, invocation_id):
             return self._decision(prepared, duplicate=True)
-
-        prepared = _prepare_agent_relationship(
-            self.session_ctx,
-            event_name,
-            prepared,
-            self.now_ns,
-            self.generation_key,
-        )
 
         if event_name == "PreToolUse" and invocation_id:
             self._record_open_tool(prepared, invocation_id)
@@ -3815,47 +3983,7 @@ class MCPInvocationCorrelator:
         return _BufferedEventDecision(self.generation_key, data, duplicate=duplicate, correlated=correlated)
 
     def _is_duplicate(self, event_name: str, data: dict, invocation_id: Optional[str]) -> bool:
-        if invocation_id:
-            return _mark_event_seen(
-                self.session_ctx,
-                f"tool:{event_name}:{invocation_id}",
-                self.now_ns,
-                self.generation_key,
-            )
-        if event_name in _GENERATION_END_EVENTS and self.generation_key:
-            return _mark_event_seen(
-                self.session_ctx,
-                f"generation-end:{event_name}:{self.generation_key}",
-                self.now_ns,
-                self.generation_key,
-            )
-        if event_name not in _MCP_EVENTS:
-            event_id = data.get("_hook_event_id")
-            if event_id and event_name in {
-                "ErrorOccurred",
-                "PostToolUseFailure",
-                "SubagentStart",
-                "SubagentStop",
-                "PreCompact",
-                "PostCompact",
-                "PermissionRequest",
-            }:
-                window = None if data.get("_hook_event_id_source") == "provider" else 1.0
-                return _mark_event_seen(
-                    self.session_ctx,
-                    f"event:{event_name}:{self.generation_key}:{event_id}",
-                    self.now_ns,
-                    self.generation_key,
-                    window_seconds=window,
-                )
-            return False
-        return _mark_event_seen(
-            self.session_ctx,
-            _no_id_mcp_fingerprint(event_name, data, self.generation_key),
-            self.now_ns,
-            self.generation_key,
-            window_seconds=0.25,
-        )
+        return self.deduplicator.is_duplicate(event_name, data, invocation_id)
 
     def _record_open_tool(self, data: dict, invocation_id: str) -> None:
         if any(item.get("tool_use_id") == invocation_id for item in self.invocations):
@@ -3924,7 +4052,6 @@ class MCPInvocationCorrelator:
             _store_mcp_result(invocation, prepared)
             invocation.setdefault("mcp_status", "success")
         return prepared
-
     def _close_tool(self, event_name: str, data: dict, invocation_id: str) -> dict:
         invocation = next(
             (item for item in self.invocations if item.get("tool_use_id") == invocation_id),
@@ -3940,6 +4067,10 @@ class MCPInvocationCorrelator:
         else:
             invocation.setdefault("mcp_status", "success")
         return prepared
+
+
+# Backward-compatible name retained for callers that imported the original class.
+MCPInvocationCorrelator = ToolInvocationCorrelator
 
 
 def _buffer_session_event(session_key: str, event_name: str, data: dict, ide: str) -> _BufferedEventDecision:
@@ -3975,7 +4106,7 @@ def _buffer_session_event(session_key: str, event_name: str, data: dict, ide: st
             if not gen_key:
                 gen_key = _new_generation_key(session_key, session_ctx)
 
-        decision = MCPInvocationCorrelator(session_ctx, ide, gen_key, now_ns).prepare(
+        decision = ToolInvocationCorrelator(session_ctx, ide, gen_key, now_ns).prepare(
             event_name,
             data,
         )
@@ -4007,7 +4138,7 @@ def _buffer_generation_end(session_key: str, event_name: str, data: dict, ide: s
             gen_key = pending[-1] if pending else None
         if not gen_key:
             return _BufferedEventDecision(None, data)
-        decision = MCPInvocationCorrelator(session_ctx, ide, gen_key, now_ns).prepare(
+        decision = ToolInvocationCorrelator(session_ctx, ide, gen_key, now_ns).prepare(
             event_name,
             data,
         )
@@ -4061,7 +4192,7 @@ def _prepare_streaming_session_event(
             gen_key = session_ctx.get("current_generation")
             if not gen_key:
                 gen_key = _new_generation_key(session_key, session_ctx)
-        decision = MCPInvocationCorrelator(session_ctx, ide, gen_key, now_ns).prepare(
+        decision = ToolInvocationCorrelator(session_ctx, ide, gen_key, now_ns).prepare(
             event_name,
             data,
         )
@@ -4278,9 +4409,10 @@ def _event_parent_trace_context(data: dict, session_ctx: Optional[dict]):
 
 
 def _native_telemetry_attributes(data: dict) -> dict:
-    trace_id = ProviderEventAdapter._native_trace_id(data.get("trace_id"))
-    span_id = ProviderEventAdapter._native_span_id(data.get("span_id"))
-    parent_span_id = ProviderEventAdapter._native_span_id(data.get("parent_span_id"))
+    """Return native-agent identity only from the explicit native contract."""
+    trace_id = ProviderEventAdapter._native_trace_id(data.get("native_trace_id"))
+    span_id = ProviderEventAdapter._native_span_id(data.get("native_span_id"))
+    parent_span_id = ProviderEventAdapter._native_span_id(data.get("native_parent_span_id"))
     attrs = {}
     if trace_id:
         attrs["gen_ai.client.native_trace_id"] = trace_id
@@ -4289,7 +4421,9 @@ def _native_telemetry_attributes(data: dict) -> dict:
     if parent_span_id:
         attrs["gen_ai.client.native_parent_span_id"] = parent_span_id
     if attrs:
-        attrs["gen_ai.client.native_source"] = data.get("_hook_provider_adapter", "unknown")
+        attrs["gen_ai.client.native_source"] = (
+            data.get("native_source") or data.get("_hook_provider_adapter", "unknown")
+        )
     return attrs
 
 
@@ -4297,9 +4431,9 @@ def _native_span_links(data: dict) -> list:
     """Create a link to a validated native span without inventing identifiers."""
     if SpanContext is None or Link is None or TraceFlags is None or TraceState is None:
         return []
-    trace_id = ProviderEventAdapter._native_trace_id(data.get("trace_id"))
+    trace_id = ProviderEventAdapter._native_trace_id(data.get("native_trace_id"))
     span_id = ProviderEventAdapter._native_span_id(
-        data.get("span_id") or data.get("parent_span_id")
+        data.get("native_span_id") or data.get("native_parent_span_id")
     )
     if not trace_id or not span_id:
         return []
@@ -4311,7 +4445,11 @@ def _native_span_links(data: dict) -> list:
             trace_flags=TraceFlags(TraceFlags.SAMPLED),
             trace_state=TraceState(),
         )
-        return [Link(native_context, attributes={"gen_ai.client.native_source": data.get("_hook_provider_adapter", "unknown")})]
+        return [Link(native_context, attributes={
+            "gen_ai.client.native_source": (
+                data.get("native_source") or data.get("_hook_provider_adapter", "unknown")
+            )
+        })]
     except (TypeError, ValueError):
         return []
 
@@ -4535,6 +4673,11 @@ def _populate_span(span, event_name: str, data: dict, ide: str, session_ctx: Opt
     _set_if_present(span, "gen_ai.client.hook.event_id_source", data.get("_hook_event_id_source"))
     _set_if_present(span, "gen_ai.client.hook.original_event", data.get("_hook_original_event"))
     _set_if_present(span, "gen_ai.client.hook.provider_adapter", data.get("_hook_provider_adapter"))
+    _set_if_present(
+        span,
+        "gen_ai.client.mcp.correlated_evidence",
+        data.get("_mcp_correlated_evidence"),
+    )
     _set_client_identity_attributes(span, ide, data=data, session_ctx=session_ctx)
     _apply_enrichment_attributes(span, data, session_ctx=session_ctx)
     for key, value in _workspace_observability_attributes(data, session_ctx).items():
@@ -4579,6 +4722,7 @@ def _populate_span(span, event_name: str, data: dict, ide: str, session_ctx: Opt
     _apply_mcp_attributes(span, event_name, data)
     _set_codex_tool_attrs(span, event_name, data)
     _apply_conversation_attributes(span, event_name, data)
+    _apply_operation_status(span, event_name, data)
 
     for label in ("tool_input", "tool_output", "mcp_input", "mcp_output"):
         value = data.get(label)
@@ -4781,7 +4925,7 @@ def _flush_generation_unlocked(tracer, gen_key: str, session_ctx: Optional[dict]
         session_memory = session_ctx.setdefault("memory", {})
         merge_memory_summaries(session_memory, memory_summary, repo_root=repo_root)
 
-    success = not flush or _force_flush_provider()
+    success = not flush or _force_flush_provider(authoritative_signal="traces")
     if success:
         _clear_batch_events(gen_key)
     _LOGGER.info("Flushed generation %s (%d events)", gen_key, len(batch))
@@ -4829,7 +4973,7 @@ def _flush_session(tracer, session_key: str, session_ctx: dict, ide: str, flush:
         _log_with_span(_LOGGER, logging.INFO, session_span, "Session span: session=%s", session_key)
         session_span.end(end_time=end_ns)
 
-    success = not flush or _force_flush_provider()
+    success = not flush or _force_flush_provider(authoritative_signal="traces")
     trace_id = session_ctx.get("trace_id", "unknown")
     _LOGGER.info("Flushed session %s (trace_id=%s)", session_key, trace_id)
     return success
@@ -4893,7 +5037,7 @@ def main() -> int:
         session_ctx=initial_session_ctx,
     )
     event_name = canonical_event.event_name
-    data = canonical_event.data
+    data = canonical_event.to_lifecycle_data()
     data = _normalize_mcp_event_data(data, event_name, ide)
     sk = _session_key(data)
     session_ctx = initial_session_ctx if sk == initial_session_key else _load_session_context(sk)
@@ -5017,15 +5161,8 @@ def main() -> int:
             data = streaming_decision.data
             session_ctx = _load_session_context(sk) or session_ctx
             if streaming_decision.correlated:
-                _emit_event_log_with_context(
-                    event_name,
-                    data,
-                    session_ctx,
-                    parent_ctx,
-                )
-                _force_flush_provider()
-                _emit_stdout_response(event_name, ide, data)
-                return 0
+                data = dict(data)
+                data["_mcp_correlated_evidence"] = True
 
         with tracer.start_as_current_span(
             f"gen_ai.client.hook.{event_name}", kind=SpanKind.INTERNAL,
@@ -5764,11 +5901,22 @@ def _doctor_report(agents: tuple, global_: bool, cwd: str) -> tuple[dict, int]:
     endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
     health = _load_delivery_health()
     signal_health = health.get("signals", {}) if isinstance(health, dict) else {}
+    logs_enabled = _safe_bool(os.getenv("IDE_OTEL_ENABLE_LOGS", "true"))
+
+    def signal_failed_recently(signal: str) -> bool:
+        record = signal_health.get(signal, {})
+        return bool(
+            isinstance(record, dict)
+            and record.get("last_failure_at_ns", 0)
+            >= record.get("last_success_at_ns", 0)
+            and record.get("last_failure_at_ns")
+        )
+
     exporter_status = "disabled"
     if endpoint:
         exporter_status = "configured_unknown"
         traces = signal_health.get("traces", {})
-        if traces.get("last_failure_at_ns", 0) >= traces.get("last_success_at_ns", 0) and traces.get("last_failure_at_ns"):
+        if signal_failed_recently("traces") or (logs_enabled and signal_failed_recently("logs")):
             exporter_status = "failing_recent"
         elif traces.get("last_success_at_ns"):
             exporter_status = "healthy_recent"
@@ -5810,7 +5958,7 @@ def _doctor_report(agents: tuple, global_: bool, cwd: str) -> tuple[dict, int]:
             "status": exporter_status,
             "protocol": (os.getenv("OTEL_EXPORTER_OTLP_PROTOCOL") or "grpc").lower(),
             "endpoint": _sanitized_exporter_endpoint(endpoint),
-            "logs_enabled": _safe_bool(os.getenv("IDE_OTEL_ENABLE_LOGS", "true")),
+            "logs_enabled": logs_enabled,
             "headers_present": bool(os.getenv("OTEL_EXPORTER_OTLP_HEADERS")),
         },
         "state": _pending_state_summary(),
@@ -5820,7 +5968,7 @@ def _doctor_report(agents: tuple, global_: bool, cwd: str) -> tuple[dict, int]:
     if not any(item["registered_events"] for item in registrations):
         warnings.append("no requested agent hooks are registered")
     if exporter_status in {"disabled", "failing_recent"}:
-        warnings.append("trace exporter is not healthy")
+        warnings.append("authoritative trace exporter or enabled log exporter is not healthy")
     if not report["state"]["state_directory_writable"]:
         warnings.append("hook state directory is not writable")
     if warnings:

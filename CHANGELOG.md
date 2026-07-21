@@ -14,10 +14,17 @@
 - Extended session-backed idempotency to prompts, errors, subagents, compaction, and permission callbacks while retaining bounded state and lifecycle cleanup.
 - Made spans the authoritative conversation signal. Optional trace-correlated conversation logs require `IDE_OTEL_ENABLE_CONVERSATION_LOGS=true`.
 - Decorated OTLP exporters with bounded delivery-health recording that excludes payloads, headers, credentials, and raw error messages.
+- Split callback deduplication, tool/MCP correlation, and subagent FIFO correlation into focused session-backed services, and made the typed canonical contract privacy-safe before lifecycle processing.
 
 ### Fixed
 - Prevented raw prompt, error, and delegation content from bypassing privacy gates through direct event attribute mappings.
 - Preserved native and hook telemetry as distinct sources while linking valid native contexts instead of deduplicating them.
+- Reserved generic trace fields for upstream parenting and required explicit native trace/span fields for native attributes and links.
+- Prevented successful trace batches from replaying when only the optional log pipeline fails; doctor now reports failures from any enabled exporter signal.
+- Preserved legitimate concurrent identical subagent starts while keeping provider-ID callbacks idempotent and correlating no-ID stops in FIFO order.
+- Emitted correlated Cursor MCP lifecycle evidence as authoritative spans in streaming mode, including when logs are disabled, while retaining the stable generic tool ID.
+- Normalized Cursor dedicated MCP durations from seconds to milliseconds and set real failure spans to OpenTelemetry `ERROR` while leaving intentional interrupts `UNSET`.
+- Stopped inventing workspace identity from the hook process's current directory when an event provides no workspace or repository evidence.
 
 ## 0.13.6 (unreleased)
 
@@ -35,7 +42,7 @@
 - Prevented duplicate Cursor callbacks and dedicated MCP events from creating duplicate logical tool spans, while reusing the stable generic `tool_use_id` for correlated evidence.
 - Correlated unambiguous Codex `PermissionRequest` callbacks with their open tool invocation and preserved Claude failure IDs and status.
 - Prevented stale-session cleanup from deleting pending Codex batches before their generation and session spans can be exported.
-- Suppressed duplicate generation `Stop` callbacks and preserved correlated Cursor MCP evidence as trace-correlated logs in streaming mode without creating duplicate logical tool spans.
+- Suppressed duplicate generation `Stop` callbacks and preserved correlated Cursor MCP evidence in streaming mode without creating duplicate logical generic tool spans.
 - Routed stale-finalized session roots to their own local JSON files instead of the cleanup trigger's `unscoped.jsonl` file.
 
 ## 0.13.5 (2026-05-25)
