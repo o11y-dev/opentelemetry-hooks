@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.13.6 (unreleased)
+
+### Added
+- Added explicit cross-agent MCP server/tool attributes for encoded Codex and Claude tool names and Cursor's `mcp_server_name` payloads.
+- Added `telemetry.distro.name` and `telemetry.distro.version` hook provenance without changing agent service identity or version fields.
+
+### Changed
+- Encapsulated bounded tool deduplication and provider-specific invocation matching in a session-aware MCP correlator.
+- Made session creation, callback deduplication, generic/dedicated Cursor MCP correlation, and pending-generation ownership session-scoped and atomic across hook processes.
+- Made `Stop` flush only the current generation while preserving the session, and made `SessionEnd` or stale finalization flush every session-owned batch exactly once before cleanup.
+
+### Fixed
+- Prevented duplicate Cursor callbacks and dedicated MCP events from creating duplicate logical tool spans, while reusing the stable generic `tool_use_id` for correlated evidence.
+- Correlated unambiguous Codex `PermissionRequest` callbacks with their open tool invocation and preserved Claude failure IDs and status.
+- Prevented stale-session cleanup from deleting pending Codex batches before their generation and session spans can be exported.
+
 ## 0.13.5 (2026-05-25)
 
 ### Fixed
