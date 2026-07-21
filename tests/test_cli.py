@@ -71,6 +71,59 @@ class TestHookRunnerBackwardCompat:
         assert seen == [source]
 
 
+class TestDoctor:
+    def test_json_report_is_machine_readable_and_sanitized(self, monkeypatch, tmp_path):
+        config = tmp_path / "hooks.json"
+        _write(str(config), {"hooks": {"SessionStart": [{"command": "otel-hook --claude"}]}})
+        monkeypatch.setattr(
+            otel_hook,
+            "_agent_config_paths",
+            lambda _global, _cwd: {agent: str(config) for agent in otel_hook._SUPPORTED_AGENTS},
+        )
+        monkeypatch.setattr(otel_hook, "_detect_ide", lambda _data: "claude")
+        monkeypatch.setattr(
+            otel_hook,
+            "_pending_state_summary",
+            lambda: {
+                "sessions": 0,
+                "batches": 0,
+                "locks": 0,
+                "oldest_pending_age_seconds": 0,
+                "state_directory_writable": True,
+            },
+        )
+        monkeypatch.setattr(otel_hook, "_load_delivery_health", lambda: {})
+        monkeypatch.delenv("IDE_OTEL_CAPTURE_TEXT", raising=False)
+        monkeypatch.delenv("IDE_OTEL_CAPTURE_CONVERSATION_CONTENT", raising=False)
+        monkeypatch.setenv(
+            "OTEL_EXPORTER_OTLP_ENDPOINT",
+            "https://user:secret@collector.example.test:4318/v1/traces?token=hidden",
+        )
+
+        result = CliRunner().invoke(cli, ["doctor", "--agent", "claude", "--json"])
+
+        assert result.exit_code == 0
+        report = json.loads(result.output)
+        assert report["status"] == "healthy"
+        assert report["detected_agent"] == "claude"
+        assert report["exporter"]["endpoint"] == "https://collector.example.test:4318"
+        assert "secret" not in result.output
+        assert report["privacy"]["conversation_content"] is False
+        assert report["registrations"][0]["enabled_events"] == ["SessionStart"]
+
+    def test_diagnose_supports_windsurf(self, monkeypatch, tmp_path):
+        config = tmp_path / "windsurf.json"
+        _write(str(config), {"hooks": {"sessionStart": [{"command": "otel-hook --windsurf"}]}})
+        monkeypatch.setattr(
+            otel_hook,
+            "_agent_config_paths",
+            lambda _global, _cwd: {agent: str(config) for agent in otel_hook._SUPPORTED_AGENTS},
+        )
+        result = CliRunner().invoke(cli, ["diagnose", "--agent", "windsurf"])
+        assert result.exit_code == 0
+        assert "[windsurf] 1 events registered" in result.output
+
+
 # ---------------------------------------------------------------------------
 # setup_cursor
 # ---------------------------------------------------------------------------

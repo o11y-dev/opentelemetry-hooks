@@ -1,0 +1,17 @@
+{
+  "provider": "gemini",
+  "cases": [
+    {
+      "raw": {
+        "hook_event_name": "AfterModel",
+        "session_id": "gemini-session-1",
+        "output": "fixture output"
+      },
+      "expected": {
+        "event_name": "Stop",
+        "session_id": "gemini-session-1",
+        "conversation": [{"kind": "response", "role": "assistant", "length": 14}]
+      }
+    }
+  ]
+}

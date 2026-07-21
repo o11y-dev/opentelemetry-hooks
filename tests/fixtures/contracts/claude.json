@@ -1,0 +1,21 @@
+{
+  "provider": "claude",
+  "cases": [
+    {
+      "raw": {
+        "hook_event_name": "Stop",
+        "session_id": "claude-session-1",
+        "lastAssistantMessage": "fixture response",
+        "stopMessage": "completed"
+      },
+      "expected": {
+        "event_name": "Stop",
+        "session_id": "claude-session-1",
+        "conversation": [
+          {"kind": "response", "role": "assistant", "length": 16},
+          {"kind": "stop_message", "role": "system", "length": 9}
+        ]
+      }
+    }
+  ]
+}

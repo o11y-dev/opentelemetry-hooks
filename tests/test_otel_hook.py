@@ -1061,6 +1061,8 @@ class TestRepositoryEnrichment:
                 return mock.Mock(returncode=0, stdout=f"{repo_root}\n")
             if args == ["git", "config", "--get", "remote.origin.url"]:
                 return mock.Mock(returncode=0, stdout="git@github.com:o11y-dev/opentelemetry-hooks.git\n")
+            if args == ["git", "symbolic-ref", "--quiet", "--short", "HEAD"]:
+                return mock.Mock(returncode=0, stdout="agent/test-branch\n")
             raise AssertionError(f"unexpected git command: {args}")
 
         monkeypatch.setattr(otel_hook, "_find_repo_root", lambda _cwd: str(repo_root))

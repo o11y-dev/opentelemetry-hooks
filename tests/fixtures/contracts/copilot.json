@@ -1,0 +1,19 @@
+{
+  "provider": "copilot",
+  "cases": [
+    {
+      "raw": {
+        "hook_event_name": "errorOccurred",
+        "session_id": "copilot-session-1",
+        "errorMessage": "synthetic failure",
+        "errorType": "FixtureError",
+        "errorCode": "fixture_error"
+      },
+      "expected": {
+        "event_name": "ErrorOccurred",
+        "session_id": "copilot-session-1",
+        "conversation": [{"kind": "error", "role": "error", "length": 17}]
+      }
+    }
+  ]
+}

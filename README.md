@@ -69,7 +69,7 @@ gen_ai.client.session (root)
 | Windsurf | `otel-hook setup --agent windsurf` | Global by default; use `--no-global` for project scope | `~/.codeium/windsurf/settings.json` or `.windsurf/settings.json` |
 | Antigravity / compatible runners | Manual hook command | Runner-defined | Runner workflow/config |
 
-Run `otel-hook diagnose` to see what is currently registered, and `otel-hook uninstall --agent <agent>` to remove this hook from an agent config.
+Run `otel-hook diagnose` to see what is currently registered. Run `otel-hook doctor` for registration, privacy, exporter-health, and pending-delivery diagnostics. Use `otel-hook uninstall --agent <agent>` to remove this hook from an agent config.
 
 ## Supported Events
 
@@ -442,7 +442,8 @@ Then restart your agent or IDE.
 | `IDE_OTEL_BATCH_ON_STOP` | Enable session-level batching (recommended) | `false` |
 | `IDE_OTEL_IDE_NAME` | Force the detected IDE name (`codex`, `cursor`, `copilot`, `claude`, `gemini`, `antigravity`, `opencode`, `windsurf`) for generic hook runners; common labels like `OpenAI Codex`, `Codex CLI`, `GitHub Copilot`, `Claude Code`, `Cursor IDE` / `Cursor CLI`, `Gemini CLI`, `Anti Gravity`, `OpenCode`, `Windsurf IDE`, `Codeium Windsurf`, and their `... CLI` / `... IDE` variants normalize automatically | auto-detect |
 | `IDE_OTEL_LOCAL_SPANS` | Save hook spans locally as JSONL files for agent analysis (`.state/local_spans/*.jsonl`) | unset |
-| `IDE_OTEL_CAPTURE_TEXT` | Include prompt/response text in spans | `false` |
+| `IDE_OTEL_CAPTURE_CONVERSATION_CONTENT` | Include prompt, response, stop-message, error, and delegation text in spans | `false` |
+| `IDE_OTEL_CAPTURE_TEXT` | Legacy broad text-capture gate; also enables conversation content | `false` |
 | `IDE_OTEL_CAPTURE_USER_IDENTITY` | Include opt-in `user.id` / `user.email` payload fields in spans and logs | `false` |
 | `IDE_OTEL_MASK_PROMPTS` | Redact emails, tokens, usernames from text | `false` |
 | `IDE_OTEL_TEXT_MAX_CHARS` | Max characters for captured text | `4000` |
@@ -454,6 +455,7 @@ Then restart your agent or IDE.
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `IDE_OTEL_ENABLE_LOGS` | Enable OTel Logs signal export (OTLP) | `true` |
+| `IDE_OTEL_ENABLE_CONVERSATION_LOGS` | Mirror span-first conversation facts as trace-correlated logs | `false` |
 | `IDE_OTEL_MCP_LOG_PAYLOAD` | Include full MCP input/output payloads in logs | `true` |
 | `IDE_OTEL_LOG_ALL_EVENTS` | Emit OTel log records for all hook events (not just MCP/shell/tool) | `false` |
 | `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` | Override OTLP logs endpoint (auto-derived from traces endpoint if not set) | — |
@@ -705,13 +707,22 @@ Requires the [Datadog Agent](https://docs.datadoghq.com/opentelemetry/) with OTL
 }
 ```
 
+## Hook fact contract and provider adapters
+
+- Provider-specific payload interpretation lives behind Cursor, Windsurf, Claude, Codex, Gemini/Antigravity, Copilot, and OpenCode adapters. Every adapter produces the same canonical event, conversation, relationship, workspace, and native-context model before batching or streaming logic runs.
+- Spans are the authoritative/default signal. Prompt, assistant-response, stop-message, error, and delegation facts emit length plus SHA-256 metadata by default. Raw content requires `IDE_OTEL_CAPTURE_CONVERSATION_CONTENT=true` or the legacy `IDE_OTEL_CAPTURE_TEXT=true`; masking and truncation still apply.
+- Optional conversation logs are disabled by default. `IDE_OTEL_ENABLE_CONVERSATION_LOGS=true` mirrors the normalized span facts as trace-correlated structured logs using the same hook event ID.
+- Subagent callbacks preserve provider IDs or receive a session-persisted hook ID, emit `parent_agent_id`, correlate concurrent start/stop callbacks in bounded order, and add delegation links when a valid start context is available.
+- Workspace identity includes the explicit workspace, working directory, repository root/name/owner, `vcs.ref.head.name`, and a SHA-256 of a credential-free normalized Git remote. Raw remotes are never emitted.
+- Hook signals carry `gen_ai.client.telemetry_source=hook` and `gen_ai.client.hook_schema_version=1`. Valid native trace/span IDs are preserved and linked; native and hook telemetry are intentionally not deduplicated.
+
 ## Cross-agent MCP and lifecycle contract
 
 - Codex and Claude encoded names use `mcp__<server>__<tool>`. One bounded parser preserves the original `gen_ai.client.tool_name` and exports `gen_ai.client.mcp_server` plus `gen_ai.client.mcp_tool`; `__` inside the tool portion is preserved. Parsing applies to pre, post, permission, and failure callbacks on both spans and logs.
 - Cursor dedicated MCP callbacks use `mcp_server_name` and `tool_name`. `mcp_server_name` takes precedence over `mcp_server` and the executable `command`, so a command path cannot replace a real server identity.
 - Cursor's stable generic `tool_use_id` owns the logical invocation. Session-backed FIFO correlation merges `BeforeMCPExecution` / `AfterMCPExecution` server, tool, duration, status, and result metadata into the matching generic pre/post callbacks. Batch mode folds correlated dedicated evidence into the buffered generic call; streaming mode emits trace-correlated dedicated lifecycle logs with the same ID and enriches the later generic post span. Unmatched dedicated evidence is still emitted as a span without inventing an ID.
 - Codex `PermissionRequest` reuses an open tool ID only when session, turn/generation, tool name, and event order identify one unambiguous invocation. Ambiguous permissions remain uncorrelated.
-- Duplicate session, generation-stop, and tool callbacks are suppressed with bounded session state. Stable IDs use event-plus-ID keys; no-ID MCP callbacks use a short bounded fingerprint window. Legitimate calls with distinct IDs are never collapsed.
+- Duplicate session, prompt, generation-stop, tool, error, subagent, compaction, and permission callbacks are suppressed with bounded session state. Stable IDs use event-plus-ID keys; no-ID callbacks use lifecycle-scoped fingerprints and short bounded windows. Legitimate calls across completed generation boundaries are preserved.
 - Result size and digest are emitted as content-free metadata. Existing content gates remain unchanged: prompt capture is off by default, tool input content requires `IDE_OTEL_CAPTURE_TOOL_INPUT_CONTENT`, and MCP log payloads continue to follow `IDE_OTEL_MCP_LOG_PAYLOAD`.
 
 ## Span Attributes
@@ -721,11 +732,17 @@ Requires the [Datadog Agent](https://docs.datadoghq.com/opentelemetry/) with OTL
 | Attribute | Description |
 |-----------|-------------|
 | `gen_ai.client.hook.event` | Canonical event name (PascalCase) |
+| `gen_ai.client.hook.event_id` | Provider event ID or deterministic hook callback identity |
+| `gen_ai.client.telemetry_source` / `gen_ai.client.hook_schema_version` | Explicit hook provenance and contract version |
 | `gen_ai.client.name` | Outer IDE or hook host (`codex`, `cursor`, `copilot`, `claude`, `opencode`, etc.) |
 | `gen_ai.client.agent_engine` | Inner agent engine when it differs from the outer IDE (for example Cursor running Claude Code) |
 | `gen_ai.client.session_id` | Session identifier |
 | `gen_ai.client.generation_id` | Generation identifier (Cursor) |
 | `gen_ai.client.workspace` | Workspace / working directory |
+| `gen_ai.client.cwd` / `gen_ai.client.repository_root` | Event working directory and resolved repository root |
+| `vcs.repository.name` / `vcs.ref.head.name` | Repository and Git branch identity |
+| `gen_ai.client.repository.remote.sha256` | SHA-256 of the credential-free normalized Git remote |
+| `gen_ai.client.native_trace_id` / `gen_ai.client.native_span_id` | Valid native source identifiers when supplied by the agent |
 | `gen_ai.client.timestamp` | Event timestamp (ISO 8601) |
 | `gen_ai.system` | Deprecated legacy GenAI system/provider attribute retained for backward compatibility |
 | `gen_ai.operation.name` | `chat`, `execute_tool`, or `invoke_agent` |
@@ -759,13 +776,13 @@ Requires the [Datadog Agent](https://docs.datadoghq.com/opentelemetry/) with OTL
 |-------|---------------|
 | `UserPromptSubmit` | `gen_ai.client.composer_mode`, `gen_ai.request.model` |
 | `PreToolUse` / `PostToolUse` | `gen_ai.client.tool_name`, `gen_ai.client.tool_id`, `gen_ai.client.tool_use_id`, `gen_ai.client.duration_ms`, and explicit MCP identity when encoded |
-| `PostToolUseFailure` | `gen_ai.client.tool_name`, `gen_ai.client.tool_use_id`, `gen_ai.client.status=error`, `gen_ai.client.error`, and explicit MCP identity when encoded |
+| `PostToolUseFailure` | `gen_ai.client.tool_name`, `gen_ai.client.tool_use_id`, `gen_ai.client.status=error`, privacy-safe error length/hash, and explicit MCP identity when encoded |
 | `BeforeShellExecution` / `AfterShellExecution` | `gen_ai.client.command`, `gen_ai.client.cwd`, `gen_ai.client.exit_code` |
 | `BeforeMCPExecution` / `AfterMCPExecution` | `gen_ai.client.mcp_server`, `gen_ai.client.mcp_tool` |
 | `BeforeReadFile` / `AfterFileEdit` | `gen_ai.client.file_path`, `gen_ai.client.edits` |
-| `SubagentStart` / `SubagentStop` | `gen_ai.client.subagent_type`, `gen_ai.client.agent_id` |
+| `SubagentStart` / `SubagentStop` | `gen_ai.client.subagent_type`, `gen_ai.client.agent_id`, `gen_ai.client.parent_agent_id`, ID source, delegation length/hash, and status |
 | `Stop` | `gen_ai.client.status`, `gen_ai.client.loop_count` |
-| `ErrorOccurred` | `gen_ai.client.error`, `gen_ai.client.is_interrupt` |
+| `ErrorOccurred` | `error.type`, `error.code`, `gen_ai.client.error.length`, `gen_ai.client.error.sha256`, and `gen_ai.client.is_interrupt` |
 
 ## OTel Logs (MCP, Shell, Tool Events)
 
@@ -778,6 +795,7 @@ When `IDE_OTEL_ENABLE_LOGS=true` (default), the hook emits structured OpenTeleme
 | **MCP calls** (`BeforeMCPExecution`, `AfterMCPExecution`) | Always when logs enabled | `IDE_OTEL_MCP_LOG_PAYLOAD` |
 | **Shell execution** (`BeforeShellExecution`, `AfterShellExecution`) | Always when logs enabled | `IDE_OTEL_MCP_LOG_PAYLOAD` |
 | **Tool usage** (`PreToolUse`, `PostToolUse`, `PostToolUseFailure`) | Always when logs enabled | `IDE_OTEL_CAPTURE_TOOL_INPUT_CONTENT` |
+| **Conversation facts** (prompt, response, stop message, error, delegation) | Only when `IDE_OTEL_ENABLE_CONVERSATION_LOGS=true` | `IDE_OTEL_CAPTURE_CONVERSATION_CONTENT` |
 | **All other events** | Only when `IDE_OTEL_LOG_ALL_EVENTS=true` | — |
 
 ### MCP Log Attributes
@@ -812,7 +830,7 @@ When `IDE_OTEL_BATCH_ON_STOP=true` (recommended):
 
 1. **SessionStart**: Creates the persisted trace/session record once. Duplicate starts reuse the same trace and phantom parent and do not emit another root.
 2. **Generation events**: Buffer to `.state/batches/<generation_id>.jsonl`. Explicit generation IDs and implicit fallback generations are both registered as session-owned pending batches, so Cursor sessions without `UserPromptSubmit` are still flushable.
-3. **Stop**: Flushes the current generation exactly once and removes only that generation's pending/correlation state. The session remains open; this is required for multi-prompt Codex and Claude sessions.
+3. **Stop**: Flushes the current generation exactly once and removes only that generation's pending/dedupe/correlation state. The session remains open; this is required for multi-prompt Codex and Claude sessions.
 4. **SessionEnd**: Discovers and flushes every registered or on-disk batch owned by the session, then emits one `gen_ai.client.session` root. Batch, dedupe, correlation, and session state are removed only after successful flushes.
 
 For IDEs without a `generation_id`, the hook derives generation boundaries from `UserPromptSubmit` → `Stop` cycles. If a provider emits neither a prompt boundary nor a generation ID, the first generation-owned event creates an implicit fallback generation. Codex currently has no hook-level `SessionEnd`; bounded stale-session finalization emits its root later and is idempotent.
@@ -875,11 +893,11 @@ The hook still detects the outer wrapper IDE/process, but the emitted canonical 
 - Event names and timing
 - Tool/command names
 - File paths
-- Prompt/response **length and SHA-256 hash** (not content)
+- Prompt, response, stop-message, error, and delegation **length and SHA-256 hash** (not content)
 
 ### Opt-in Content Capture
 
-Set `IDE_OTEL_CAPTURE_TEXT=true` to include prompt/response text. Combine with `IDE_OTEL_MASK_PROMPTS=true` to redact:
+Set `IDE_OTEL_CAPTURE_CONVERSATION_CONTENT=true` to include conversation and delegation text. `IDE_OTEL_CAPTURE_TEXT=true` remains a backward-compatible broader opt-in. Combine either with `IDE_OTEL_MASK_PROMPTS=true` to redact:
 - Email addresses
 - Long tokens / API keys
 - macOS usernames from paths
@@ -891,6 +909,15 @@ Set `IDE_OTEL_CAPTURE_TEXT=true` to include prompt/response text. Combine with `
 - Raw code
 
 ## Troubleshooting
+
+### Run the doctor
+
+```bash
+otel-hook doctor
+otel-hook doctor --agent codex --json
+```
+
+The doctor is read-only. It reports effective privacy booleans and sanitized exporter endpoints/failures; it never prints OTLP headers, credentials, telemetry payloads, or raw delivery-error messages. Exit status is `0` for healthy, `1` for degraded, and `2` for an invalid configuration/runtime failure.
 
 ### Check the log
 

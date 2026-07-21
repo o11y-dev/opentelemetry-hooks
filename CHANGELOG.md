@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.14.0 (unreleased)
+
+### Added
+- Added a canonical hook event model with provider adapters for Cursor, Windsurf, Claude, Codex, Gemini, Antigravity, Copilot, and OpenCode.
+- Added span-first prompt, response, stop-message, error, and delegation facts with length and SHA-256 metadata by default and explicit content capture through `IDE_OTEL_CAPTURE_CONVERSATION_CONTENT`.
+- Added stable session-backed subagent identities, parent relationships, delegation status, and trace links when valid source contexts are available.
+- Added workspace, repository root, credential-free Git remote hashing, branch identity, hook schema/source provenance, and native trace/span identifiers.
+- Added `otel-hook doctor` with human and JSON reports for registrations, privacy controls, exporter health, pending state, and sanitized delivery failures.
+- Added sanitized provider contract fixtures and a capability manifest for every supported agent family.
+
+### Changed
+- Extended session-backed idempotency to prompts, errors, subagents, compaction, and permission callbacks while retaining bounded state and lifecycle cleanup.
+- Made spans the authoritative conversation signal. Optional trace-correlated conversation logs require `IDE_OTEL_ENABLE_CONVERSATION_LOGS=true`.
+- Decorated OTLP exporters with bounded delivery-health recording that excludes payloads, headers, credentials, and raw error messages.
+
+### Fixed
+- Prevented raw prompt, error, and delegation content from bypassing privacy gates through direct event attribute mappings.
+- Preserved native and hook telemetry as distinct sources while linking valid native contexts instead of deduplicating them.
+
 ## 0.13.6 (unreleased)
 
 ### Added
