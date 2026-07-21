@@ -709,9 +709,9 @@ Requires the [Datadog Agent](https://docs.datadoghq.com/opentelemetry/) with OTL
 
 - Codex and Claude encoded names use `mcp__<server>__<tool>`. One bounded parser preserves the original `gen_ai.client.tool_name` and exports `gen_ai.client.mcp_server` plus `gen_ai.client.mcp_tool`; `__` inside the tool portion is preserved. Parsing applies to pre, post, permission, and failure callbacks on both spans and logs.
 - Cursor dedicated MCP callbacks use `mcp_server_name` and `tool_name`. `mcp_server_name` takes precedence over `mcp_server` and the executable `command`, so a command path cannot replace a real server identity.
-- Cursor's stable generic `tool_use_id` owns the logical invocation. Session-backed FIFO correlation merges `BeforeMCPExecution` / `AfterMCPExecution` server, tool, duration, status, and result metadata into the matching generic pre/post callbacks. Correlated dedicated callbacks do not create duplicate hook spans; unmatched dedicated evidence is still emitted without inventing an ID.
+- Cursor's stable generic `tool_use_id` owns the logical invocation. Session-backed FIFO correlation merges `BeforeMCPExecution` / `AfterMCPExecution` server, tool, duration, status, and result metadata into the matching generic pre/post callbacks. Batch mode folds correlated dedicated evidence into the buffered generic call; streaming mode emits trace-correlated dedicated lifecycle logs with the same ID and enriches the later generic post span. Unmatched dedicated evidence is still emitted as a span without inventing an ID.
 - Codex `PermissionRequest` reuses an open tool ID only when session, turn/generation, tool name, and event order identify one unambiguous invocation. Ambiguous permissions remain uncorrelated.
-- Duplicate session and tool callbacks are suppressed with bounded session state. Stable IDs use event-plus-ID keys; no-ID MCP callbacks use a short bounded fingerprint window. Legitimate calls with distinct IDs are never collapsed.
+- Duplicate session, generation-stop, and tool callbacks are suppressed with bounded session state. Stable IDs use event-plus-ID keys; no-ID MCP callbacks use a short bounded fingerprint window. Legitimate calls with distinct IDs are never collapsed.
 - Result size and digest are emitted as content-free metadata. Existing content gates remain unchanged: prompt capture is off by default, tool input content requires `IDE_OTEL_CAPTURE_TOOL_INPUT_CONTENT`, and MCP log payloads continue to follow `IDE_OTEL_MCP_LOG_PAYLOAD`.
 
 ## Span Attributes
@@ -729,7 +729,7 @@ Requires the [Datadog Agent](https://docs.datadoghq.com/opentelemetry/) with OTL
 | `gen_ai.client.timestamp` | Event timestamp (ISO 8601) |
 | `gen_ai.system` | Deprecated legacy GenAI system/provider attribute retained for backward compatibility |
 | `gen_ai.operation.name` | `chat`, `execute_tool`, or `invoke_agent` |
-| `telemetry.distro.name` / `telemetry.distro.version` | Hook package provenance on the OTel resource; does not overwrite agent `service.name` or `service.version` |
+| `telemetry.distro.name` / `telemetry.distro.version` | Hook package provenance on the OTel resource and in the local JSON span's `resource` object. The version is resolved from installed package metadata rather than duplicated in hook logic; neither field overwrites agent `service.name` or `service.version` |
 
 ### GenAI (When Available)
 
@@ -816,6 +816,8 @@ When `IDE_OTEL_BATCH_ON_STOP=true` (recommended):
 4. **SessionEnd**: Discovers and flushes every registered or on-disk batch owned by the session, then emits one `gen_ai.client.session` root. Batch, dedupe, correlation, and session state are removed only after successful flushes.
 
 For IDEs without a `generation_id`, the hook derives generation boundaries from `UserPromptSubmit` → `Stop` cycles. If a provider emits neither a prompt boundary nor a generation ID, the first generation-owned event creates an implicit fallback generation. Codex currently has no hook-level `SessionEnd`; bounded stale-session finalization emits its root later and is idempotent.
+
+Local JSON export routes spans by `gen_ai.client.session_id`, including roots emitted during stale-session finalization. A sessionless cleanup trigger therefore cannot move a stale root into `unscoped.jsonl` or copy it into another session's file.
 
 When upstream context is present, hook spans keep the real `trace_id` and attach to the real upstream parent span. The hook still cannot force a specific emitted `span_id` for its own spans because the Python OpenTelemetry SDK assigns span IDs when spans are started.
 

@@ -1328,6 +1328,11 @@ def _flush_stale_sessions(tracer) -> None:
                 continue
             session_key = name.removesuffix(".json")
             ide = ctx.get("ide", "unknown")
+            if _local_spans_enabled():
+                _enable_file_exporter(
+                    _local_span_path(session_key),
+                    expected_session_key=session_key,
+                )
             if _finalize_session(tracer, session_key, ctx, ide):
                 flushed_any = True
                 _LOGGER.info("Flushed stale session %s", session_key)
@@ -1855,6 +1860,8 @@ def _enable_console_log_exporter() -> None:
 def _span_to_dict(span) -> dict:
     """Serialize an OTel ReadableSpan to a JSON-compatible dict."""
     ctx = span.context
+    resource = getattr(span, "resource", None)
+    resource_attributes = dict(getattr(resource, "attributes", {}) or {})
     parent_id = None
     parent_ctx = span.parent
     if parent_ctx is not None and getattr(parent_ctx, "span_id", 0) != 0:
@@ -1867,6 +1874,7 @@ def _span_to_dict(span) -> dict:
         "start_time_ns": span.start_time,
         "end_time_ns": span.end_time,
         "attributes": dict(span.attributes or {}),
+        "resource": resource_attributes,
         "status": span.status.status_code.name if span.status else None,
     }
 
@@ -1874,8 +1882,9 @@ def _span_to_dict(span) -> dict:
 class _FileSpanExporter:
     """OTel SpanExporter that appends spans as JSONL to a file."""
 
-    def __init__(self, path: str) -> None:
+    def __init__(self, path: str, expected_session_key: Optional[str] = None) -> None:
         self._path = path
+        self._expected_session_key = expected_session_key
         lock_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", os.path.basename(path))
         self._lock_path = os.path.join(_LOCK_DIR, f"file_exporter_{lock_name}.lock")
 
@@ -1887,6 +1896,10 @@ class _FileSpanExporter:
             with _acquire_lock(self._lock_path):
                 with open(self._path, "a", encoding="utf-8") as fh:
                     for span in spans:
+                        if self._expected_session_key is not None:
+                            attributes = dict(span.attributes or {})
+                            if attributes.get("gen_ai.client.session_id") != self._expected_session_key:
+                                continue
                         fh.write(json.dumps(_span_to_dict(span), ensure_ascii=True, default=str) + "\n")
             return SpanExportResult.SUCCESS
         except OSError as exc:
@@ -1900,7 +1913,7 @@ class _FileSpanExporter:
         return True
 
 
-def _enable_file_exporter(path: str) -> None:
+def _enable_file_exporter(path: str, expected_session_key: Optional[str] = None) -> None:
     """Add a file span exporter to the TracerProvider for local span persistence."""
     if path in _FILE_EXPORTER_PATHS:
         return
@@ -1912,7 +1925,11 @@ def _enable_file_exporter(path: str) -> None:
         return
     provider = trace.get_tracer_provider()
     if isinstance(provider, TracerProvider):
-        provider.add_span_processor(SimpleSpanProcessor(_FileSpanExporter(path)))
+        provider.add_span_processor(
+            SimpleSpanProcessor(
+                _FileSpanExporter(path, expected_session_key=expected_session_key),
+            )
+        )
         _FILE_EXPORTER_PATHS.add(path)
 
 
@@ -2292,6 +2309,21 @@ def _emit_event_log(event_name: str, data: dict, session_ctx: Optional[dict] = N
         logger.info("[%s] Hook event: %s", _sid, event_name, extra=all_attrs)
 
 
+def _emit_event_log_with_context(
+    event_name: str,
+    data: dict,
+    session_ctx: Optional[dict],
+    parent_ctx,
+) -> None:
+    """Emit log-only lifecycle evidence under the restored session trace context."""
+    if parent_ctx is None or _REAL_TRACE is None:
+        _emit_event_log(event_name, data, session_ctx=session_ctx)
+        return
+    parent_span = _REAL_TRACE.get_current_span(parent_ctx)
+    with _span_context(parent_span):
+        _emit_event_log(event_name, data, session_ctx=session_ctx)
+
+
 # ---------------------------------------------------------------------------
 # IDE detection and event normalization
 # ---------------------------------------------------------------------------
@@ -2482,6 +2514,7 @@ def _create_session_context(session_key: str, data: dict, ide: str) -> dict:
         if existing:
             return existing
         ctx = _new_session_context(data, ide)
+        ctx["session_id"] = session_key
         _atomic_write_json(_session_path(session_key), ctx)
     return ctx
 
@@ -3033,6 +3066,13 @@ class MCPInvocationCorrelator:
             return _mark_event_seen(
                 self.session_ctx,
                 f"tool:{event_name}:{invocation_id}",
+                self.now_ns,
+                self.generation_key,
+            )
+        if event_name in _GENERATION_END_EVENTS and self.generation_key:
+            return _mark_event_seen(
+                self.session_ctx,
+                f"generation-end:{event_name}:{self.generation_key}",
                 self.now_ns,
                 self.generation_key,
             )
@@ -3766,6 +3806,11 @@ def _flush_generation_unlocked(tracer, gen_key: str, session_ctx: Optional[dict]
     gen_ctx = trace.set_span_in_context(gen_span)
     with _span_context(gen_span):
         gen_span.set_attribute("gen_ai.client.generation_id", gen_key)
+        _set_if_present(
+            gen_span,
+            "gen_ai.client.session_id",
+            _session_key(first_event_data) or (session_ctx or {}).get("session_id"),
+        )
         gen_span.set_attribute("gen_ai.client.event.count", len(batch))
         _set_if_present(gen_span, "gen_ai.request.model", batch_model)
         _apply_memory_summary_attrs(gen_span, "gen_ai.client.memory", memory_summary)
@@ -3925,11 +3970,14 @@ def main() -> int:
         _emit_stdout_response(event_name, ide, data)
         return 0
 
-    if _local_spans_enabled():
-        _enable_file_exporter(_local_span_path(_session_key(data)))
-
     tracer = trace.get_tracer("ide-hooks")
     _flush_stale_sessions(tracer)
+
+    if _local_spans_enabled():
+        _enable_file_exporter(
+            _local_span_path(sk),
+            expected_session_key=sk,
+        )
 
     try:
         if sk and session_ctx:
@@ -4002,10 +4050,20 @@ def main() -> int:
         streaming_decision = None
         if sk and event_name not in _SESSION_START_EVENTS and event_name not in _SESSION_END_EVENTS:
             streaming_decision = _prepare_streaming_session_event(sk, event_name, data, ide)
-            if streaming_decision.duplicate or streaming_decision.correlated:
+            if streaming_decision.duplicate:
                 _emit_stdout_response(event_name, ide, streaming_decision.data)
                 return 0
             data = streaming_decision.data
+            if streaming_decision.correlated:
+                _emit_event_log_with_context(
+                    event_name,
+                    data,
+                    session_ctx,
+                    parent_ctx,
+                )
+                _force_flush_provider()
+                _emit_stdout_response(event_name, ide, data)
+                return 0
 
         with tracer.start_as_current_span(
             f"gen_ai.client.hook.{event_name}", kind=SpanKind.INTERNAL,

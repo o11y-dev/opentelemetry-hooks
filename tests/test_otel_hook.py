@@ -1239,11 +1239,59 @@ class TestMCPIdentityNormalization:
         assert data["mcp_tool"] == "reflect_context"
 
     def test_hook_provenance_uses_distribution_fields_only(self, monkeypatch):
-        monkeypatch.setattr(otel_hook.importlib.metadata, "version", lambda _name: "0.13.6")
+        resolved_version = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+        monkeypatch.setattr(
+            otel_hook.importlib.metadata,
+            "version",
+            lambda _name: resolved_version,
+        )
         assert otel_hook._hook_distro_attributes() == {
             "telemetry.distro.name": "opentelemetry-hooks",
-            "telemetry.distro.version": "0.13.6",
+            "telemetry.distro.version": resolved_version,
         }
+
+    def test_log_only_mcp_evidence_activates_restored_parent_context(self, monkeypatch):
+        parent_ctx = object()
+        parent_span = object()
+        real_trace = mock.Mock()
+        real_trace.get_current_span.return_value = parent_span
+        monkeypatch.setattr(otel_hook, "_REAL_TRACE", real_trace)
+
+        active = []
+
+        @contextlib.contextmanager
+        def activate(span):
+            active.append(span)
+            yield
+            active.pop()
+
+        emitted = []
+        monkeypatch.setattr(otel_hook, "_span_context", activate)
+        monkeypatch.setattr(
+            otel_hook,
+            "_emit_event_log",
+            lambda event_name, data, session_ctx=None: emitted.append(
+                (event_name, dict(data), session_ctx, active[-1])
+            ),
+        )
+
+        session_ctx = {"trace_id": "1" * 32}
+        otel_hook._emit_event_log_with_context(
+            "AfterMCPExecution",
+            {"tool_use_id": "tool-1"},
+            session_ctx,
+            parent_ctx,
+        )
+
+        real_trace.get_current_span.assert_called_once_with(parent_ctx)
+        assert emitted == [
+            (
+                "AfterMCPExecution",
+                {"tool_use_id": "tool-1"},
+                session_ctx,
+                parent_span,
+            )
+        ]
 
 
 class TestCrossAgentBatchLifecycle:
@@ -1344,7 +1392,17 @@ class TestCrossAgentBatchLifecycle:
             {"session_id": session_id},
             "cursor",
         )
+        duplicate_stop = otel_hook._buffer_generation_end(
+            session_id,
+            "Stop",
+            {"session_id": session_id},
+            "cursor",
+        )
         assert stop.generation_key == decision.generation_key
+        assert duplicate_stop.duplicate
+        assert [
+            entry["event"] for entry in otel_hook._load_batch_events(stop.generation_key)
+        ].count("Stop") == 1
 
         tracer = _RecordingTracer()
         ctx = otel_hook._load_session_context(session_id)
@@ -1386,6 +1444,118 @@ class TestCrossAgentBatchLifecycle:
         assert not first.duplicate
         assert duplicate.duplicate
         assert len(otel_hook._load_batch_events(first.generation_key)) == 1
+
+    def test_streaming_cursor_logs_correlated_dedicated_evidence(
+        self, monkeypatch, isolated_hook_state
+    ):
+        session_id = "cursor-streaming-session"
+        tool_use_id = "cursor-streaming-tool"
+        monkeypatch.setenv("IDE_OTEL_BATCH_ON_STOP", "false")
+        otel_hook._create_session_context(
+            session_id,
+            {"session_id": session_id, "source_app": "Cursor"},
+            "cursor",
+        )
+
+        monkeypatch.setattr(otel_hook, "_load_config", lambda: {})
+        monkeypatch.setattr(otel_hook, "_configure_logging", lambda: None)
+        monkeypatch.setattr(otel_hook, "_cleanup_state", lambda: None)
+        monkeypatch.setattr(otel_hook, "_init_tracing", lambda *_args, **_kwargs: True)
+        monkeypatch.setattr(otel_hook, "_local_spans_enabled", lambda: False)
+        monkeypatch.setattr(otel_hook, "_flush_stale_sessions", lambda _tracer: None)
+        monkeypatch.setattr(otel_hook, "_event_parent_trace_context", lambda *_args: None)
+        monkeypatch.setattr(otel_hook, "_emit_stdout_response", lambda *_args, **_kwargs: None)
+
+        span = mock.MagicMock()
+        span_context = mock.MagicMock()
+        span_context.__enter__.return_value = span
+        span_context.__exit__.return_value = False
+        tracer = mock.MagicMock()
+        tracer.start_as_current_span.return_value = span_context
+        trace_api = mock.MagicMock()
+        trace_api.get_tracer.return_value = tracer
+        monkeypatch.setattr(otel_hook, "trace", trace_api)
+        monkeypatch.setattr(otel_hook, "SpanKind", mock.MagicMock(INTERNAL="internal"))
+
+        emitted = []
+        logged = []
+        monkeypatch.setattr(
+            otel_hook,
+            "_populate_span",
+            lambda _span, event_name, data, *_args, **_kwargs: emitted.append(
+                (event_name, dict(data))
+            ),
+        )
+        monkeypatch.setattr(
+            otel_hook,
+            "_emit_event_log_with_context",
+            lambda event_name, data, *_args: logged.append((event_name, dict(data))),
+        )
+
+        payloads = [
+            {
+                "session_id": session_id,
+                "source_app": "Cursor",
+                "hook_event_name": "preToolUse",
+                "tool_name": "MCP:reflect_context",
+                "tool_use_id": tool_use_id,
+            },
+            {
+                "session_id": session_id,
+                "source_app": "Cursor",
+                "hook_event_name": "beforeMCPExecution",
+                "mcp_server_name": "reflect",
+                "tool_name": "reflect_context",
+            },
+            {
+                "session_id": session_id,
+                "source_app": "Cursor",
+                "hook_event_name": "beforeMCPExecution",
+                "mcp_server_name": "reflect",
+                "tool_name": "reflect_context",
+            },
+            {
+                "session_id": session_id,
+                "source_app": "Cursor",
+                "hook_event_name": "afterMCPExecution",
+                "mcp_server_name": "reflect",
+                "tool_name": "reflect_context",
+                "duration": 1.979,
+                "result_json": {"result": "CURSOR_MCP_OK"},
+            },
+            {
+                "session_id": session_id,
+                "source_app": "Cursor",
+                "hook_event_name": "postToolUse",
+                "tool_name": "MCP:reflect_context",
+                "tool_use_id": tool_use_id,
+            },
+        ]
+        for payload in payloads:
+            monkeypatch.setattr(
+                "sys.stdin",
+                __import__("io").StringIO(json.dumps(payload)),
+            )
+            assert otel_hook.main() == 0
+
+        assert [event for event, _data in emitted] == [
+            "PreToolUse",
+            "PostToolUse",
+        ]
+        assert [event for event, _data in logged] == [
+            "BeforeMCPExecution",
+            "AfterMCPExecution",
+        ]
+        dedicated = [data for _event, data in logged]
+        assert {data["tool_use_id"] for data in dedicated} == {tool_use_id}
+        assert {data["mcp_server"] for data in dedicated} == {"reflect"}
+        post = next(data for event, data in emitted if event == "PostToolUse")
+        assert post["tool_use_id"] == tool_use_id
+        assert post["mcp_server"] == "reflect"
+        assert post["mcp_tool"] == "reflect_context"
+        assert post["duration_ms"] == 1.979
+        assert post["status"] == "success"
+        assert post["mcp_result_sha256"]
 
     def test_codex_multi_prompt_permission_and_stale_finalization(self, monkeypatch, isolated_hook_state):
         session_id = "codex-session"
@@ -1555,7 +1725,15 @@ class TestLocalTracePersistence:
         span.parent = None
         span.start_time = 1_000_000_000
         span.end_time = 2_000_000_000
-        span.attributes = {"gen_ai.client.session.key": session_key}
+        span.attributes = {
+            "gen_ai.client.session.key": session_key,
+            "gen_ai.client.session_id": session_key,
+        }
+        span.resource = mock.MagicMock()
+        span.resource.attributes = {
+            "telemetry.distro.name": "opentelemetry-hooks",
+            "telemetry.distro.version": name,
+        }
         span.status = mock.MagicMock()
         span.status.status_code.name = "OK"
         return span
@@ -1571,6 +1749,7 @@ class TestLocalTracePersistence:
             rec = json.loads(f.read().strip())
         assert rec["name"] == "gen_ai.client.generation"
         assert rec["attributes"]["gen_ai.client.session.key"] == "sess-1"
+        assert rec["resource"] == span.resource.attributes
         assert rec["status"] == "OK"
 
     def test_file_span_exporter_appends_multiple_spans(self, tmp_path):
@@ -1584,6 +1763,22 @@ class TestLocalTracePersistence:
         assert len(lines) == 2
         assert json.loads(lines[0])["name"] == "span-1"
         assert json.loads(lines[1])["name"] == "span-2"
+
+    def test_file_span_exporter_routes_only_matching_session(self, tmp_path):
+        out_file = str(tmp_path / "spans.jsonl")
+        exporter = otel_hook._FileSpanExporter(
+            out_file,
+            expected_session_key="session-1",
+        )
+        matching = self._make_mock_span("matching", session_key="session-1")
+        other = self._make_mock_span("other", session_key="session-2")
+
+        with mock.patch.object(otel_hook, "_LOCK_DIR", str(tmp_path / "locks")):
+            exporter.export([matching, other])
+
+        with open(out_file) as f:
+            records = [json.loads(line) for line in f if line.strip()]
+        assert [record["name"] for record in records] == ["matching"]
 
     def test_file_span_exporter_shutdown_is_noop(self, tmp_path):
         exporter = otel_hook._FileSpanExporter(str(tmp_path / "spans.jsonl"))
@@ -1611,6 +1806,7 @@ class TestSessionContext:
                 ctx = otel_hook._create_session_context("sess-1", {}, "cursor")
                 assert "trace_id" in ctx
                 assert len(ctx["trace_id"]) == 32
+                assert ctx["session_id"] == "sess-1"
                 loaded = otel_hook._load_session_context("sess-1")
                 assert loaded["trace_id"] == ctx["trace_id"]
 
@@ -2115,12 +2311,17 @@ class TestMainFlow:
         mock_trace.get_tracer.return_value = mock_tracer
         monkeypatch.setattr(otel_hook, "trace", mock_trace)
         calls = []
-        monkeypatch.setattr(otel_hook, "_enable_file_exporter", lambda path: calls.append(path))
+        monkeypatch.setattr(
+            otel_hook,
+            "_enable_file_exporter",
+            lambda path, expected_session_key=None: calls.append((path, expected_session_key)),
+        )
         captured = []
         monkeypatch.setattr("builtins.print", lambda *a, **kw: captured.append(a[0] if a else ""))
         result = otel_hook.main()
         assert result == 0
-        assert len(calls) == 1 and calls[0].endswith(".jsonl")
+        assert len(calls) == 1 and calls[0][0].endswith(".jsonl")
+        assert calls[0][1] is None
 
     def test_empty_input(self, monkeypatch):
         """Empty stdin should not crash."""
