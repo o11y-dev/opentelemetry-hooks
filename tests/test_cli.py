@@ -2,10 +2,11 @@
 import json
 import os
 
+import pytest
 from click.testing import CliRunner
 
 import otel_hook
-from otel_hook import cli, setup_cursor, setup_claude, setup_copilot, setup_gemini, setup_codex
+from otel_hook import cli, setup_cursor, setup_windsurf, setup_claude, setup_copilot, setup_gemini, setup_codex
 
 
 # ---------------------------------------------------------------------------
@@ -46,6 +47,29 @@ class TestHookRunnerBackwardCompat:
         assert "diagnose" in result.output
         assert "uninstall" in result.output
 
+    @pytest.mark.parametrize("flag,source", [
+        ("--cursor", "cursor"),
+        ("--windsurf", "windsurf"),
+        ("--claude", "claude"),
+        ("--copilot", "copilot"),
+        ("--gemini", "gemini"),
+        ("--codex", "codex"),
+        ("--opencode", "opencode"),
+    ])
+    def test_agent_flag_sets_hook_source(self, monkeypatch, flag, source):
+        runner = CliRunner()
+        seen = []
+
+        def fake_main():
+            seen.append(otel_hook._CLI_HOOK_SOURCE)
+            return 0
+
+        monkeypatch.setattr(otel_hook, "main", fake_main)
+        result = runner.invoke(cli, [flag], input='{"hook_event_name":"Stop","session_id":"s1"}')
+
+        assert result.exit_code == 0
+        assert seen == [source]
+
 
 # ---------------------------------------------------------------------------
 # setup_cursor
@@ -60,7 +84,7 @@ class TestSetupCursor:
         doc = _read(str(hooks_path))
         assert "hooks" in doc
         assert "sessionStart" in doc["hooks"]
-        assert doc["hooks"]["sessionStart"] == [{"command": "otel-hook"}]
+        assert doc["hooks"]["sessionStart"] == [{"command": "otel-hook --cursor"}]
 
     def test_idempotent(self, tmp_path, monkeypatch):
         monkeypatch.setattr(otel_hook, "_resolve_hook_cmd", lambda: "otel-hook")
@@ -79,23 +103,24 @@ class TestSetupCursor:
         doc = _read(str(hooks_path))
         # Our entry is appended, existing entry is preserved
         cmds = [h["command"] for h in doc["hooks"]["sessionStart"]]
-        assert "otel-hook" in cmds
+        assert "otel-hook --cursor" in cmds
         assert "some-other-hook" in cmds
 
-    def test_removes_legacy_env(self, tmp_path, monkeypatch):
+    def test_migrates_legacy_env_to_source_flag(self, tmp_path, monkeypatch):
         monkeypatch.setattr(otel_hook, "_resolve_hook_cmd", lambda: "otel-hook")
         hooks_path = tmp_path / ".cursor" / "hooks.json"
         os.makedirs(str(hooks_path.parent))
         _write(str(hooks_path), {
             "version": 1,
             "hooks": {
-                "sessionStart": [{"command": "otel-hook", "env": {"IDE_OTEL_IDE_NAME": "cursor"}}]
+                "sessionStart": [{"command": "otel-hook", "env": {"IDE_OTEL_IDE_NAME": "cursor", "IDE_OTEL_HOOK_SOURCE": "cursor"}}]
             }
         })
         setup_cursor(global_=False, cwd=str(tmp_path))
         doc = _read(str(hooks_path))
         entry = doc["hooks"]["sessionStart"][0]
-        assert "IDE_OTEL_IDE_NAME" not in entry.get("env", {})
+        assert entry["command"] == "otel-hook --cursor"
+        assert "env" not in entry
 
     def test_global_uses_home(self, tmp_path, monkeypatch):
         monkeypatch.setattr(otel_hook, "_resolve_hook_cmd", lambda: "otel-hook")
@@ -103,6 +128,29 @@ class TestSetupCursor:
         setup_cursor(global_=True)
         hooks_path = tmp_path / ".cursor" / "hooks.json"
         assert hooks_path.exists()
+
+
+# ---------------------------------------------------------------------------
+# setup_windsurf
+# ---------------------------------------------------------------------------
+
+class TestSetupWindsurf:
+    def test_creates_new_file_with_source_flag(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(otel_hook, "_resolve_hook_cmd", lambda: "otel-hook")
+        setup_windsurf(global_=False, cwd=str(tmp_path))
+        hooks_path = tmp_path / ".windsurf" / "settings.json"
+        assert hooks_path.exists()
+        doc = _read(str(hooks_path))
+        assert "sessionStart" in doc["hooks"]
+        assert doc["hooks"]["sessionStart"] == [{"command": "otel-hook --windsurf"}]
+
+    def test_idempotent(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(otel_hook, "_resolve_hook_cmd", lambda: "otel-hook")
+        setup_windsurf(global_=False, cwd=str(tmp_path))
+        before = _read(str(tmp_path / ".windsurf" / "settings.json"))
+        setup_windsurf(global_=False, cwd=str(tmp_path))
+        after = _read(str(tmp_path / ".windsurf" / "settings.json"))
+        assert before == after
 
 
 # ---------------------------------------------------------------------------
@@ -154,19 +202,20 @@ class TestSetupClaude:
         after = _read(str(tmp_path / ".claude" / "settings.json"))
         assert before == after
 
-    def test_strips_legacy_env(self, tmp_path, monkeypatch):
+    def test_migrates_legacy_env_to_source_flag(self, tmp_path, monkeypatch):
         monkeypatch.setattr(otel_hook, "_resolve_hook_cmd", lambda: "otel-hook")
         settings_path = tmp_path / ".claude" / "settings.json"
         os.makedirs(str(settings_path.parent))
         _write(str(settings_path), {
             "hooks": {
-                "SessionStart": [{"hooks": [{"type": "command", "command": "otel-hook", "env": {"IDE_OTEL_IDE_NAME": "claude"}}]}]
+                "SessionStart": [{"hooks": [{"type": "command", "command": "otel-hook", "env": {"IDE_OTEL_IDE_NAME": "claude", "IDE_OTEL_HOOK_SOURCE": "claude"}}]}]
             }
         })
         setup_claude(global_=False, cwd=str(tmp_path))
         doc = _read(str(settings_path))
         for h in doc["hooks"]["SessionStart"][0]["hooks"]:
-            assert "IDE_OTEL_IDE_NAME" not in h.get("env", {})
+            assert h["command"] == "otel-hook --claude"
+            assert "env" not in h
 
 
 # ---------------------------------------------------------------------------
@@ -190,7 +239,7 @@ class TestSetupCopilot:
         for entries in doc["hooks"].values():
             for h in entries:
                 assert "bash" in h
-                assert h["bash"] == "otel-hook"
+                assert h["bash"] == "otel-hook --copilot"
 
     def test_idempotent(self, tmp_path, monkeypatch):
         monkeypatch.setattr(otel_hook, "_resolve_hook_cmd", lambda: "otel-hook")
@@ -219,6 +268,13 @@ class TestSetupGemini:
         for event in ["BeforeTool", "AfterTool", "BeforeModel", "AfterModel"]:
             entries = doc["hooks"][event]
             assert any(e.get("matcher") == "*" for e in entries)
+
+    def test_uses_source_flag(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(otel_hook, "_resolve_hook_cmd", lambda: "otel-hook")
+        setup_gemini(global_=False, cwd=str(tmp_path))
+        doc = _read(str(tmp_path / ".gemini" / "settings.json"))
+        hook = doc["hooks"]["BeforeTool"][0]["hooks"][0]
+        assert hook["command"] == "otel-hook --gemini"
 
     def test_preserves_existing_settings(self, tmp_path, monkeypatch):
         monkeypatch.setattr(otel_hook, "_resolve_hook_cmd", lambda: "otel-hook")
