@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "providers": {
+    "cursor": ["conversation", "subagent", "tool", "mcp", "workspace"],
+    "windsurf": ["conversation", "subagent", "tool", "workspace"],
+    "claude": ["conversation", "subagent", "tool", "compaction"],
+    "codex": ["conversation", "tool", "permission"],
+    "gemini": ["conversation", "subagent", "tool"],
+    "copilot": ["conversation", "tool", "error"],
+    "opencode": ["conversation", "tool", "error"],
+    "antigravity": ["conversation", "subagent", "tool"]
+  }
+}

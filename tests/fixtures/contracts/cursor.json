@@ -1,0 +1,22 @@
+{
+  "provider": "cursor",
+  "cases": [
+    {
+      "raw": {
+        "hook_event_name": "beforeSubmitPrompt",
+        "conversationId": "cursor-session-1",
+        "generationId": "cursor-generation-1",
+        "prompt": "summarize the fixture",
+        "workspacePath": "/workspace/example",
+        "traceId": "11111111111111111111111111111111",
+        "spanId": "2222222222222222"
+      },
+      "expected": {
+        "event_name": "UserPromptSubmit",
+        "session_id": "cursor-session-1",
+        "generation_id": "cursor-generation-1",
+        "conversation": [{"kind": "prompt", "role": "user", "length": 21}]
+      }
+    }
+  ]
+}

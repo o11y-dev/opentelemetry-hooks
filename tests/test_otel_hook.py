@@ -1061,6 +1061,8 @@ class TestRepositoryEnrichment:
                 return mock.Mock(returncode=0, stdout=f"{repo_root}\n")
             if args == ["git", "config", "--get", "remote.origin.url"]:
                 return mock.Mock(returncode=0, stdout="git@github.com:o11y-dev/opentelemetry-hooks.git\n")
+            if args == ["git", "symbolic-ref", "--quiet", "--short", "HEAD"]:
+                return mock.Mock(returncode=0, stdout="agent/test-branch\n")
             raise AssertionError(f"unexpected git command: {args}")
 
         monkeypatch.setattr(otel_hook, "_find_repo_root", lambda _cwd: str(repo_root))
@@ -1167,10 +1169,14 @@ class _RecordingSpan:
     def __init__(self, name):
         self.name = name
         self.attrs = {}
+        self.status = None
         self.ended = False
 
     def set_attribute(self, key, value):
         self.attrs[key] = value
+
+    def set_status(self, status):
+        self.status = status
 
     def get_span_context(self):
         return mock.MagicMock(is_valid=False)
@@ -1301,6 +1307,35 @@ class TestCrossAgentBatchLifecycle:
         assert otel_hook._finalize_session(tracer, session_id, ctx, ide)
         return tracer
 
+    def test_generation_cleanup_uses_trace_authoritative_flush(
+        self, monkeypatch, isolated_hook_state
+    ):
+        session_id = "trace-authoritative-session"
+        otel_hook._create_session_context(session_id, {"session_id": session_id}, "cursor")
+        decision = otel_hook._buffer_session_event(
+            session_id,
+            "UserPromptSubmit",
+            {"session_id": session_id, "prompt": "sanitized fixture"},
+            "cursor",
+        )
+        calls = []
+
+        def force_flush(**kwargs):
+            calls.append(kwargs)
+            return kwargs.get("authoritative_signal") == "traces"
+
+        monkeypatch.setattr(otel_hook, "_force_flush_provider", force_flush)
+        tracer = _RecordingTracer()
+        ctx = otel_hook._load_session_context(session_id)
+        assert otel_hook._flush_generation(
+            tracer,
+            decision.generation_key,
+            ctx,
+            "cursor",
+        )
+        assert calls == [{"authoritative_signal": "traces"}]
+        assert otel_hook._load_batch_events(decision.generation_key) == []
+
     def test_cursor_dedupes_correlates_and_flushes_without_stop(self, isolated_hook_state):
         session_id = "cursor-session"
         tool_use_id = "2a7012d2-df5b-4cc9-9415-bef461a0c506"
@@ -1368,7 +1403,7 @@ class TestCrossAgentBatchLifecycle:
         assert {span.attrs["gen_ai.client.mcp_tool"] for span in tool_spans} == {"reflect_context"}
         post_span = next(span for span in tool_spans if span.name.endswith("PostToolUse"))
         assert post_span.attrs["gen_ai.client.status"] == "success"
-        assert post_span.attrs["gen_ai.client.mcp.duration_ms"] == 1.979
+        assert post_span.attrs["gen_ai.client.mcp.duration_ms"] == 1979.0
         assert "gen_ai.client.mcp.output.sha256" in post_span.attrs
         assert otel_hook._load_session_context(session_id) is None
         assert not list((isolated_hook_state / "batches").glob("*.jsonl"))
@@ -1445,12 +1480,14 @@ class TestCrossAgentBatchLifecycle:
         assert duplicate.duplicate
         assert len(otel_hook._load_batch_events(first.generation_key)) == 1
 
-    def test_streaming_cursor_logs_correlated_dedicated_evidence(
+    def test_streaming_cursor_spans_correlated_dedicated_evidence(
         self, monkeypatch, isolated_hook_state
     ):
         session_id = "cursor-streaming-session"
         tool_use_id = "cursor-streaming-tool"
         monkeypatch.setenv("IDE_OTEL_BATCH_ON_STOP", "false")
+        monkeypatch.setenv("IDE_OTEL_ENABLE_LOGS", "false")
+        monkeypatch.setattr(otel_hook, "_LOGS_INITIALIZED", False)
         otel_hook._create_session_context(
             session_id,
             {"session_id": session_id, "source_app": "Cursor"},
@@ -1540,20 +1577,24 @@ class TestCrossAgentBatchLifecycle:
 
         assert [event for event, _data in emitted] == [
             "PreToolUse",
-            "PostToolUse",
-        ]
-        assert [event for event, _data in logged] == [
             "BeforeMCPExecution",
             "AfterMCPExecution",
+            "PostToolUse",
         ]
-        dedicated = [data for _event, data in logged]
+        assert logged == []
+        dedicated = [
+            data
+            for event, data in emitted
+            if event in {"BeforeMCPExecution", "AfterMCPExecution"}
+        ]
         assert {data["tool_use_id"] for data in dedicated} == {tool_use_id}
         assert {data["mcp_server"] for data in dedicated} == {"reflect"}
+        assert all(data["_mcp_correlated_evidence"] for data in dedicated)
         post = next(data for event, data in emitted if event == "PostToolUse")
         assert post["tool_use_id"] == tool_use_id
         assert post["mcp_server"] == "reflect"
         assert post["mcp_tool"] == "reflect_context"
-        assert post["duration_ms"] == 1.979
+        assert post["duration_ms"] == 1979.0
         assert post["status"] == "success"
         assert post["mcp_result_sha256"]
 
@@ -1664,6 +1705,7 @@ class TestCrossAgentBatchLifecycle:
 
     @pytest.mark.parametrize("with_stop", [True, False])
     def test_claude_failure_dedupe_and_session_order(self, isolated_hook_state, with_stop):
+        assert otel_hook._load_otel_modules()
         session_id = f"claude-session-{with_stop}"
         tool_id = f"claude-tool-{with_stop}"
         otel_hook._create_session_context(session_id, {"session_id": session_id}, "claude")
@@ -1709,6 +1751,7 @@ class TestCrossAgentBatchLifecycle:
         assert failure.attrs["gen_ai.client.mcp_server"] == "reflect"
         assert failure.attrs["gen_ai.client.mcp_tool"] == "reflect_context"
         assert failure.attrs["gen_ai.client.status"] == "error"
+        assert failure.status.status_code == otel_hook.StatusCode.ERROR
 
 
 # ── Local trace persistence ────────────────────────────────────────────────

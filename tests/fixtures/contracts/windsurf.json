@@ -1,0 +1,17 @@
+{
+  "provider": "windsurf",
+  "cases": [
+    {
+      "raw": {
+        "hook_event_name": "beforeSubmitPrompt",
+        "sessionId": "windsurf-session-1",
+        "prompt": "inspect the fixture"
+      },
+      "expected": {
+        "event_name": "UserPromptSubmit",
+        "session_id": "windsurf-session-1",
+        "conversation": [{"kind": "prompt", "role": "user", "length": 19}]
+      }
+    }
+  ]
+}

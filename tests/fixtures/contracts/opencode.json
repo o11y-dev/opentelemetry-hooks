@@ -1,0 +1,18 @@
+{
+  "provider": "opencode",
+  "cases": [
+    {
+      "raw": {
+        "hook_event_name": "UserPromptSubmit",
+        "source_app": "OpenCode",
+        "session_id": "opencode-session-1",
+        "prompt": "open fixture"
+      },
+      "expected": {
+        "event_name": "UserPromptSubmit",
+        "session_id": "opencode-session-1",
+        "conversation": [{"kind": "prompt", "role": "user", "length": 12}]
+      }
+    }
+  ]
+}

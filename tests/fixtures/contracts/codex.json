@@ -1,0 +1,19 @@
+{
+  "provider": "codex",
+  "cases": [
+    {
+      "raw": {
+        "hook_event_name": "UserPromptSubmit",
+        "session_id": "codex-session-1",
+        "turnId": "turn-1",
+        "prompt": "review the fixture"
+      },
+      "expected": {
+        "event_name": "UserPromptSubmit",
+        "session_id": "codex-session-1",
+        "turn_id": "turn-1",
+        "conversation": [{"kind": "prompt", "role": "user", "length": 18}]
+      }
+    }
+  ]
+}

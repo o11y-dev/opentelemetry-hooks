@@ -1,0 +1,18 @@
+{
+  "provider": "antigravity",
+  "cases": [
+    {
+      "raw": {
+        "hook_event_name": "BeforeAgent",
+        "session_id": "antigravity-session-1",
+        "subagentType": "fixture-agent",
+        "delegationTask": "inspect fixture"
+      },
+      "expected": {
+        "event_name": "SubagentStart",
+        "session_id": "antigravity-session-1",
+        "relationship": {"task": "inspect fixture"}
+      }
+    }
+  ]
+}
