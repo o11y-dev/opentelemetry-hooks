@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.14.0 (unreleased)
+## 0.14.0 (2026-07-22)
 
 ### Added
 - Added a canonical hook event model with provider adapters for Cursor, Windsurf, Claude, Codex, Gemini, Antigravity, Copilot, and OpenCode.
