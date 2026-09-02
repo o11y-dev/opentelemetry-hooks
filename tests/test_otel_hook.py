@@ -2213,6 +2213,35 @@ class TestFlushStaleSessions:
         tracer.start_span.assert_not_called()
         assert sess_file.exists()
 
+    def test_bounds_stale_finalization_to_oldest_session(self, monkeypatch, tmp_path):
+        session_dir = tmp_path / "sessions"
+        session_dir.mkdir()
+        now = time.time()
+        for index in range(3):
+            path = session_dir / f"stale-{index}.json"
+            path.write_text(json.dumps({"trace_id": str(index), "ide": "codex"}))
+            mtime = now - 100_000 + index
+            os.utime(path, (mtime, mtime))
+
+        finalized = []
+
+        def finalize(_tracer, session_key, _ctx, _ide):
+            finalized.append(session_key)
+            os.remove(session_dir / f"{session_key}.json")
+            return True
+
+        monkeypatch.setenv("IDE_OTEL_STALE_FLUSH_MAX_SESSIONS", "1")
+        monkeypatch.setattr(otel_hook, "_finalize_session", finalize)
+        monkeypatch.setattr(otel_hook, "_SESSION_DIR", str(session_dir))
+
+        otel_hook._flush_stale_sessions(mock.MagicMock())
+
+        assert finalized == ["stale-0"]
+        assert sorted(path.name for path in session_dir.iterdir()) == [
+            "stale-1.json",
+            "stale-2.json",
+        ]
+
 
 # ── Flatten helper ────────────────────────────────────────────────────────
 
@@ -2544,6 +2573,24 @@ class TestResolveHookHome:
         assert result == str(script_dir)
 
 
+class TestBootstrapVenvSelection:
+    def test_reuses_legacy_venv_only_when_python_abi_matches(self, tmp_path):
+        legacy = tmp_path / ".venv"
+        expected = Path(otel_hook._venv_site_packages_path(str(legacy)))
+        expected.mkdir(parents=True)
+
+        assert otel_hook._select_bootstrap_venv_dir(str(tmp_path)) == str(legacy)
+
+    def test_uses_versioned_venv_when_legacy_python_abi_differs(self, tmp_path):
+        incompatible = tmp_path / ".venv" / "lib" / "python9.9" / "site-packages"
+        incompatible.mkdir(parents=True)
+
+        selected = otel_hook._select_bootstrap_venv_dir(str(tmp_path))
+
+        expected_suffix = f".venv-py{sys.version_info.major}.{sys.version_info.minor}"
+        assert selected == str(tmp_path / expected_suffix)
+
+
 class TestFindExampleConfig:
     def test_finds_file_next_to_module(self, monkeypatch, tmp_path):
         """When otel_config.example.json is next to __file__, it is returned."""
@@ -2712,6 +2759,35 @@ class _FakeSpan:
 
 
 class TestSetCodexToolAttrs:
+    def test_large_response_is_bounded_before_buffering(self, monkeypatch):
+        monkeypatch.setenv("IDE_OTEL_TEXT_MAX_CHARS", "64")
+        original = {"output": "x" * 10_000}
+        event = otel_hook._event_adapter_for("codex").normalize(
+            "PostToolUse",
+            None,
+            {
+                "hook_event_name": "PostToolUse",
+                "session_id": "bounded-response",
+                "tool_name": "mcp__reflect__reflect_context",
+                "toolResponse": original,
+            },
+        )
+        data = event.to_lifecycle_data()
+
+        original_text = otel_hook._stringify(original)
+        assert data["tool_response"] == original_text[:64]
+        assert data["tool_response_length"] == len(original_text)
+        assert data["tool_response_sha256"] == hashlib.sha256(original_text.encode()).hexdigest()
+        assert data["tool_response_truncated"] is True
+        assert "toolResponse" not in data
+
+        span = _FakeSpan()
+        otel_hook._set_codex_tool_attrs(span, "PostToolUse", data)
+        assert span.attrs["gen_ai.client.tool.response.length"] == len(original_text)
+        assert span.attrs["gen_ai.client.tool.response.sha256"] == hashlib.sha256(
+            original_text.encode()
+        ).hexdigest()
+
     def test_default_emits_digest_not_content(self, monkeypatch):
         monkeypatch.delenv("IDE_OTEL_CAPTURE_TOOL_INPUT_CONTENT", raising=False)
         span = _FakeSpan()

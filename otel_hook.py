@@ -111,8 +111,42 @@ def _resolve_hook_home() -> str:
 
 
 _HOOK_DIR = _resolve_hook_home()
-_VENV_DIR = os.path.join(_HOOK_DIR, ".venv")
-_SETUP_LOCK = os.path.join(_HOOK_DIR, ".state", "setup.lock")
+
+
+def _venv_site_packages_path(venv_dir: str) -> str:
+    """Return the site-packages path compatible with this Python runtime."""
+    version = f"python{sys.version_info.major}.{sys.version_info.minor}"
+    return os.path.join(venv_dir, "lib", version, "site-packages")
+
+
+def _select_bootstrap_venv_dir(hook_dir: str) -> str:
+    """Reuse a compatible legacy venv or isolate bootstrap deps by Python ABI."""
+    legacy = os.path.join(hook_dir, ".venv")
+    if os.path.isdir(_venv_site_packages_path(legacy)):
+        return legacy
+    suffix = f".venv-py{sys.version_info.major}.{sys.version_info.minor}"
+    return os.path.join(hook_dir, suffix)
+
+
+def _runtime_has_otel_dependencies() -> bool:
+    """Return whether the invoking environment already owns the hook SDK deps."""
+    required = (
+        "opentelemetry.sdk.trace.export",
+        "opentelemetry.exporter.otlp.proto.grpc.trace_exporter",
+        "opentelemetry.exporter.otlp.proto.http.trace_exporter",
+    )
+    try:
+        return all(importlib.util.find_spec(module) is not None for module in required)
+    except (ImportError, AttributeError, ValueError):
+        return False
+
+
+_VENV_DIR = _select_bootstrap_venv_dir(_HOOK_DIR)
+_SETUP_LOCK = os.path.join(
+    _HOOK_DIR,
+    ".state",
+    f"setup-py{sys.version_info.major}.{sys.version_info.minor}.lock",
+)
 
 
 def _auto_provision_venv() -> None:
@@ -148,12 +182,12 @@ def _auto_provision_venv() -> None:
             pass
 
 
-_auto_provision_venv()
-
-_VENV_SP = glob.glob(os.path.join(_VENV_DIR, "lib", "python*", "site-packages"))
-for _sp in _VENV_SP:
-    if _sp not in sys.path:
-        sys.path.insert(0, _sp)
+_RUNTIME_HAS_OTEL_DEPENDENCIES = _runtime_has_otel_dependencies()
+if not _RUNTIME_HAS_OTEL_DEPENDENCIES:
+    _auto_provision_venv()
+    _venv_site_packages = _venv_site_packages_path(_VENV_DIR)
+    if os.path.isdir(_venv_site_packages) and _venv_site_packages not in sys.path:
+        sys.path.insert(0, _venv_site_packages)
 
 class _TraceShim:
     """Small shim so tests can monkeypatch trace methods before lazy load."""
@@ -1207,6 +1241,34 @@ def _normalize_input_data(data: dict) -> dict:
     return normalized or data
 
 
+def _bound_tool_response_payload(data: dict) -> None:
+    """Keep buffered tool responses small while preserving exact size evidence."""
+    value = data.get("tool_response")
+    if value is None:
+        return
+
+    text = _stringify(value)
+    data["tool_response_length"] = len(text)
+    data["tool_response_sha256"] = _hash_text(text)
+
+    # Provider aliases are normalized before this boundary. Keeping both copies
+    # defeats the payload bound for camelCase callbacks.
+    data.pop("toolResponse", None)
+
+    max_chars = _text_max_chars()
+    if len(text) <= max_chars:
+        return
+
+    data["tool_response_truncated"] = True
+    retain_preview = _safe_bool(os.getenv("IDE_OTEL_CAPTURE_TOOL_INPUT_CONTENT", "")) or _safe_bool(
+        os.getenv("IDE_OTEL_MCP_LOG_PAYLOAD", "true")
+    )
+    if retain_preview and max_chars > 0:
+        data["tool_response"] = text[:max_chars]
+    else:
+        data.pop("tool_response", None)
+
+
 @dataclass(frozen=True, slots=True)
 class ConversationRecord:
     """One privacy-controlled conversation fact extracted from a hook callback."""
@@ -1338,6 +1400,7 @@ class ProviderEventAdapter:
             parent_span_id=self._native_span_id(normalized.get("native_parent_span_id")),
         )
         self._store_privacy_safe_conversation(event_name, normalized, conversation)
+        _bound_tool_response_payload(normalized)
         return CanonicalHookEvent(
             provider=self.provider,
             original_event_name=original_event_name,
@@ -1708,6 +1771,14 @@ def _state_cleanup_interval_seconds() -> int:
         return 3600
 
 
+def _stale_flush_session_limit() -> int:
+    """Bound best-effort stale maintenance performed by an interactive hook."""
+    try:
+        return max(0, int(os.getenv("IDE_OTEL_STALE_FLUSH_MAX_SESSIONS", "1")))
+    except (TypeError, ValueError):
+        return 1
+
+
 def _state_lock_timeout_seconds() -> float:
     try:
         return float(os.getenv("IDE_OTEL_STATE_LOCK_TIMEOUT_SECONDS", "2"))
@@ -1810,19 +1881,34 @@ def _flush_stale_sessions(tracer) -> None:
     if not os.path.isdir(_SESSION_DIR):
         return
 
+    session_limit = _stale_flush_session_limit()
+    if session_limit <= 0:
+        return
+
     cutoff = time.time() - ttl
     flushed_any = False
+    attempted = 0
+    paths = []
     for name in os.listdir(_SESSION_DIR):
         path = os.path.join(_SESSION_DIR, name)
         try:
-            if not os.path.isfile(path) or os.path.getmtime(path) >= cutoff:
-                continue
+            mtime = os.path.getmtime(path)
+            if os.path.isfile(path) and mtime < cutoff:
+                paths.append((mtime, path))
+        except OSError:
+            continue
+
+    for _mtime, path in sorted(paths):
+        try:
             with open(path, "r", encoding="utf-8") as fh:
                 ctx = json.load(fh)
             if not ctx:
                 os.remove(path)
                 continue
-            session_key = name.removesuffix(".json")
+            if attempted >= session_limit:
+                break
+            attempted += 1
+            session_key = os.path.basename(path).removesuffix(".json")
             ide = ctx.get("ide", "unknown")
             if _local_spans_enabled():
                 _enable_file_exporter(
@@ -4764,6 +4850,8 @@ def _set_codex_tool_attrs(span, event_name: str, data: dict) -> None:
             span.set_attribute("gen_ai.client.tool.input.sha256", _hash_text(text))
 
     tool_response = data.get("tool_response")
+    response_length = _int_or_none(data.get("tool_response_length"))
+    response_sha256 = data.get("tool_response_sha256")
     if isinstance(tool_response, dict):
         # Flatten full response only when explicitly opted in (same gate as tool input above)
         if _safe_bool(os.getenv("IDE_OTEL_CAPTURE_TOOL_INPUT_CONTENT", "")):
@@ -4780,11 +4868,23 @@ def _set_codex_tool_attrs(span, event_name: str, data: dict) -> None:
                     _set_if_present(span, key, value)
         else:
             # Always emit length+digest for cardinality-safe observability
-            text = _stringify(tool_response)
-            span.set_attribute("gen_ai.client.tool.response.length", len(text))
-            span.set_attribute("gen_ai.client.tool.response.sha256", _hash_text(text))
+            if response_length is None or not response_sha256:
+                text = _stringify(tool_response)
+                response_length = len(text)
+                response_sha256 = _hash_text(text)
+            span.set_attribute("gen_ai.client.tool.response.length", response_length)
+            span.set_attribute("gen_ai.client.tool.response.sha256", response_sha256)
     elif tool_response is not None:
         _maybe_attach_text(span, "tool_response", _stringify(tool_response))
+        if response_length is not None:
+            span.set_attribute("gen_ai.client.tool.response.length", response_length)
+        if response_sha256:
+            span.set_attribute("gen_ai.client.tool.response.sha256", response_sha256)
+    else:
+        if response_length is not None:
+            span.set_attribute("gen_ai.client.tool.response.length", response_length)
+        if response_sha256:
+            span.set_attribute("gen_ai.client.tool.response.sha256", response_sha256)
 
 
 def _flatten(out: dict, prefix: str, data: dict) -> None:
