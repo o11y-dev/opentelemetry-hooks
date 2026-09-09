@@ -136,7 +136,9 @@ def _runtime_has_otel_dependencies() -> bool:
         "opentelemetry.exporter.otlp.proto.http.trace_exporter",
     )
     try:
-        return all(importlib.util.find_spec(module) is not None for module in required)
+        for module in required:
+            importlib.import_module(module)
+        return True
     except (ImportError, AttributeError, ValueError):
         return False
 
@@ -1887,7 +1889,6 @@ def _flush_stale_sessions(tracer) -> None:
 
     cutoff = time.time() - ttl
     flushed_any = False
-    attempted = 0
     paths = []
     for name in os.listdir(_SESSION_DIR):
         path = os.path.join(_SESSION_DIR, name)
@@ -1898,16 +1899,13 @@ def _flush_stale_sessions(tracer) -> None:
         except OSError:
             continue
 
-    for _mtime, path in sorted(paths):
+    for _mtime, path in sorted(paths)[:session_limit]:
         try:
             with open(path, "r", encoding="utf-8") as fh:
                 ctx = json.load(fh)
             if not ctx:
                 os.remove(path)
                 continue
-            if attempted >= session_limit:
-                break
-            attempted += 1
             session_key = os.path.basename(path).removesuffix(".json")
             ide = ctx.get("ide", "unknown")
             if _local_spans_enabled():
@@ -4875,7 +4873,8 @@ def _set_codex_tool_attrs(span, event_name: str, data: dict) -> None:
             span.set_attribute("gen_ai.client.tool.response.length", response_length)
             span.set_attribute("gen_ai.client.tool.response.sha256", response_sha256)
     elif tool_response is not None:
-        _maybe_attach_text(span, "tool_response", _stringify(tool_response))
+        if response_length is None or not response_sha256:
+            _maybe_attach_text(span, "tool_response", _stringify(tool_response))
         if response_length is not None:
             span.set_attribute("gen_ai.client.tool.response.length", response_length)
         if response_sha256:

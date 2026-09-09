@@ -77,6 +77,20 @@ class TestFirstPresent:
         assert otel_hook._first_present(data, ("a", "b")) == "val"
 
 
+class TestRuntimeHasOtelDependencies:
+    def test_returns_false_when_import_fails(self, monkeypatch):
+        real_import_module = otel_hook.importlib.import_module
+
+        def fake_import_module(name):
+            if name == "opentelemetry.sdk.trace.export":
+                raise ImportError("broken wheel")
+            return real_import_module(name)
+
+        monkeypatch.setattr(otel_hook.importlib, "import_module", fake_import_module)
+
+        assert otel_hook._runtime_has_otel_dependencies() is False
+
+
 class TestIntOrNone:
     def test_valid(self):
         assert otel_hook._int_or_none(42) == 42
@@ -2818,6 +2832,19 @@ class TestSetCodexToolAttrs:
         data = {"tool_input": {"description": "need access"}}
         otel_hook._set_codex_tool_attrs(span, "PermissionRequest", data)
         assert span.attrs.get("gen_ai.client.approval.description") == "need access"
+
+    def test_non_dict_response_does_not_emit_text_when_evidence_present(self, monkeypatch):
+        monkeypatch.setenv("IDE_OTEL_CAPTURE_TEXT", "1")
+        span = _FakeSpan()
+        data = {
+            "tool_response": "sensitive response",
+            "tool_response_length": 18,
+            "tool_response_sha256": "abc123",
+        }
+        otel_hook._set_codex_tool_attrs(span, "PostToolUse", data)
+        assert "gen_ai.client.tool_response.text" not in span.attrs
+        assert span.attrs["gen_ai.client.tool.response.length"] == 18
+        assert span.attrs["gen_ai.client.tool.response.sha256"] == "abc123"
 
     def test_permission_request_in_tool_events(self):
         assert "PermissionRequest" in otel_hook._TOOL_EVENTS
