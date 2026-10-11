@@ -64,40 +64,33 @@ gen_ai.client.session (root)
 | Cursor IDE / CLI | `otel-hook setup --agent cursor` | Global by default; use `--no-global` for project scope | `~/.cursor/hooks.json` or `.cursor/hooks.json` |
 | Claude Code | `otel-hook setup --agent claude` | Global by default; use `--no-global` for project scope | `~/.claude/settings.json` or `.claude/settings.json` |
 | Gemini CLI | `otel-hook setup --agent gemini` | Global by default; use `--no-global` for project scope | `~/.gemini/settings.json` or `.gemini/settings.json` |
-| GitHub Copilot coding agent | `otel-hook setup --agent copilot --no-global` | Repository only | `.github/hooks/otel-hooks.json` |
+| GitHub Copilot CLI / cloud agent | `otel-hook setup --agent copilot` | User-level CLI hooks by default; `--no-global` for repository/cloud hooks | `~/.copilot/hooks/otel-hooks.json` (or `$COPILOT_HOME/hooks/`) or `.github/hooks/otel-hooks.json` |
 | OpenCode | `otel-hook setup --agent opencode` | Global by default; use `--no-global` for project scope | `~/.config/opencode/plugins/otel-hook.ts` or `.opencode/plugins/otel-hook.ts` |
-| Windsurf | `otel-hook setup --agent windsurf` | Global by default; use `--no-global` for project scope | `~/.codeium/windsurf/settings.json` or `.windsurf/settings.json` |
+| Windsurf | `otel-hook setup --agent windsurf` | Global by default; use `--no-global` for project scope | `~/.codeium/windsurf/hooks.json` or `.windsurf/hooks.json` |
 | Antigravity / compatible runners | Manual hook command | Runner-defined | Runner workflow/config |
 
 Run `otel-hook diagnose` to see what is currently registered. Run `otel-hook doctor` for registration, privacy, exporter-health, and pending-delivery diagnostics. Use `otel-hook uninstall --agent <agent>` to remove this hook from an agent config.
 
 ## Supported Events
 
-| Canonical Name | Antigravity / Claude Code | Codex | Cursor IDE / CLI / Windsurf | Gemini CLI | GitHub Copilot | OpenCode (plugin) |
-|---|---|---|---|---|---|---|
-| `SessionStart` | `SessionStart` | `SessionStart` | `sessionStart` | `SessionStart` | `sessionStart` | `session.created` |
-| `SessionEnd` | `SessionEnd` | — | `sessionEnd` | `SessionEnd` | `sessionEnd` | `session.deleted`, `session.error` |
-| `UserPromptSubmit` | `UserPromptSubmit` | `UserPromptSubmit` | `beforeSubmitPrompt` | `BeforeModel` ¹ | `userPromptSubmitted` | `message.updated` (role=user) |
-| `PreToolUse` | `PreToolUse` | `PreToolUse` | `preToolUse` | `BeforeTool` | `preToolUse` | `tool.execute.before` ² |
-| `PermissionRequest` | — | `PermissionRequest` | — | — | — | — |
-| `PostToolUse` | `PostToolUse` | `PostToolUse` | `postToolUse` | `AfterTool` | `postToolUse` | `tool.execute.after` (exit=0) |
-| `PostToolUseFailure` | `PostToolUseFailure` | — | `postToolUseFailure` | — | — | `tool.execute.after` (exit≠0) |
-| `PreCompact` | `PreCompact` | — | — | — | — | — |
-| `PostCompact` | `PostCompact` | — | — | — | — | — |
-| `Stop` | `Stop` | `Stop` | `stop` | `AfterModel` ¹ | — | `session.idle` |
-| `SubagentStart` | `SubagentStart` | — | `subagentStart` | `BeforeAgent` | — | — ³ |
-| `SubagentStop` | `SubagentStop` | — | `subagentStop` | `AfterAgent` | — | — ³ |
-| `ErrorOccurred` | — | — | — | — | `errorOccurred` | — |
-| `BeforeShellExecution` | — | — | `beforeShellExecution` | — | — | — ² |
-| `AfterShellExecution` | — | — | `afterShellExecution` | — | — | — ² |
-| `BeforeMCPExecution` | — | — | `beforeMCPExecution` | — | — | — ² |
-| `AfterMCPExecution` | — | — | `afterMCPExecution` | — | — | — ² |
-| `BeforeReadFile` | — | — | `beforeReadFile` | — | — | — ² |
-| `AfterFileEdit` | — | — | `afterFileEdit` | — | — | `file.edited` |
+Current first-party contracts and deliberate exclusions are recorded in [Hook coverage](docs/hook-coverage.md).
 
-¹ Gemini CLI uses `BeforeModel`/`AfterModel` where other agents use `UserPromptSubmit`/`Stop`; the hook normalizes both to canonical span names.<br>
-² OpenCode routes bash, read, write, MCP, and all other tools through the universal `tool.execute.before/after` hooks, so these events are observable as `PreToolUse`/`PostToolUse` with the appropriate `tool_name`.<br>
-³ Subagent invocations surface as `PreToolUse`/`PostToolUse` with `tool_name=task` — there are no dedicated subagent hook events in OpenCode.
+| Harness | Registered events / callbacks | Coverage |
+|---|---:|---|
+| Claude Code | 31 | Permissions, notifications, failure stops, tasks/teams, instruction/config/workspace changes, model switches, elicitation, streamed message facts |
+| Codex | 12 | Session end, compaction, subagents, interruption |
+| Cursor | 21 | Compaction, Tab read/edit, responses/thoughts, workspace open |
+| Gemini CLI | 11 | Tool selection, notification, pre-compression; corrected turn boundaries |
+| Copilot | 14 | Turn end, tool failures, subagents, compaction, permissions, notifications, transformed prompts |
+| Windsurf / Cascade | 11 | Native file, shell, MCP, prompt, response and worktree events |
+| OpenCode plugin | 10 | Compaction and permission requests; corrected session/message payloads |
+| Antigravity / compatible runners | Manual | Existing compatibility adapter; no verified native installer |
+
+Gemini `BeforeAgent` / `AfterAgent` become `UserPromptSubmit` / `Stop`. Model callbacks remain separate observations and do not open or close turns. Windsurf uses `trajectory_id` for the session and `execution_id` for the generation. Copilot commands include `--copilot --event <name>` because native camelCase payloads omit the event name. Original event names remain available on spans.
+
+Raw conversation content is opt-in. New message, notification, reasoning and task facts follow the existing length/hash contract. `MessageDisplay` records response **chunks**, not complete responses. Gemini nested model messages/chunks are omitted; model names and callback occurrence are observed without duplicating native token accounting.
+
+Rerun the setup command for the relevant harness to register new events. Installing the updated package alone does not rewrite existing harness settings. Current documentation can describe features absent from older installed harness versions; these contracts are tested with fixtures, not a live session in every harness.
 
 ## Installation
 
@@ -170,7 +163,7 @@ from otel_hook import setup_claude, setup_cursor, setup_gemini, setup_windsurf
 setup_claude(global_=True)   # ~/.claude/settings.json
 setup_cursor(global_=True)   # ~/.cursor/hooks.json
 setup_gemini(global_=True)   # ~/.gemini/settings.json
-setup_windsurf(global_=True) # ~/.codeium/windsurf/settings.json
+setup_windsurf(global_=True) # ~/.codeium/windsurf/hooks.json
 ```
 
 ### Source Checkout Setup
@@ -228,13 +221,13 @@ Cursor CLI uses the same `.cursor/hooks.json` configuration and hook payload sha
 
 #### Windsurf
 
-Windsurf uses a Cursor-compatible hook payload schema and is configured through its `settings.json` file:
+Windsurf uses native Cascade snake_case events in `hooks.json`. Project setup updates an existing active `.devin/hooks.json` when present, otherwise the backward-compatible `.windsurf/hooks.json`:
 
 ```bash
-# Global Windsurf settings (~/.codeium/windsurf/settings.json)
+# Global Windsurf settings (~/.codeium/windsurf/hooks.json)
 otel-hook setup --agent windsurf
 
-# Project-scoped Windsurf settings (.windsurf/settings.json)
+# Project-scoped Windsurf settings (.windsurf/hooks.json)
 otel-hook setup --agent windsurf --no-global
 ```
 
@@ -247,9 +240,9 @@ Windsurf spans are recorded with the canonical `gen_ai.client.name=windsurf`.
 bash setup.sh --copilot
 ```
 
-`setup.sh --copilot` creates or merges `.github/hooks/otel-hooks.json` and points each event directly at `otel-hook` (or the local `otel_hook.py` fallback). Copilot is then detected from the process tree first, with `session_id`-based heuristics as a fallback.
+`setup.sh --copilot` creates or merges `.github/hooks/otel-hooks.json` and points each event directly at `otel-hook` (or the local `otel_hook.py` fallback). The command supplies `--copilot --event <name>` so native payloads retain their source and event identity.
 
-GitHub Copilot hooks are repository-scoped, so `--copilot --global` is intentionally unsupported. Commit `.github/hooks/otel-hooks.json` to your default branch for the coding agent to pick it up.
+Copilot CLI also supports user hooks: run `otel-hook setup --agent copilot` or `bash setup.sh --copilot --global`. `COPILOT_HOME` overrides the default `~/.copilot` directory. For the cloud agent, commit the repository hook file and ensure the hook runtime is available in its environment.
 
 If you prefer a manual install, copy the bundled example instead:
 
@@ -307,7 +300,7 @@ For a source checkout, use:
 bash setup.sh --gemini --global
 ```
 
-Gemini CLI emits model, tool, and agent lifecycle events. The hook maps `BeforeModel` / `AfterModel` to prompt and stop spans, `BeforeTool` / `AfterTool` to tool spans, and `BeforeAgent` / `AfterAgent` to subagent spans.
+Gemini CLI emits model, tool, and turn lifecycle events. `BeforeAgent` / `AfterAgent` mark the user turn; `BeforeModel` / `AfterModel` remain model observations, including streamed response chunks. `PreCompress` becomes `PreCompact`; `BeforeToolSelection` and `Notification` are passive observations.
 
 > **Privacy note:** Avoid putting sensitive prompts directly on the command line with `gemini -p "..."`. Like most CLI arguments, the prompt can end up in shell history and may be visible in process lists while the command is running. Prefer interactive mode, stdin, or prompt files for sensitive input.
 

@@ -1,85 +1,36 @@
 {
   "_comment": "Template for Claude Code hooks. Replace {{SCRIPT_PATH}} with the hook command (default: otel-hook).",
   "hooks": {
-    "SessionStart": [
-      {
-        "hooks": [
-          { "type": "command", "command": "{{SCRIPT_PATH}}" }
-        ]
-      }
-    ],
-    "SessionEnd": [
-      {
-        "hooks": [
-          { "type": "command", "command": "{{SCRIPT_PATH}}" }
-        ]
-      }
-    ],
-    "UserPromptSubmit": [
-      {
-        "hooks": [
-          { "type": "command", "command": "{{SCRIPT_PATH}}" }
-        ]
-      }
-    ],
-    "PreCompact": [
-      {
-        "hooks": [
-          { "type": "command", "command": "{{SCRIPT_PATH}}" }
-        ]
-      }
-    ],
-    "PostCompact": [
-      {
-        "hooks": [
-          { "type": "command", "command": "{{SCRIPT_PATH}}" }
-        ]
-      }
-    ],
-    "PreToolUse": [
-      {
-        "matcher": "*",
-        "hooks": [
-          { "type": "command", "command": "{{SCRIPT_PATH}}" }
-        ]
-      }
-    ],
-    "PostToolUse": [
-      {
-        "matcher": "*",
-        "hooks": [
-          { "type": "command", "command": "{{SCRIPT_PATH}}" }
-        ]
-      }
-    ],
-    "PostToolUseFailure": [
-      {
-        "matcher": "*",
-        "hooks": [
-          { "type": "command", "command": "{{SCRIPT_PATH}}" }
-        ]
-      }
-    ],
-    "SubagentStart": [
-      {
-        "hooks": [
-          { "type": "command", "command": "{{SCRIPT_PATH}}" }
-        ]
-      }
-    ],
-    "SubagentStop": [
-      {
-        "hooks": [
-          { "type": "command", "command": "{{SCRIPT_PATH}}" }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "hooks": [
-          { "type": "command", "command": "{{SCRIPT_PATH}}" }
-        ]
-      }
-    ]
+    "SessionStart": [{"hooks": [{"type": "command", "command": "{{SCRIPT_PATH}} --claude"}]}],
+    "SessionEnd": [{"hooks": [{"type": "command", "command": "{{SCRIPT_PATH}} --claude"}]}],
+    "SubagentStart": [{"hooks": [{"type": "command", "command": "{{SCRIPT_PATH}} --claude"}]}],
+    "SubagentStop": [{"hooks": [{"type": "command", "command": "{{SCRIPT_PATH}} --claude"}]}],
+    "PreToolUse": [{"hooks": [{"type": "command", "command": "{{SCRIPT_PATH}} --claude"}], "matcher": "*"}],
+    "PostToolUse": [{"hooks": [{"type": "command", "command": "{{SCRIPT_PATH}} --claude"}], "matcher": "*"}],
+    "PostToolUseFailure": [{"hooks": [{"type": "command", "command": "{{SCRIPT_PATH}} --claude"}], "matcher": "*"}],
+    "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "{{SCRIPT_PATH}} --claude"}]}],
+    "PreCompact": [{"hooks": [{"type": "command", "command": "{{SCRIPT_PATH}} --claude"}]}],
+    "PostCompact": [{"hooks": [{"type": "command", "command": "{{SCRIPT_PATH}} --claude"}]}],
+    "Stop": [{"hooks": [{"type": "command", "command": "{{SCRIPT_PATH}} --claude"}]}],
+    "PermissionRequest": [{"hooks": [{"type": "command", "command": "{{SCRIPT_PATH}} --claude"}]}],
+    "PermissionDenied": [{"hooks": [{"type": "command", "command": "{{SCRIPT_PATH}} --claude"}]}],
+    "Notification": [{"hooks": [{"type": "command", "command": "{{SCRIPT_PATH}} --claude"}]}],
+    "StopFailure": [{"hooks": [{"type": "command", "command": "{{SCRIPT_PATH}} --claude"}]}],
+    "Setup": [{"hooks": [{"type": "command", "command": "{{SCRIPT_PATH}} --claude"}]}],
+    "InstructionsLoaded": [{"hooks": [{"type": "command", "command": "{{SCRIPT_PATH}} --claude"}]}],
+    "UserPromptExpansion": [{"hooks": [{"type": "command", "command": "{{SCRIPT_PATH}} --claude"}]}],
+    "MessageDisplay": [{"hooks": [{"type": "command", "command": "{{SCRIPT_PATH}} --claude"}]}],
+    "PostToolBatch": [{"hooks": [{"type": "command", "command": "{{SCRIPT_PATH}} --claude"}]}],
+    "TaskCreated": [{"hooks": [{"type": "command", "command": "{{SCRIPT_PATH}} --claude"}]}],
+    "TaskCompleted": [{"hooks": [{"type": "command", "command": "{{SCRIPT_PATH}} --claude"}]}],
+    "TeammateIdle": [{"hooks": [{"type": "command", "command": "{{SCRIPT_PATH}} --claude"}]}],
+    "ConfigChange": [{"hooks": [{"type": "command", "command": "{{SCRIPT_PATH}} --claude"}]}],
+    "CwdChanged": [{"hooks": [{"type": "command", "command": "{{SCRIPT_PATH}} --claude"}]}],
+    "DirectoryAdded": [{"hooks": [{"type": "command", "command": "{{SCRIPT_PATH}} --claude"}]}],
+    "WorktreeRemove": [{"hooks": [{"type": "command", "command": "{{SCRIPT_PATH}} --claude"}]}],
+    "PreModelSwitch": [{"hooks": [{"type": "command", "command": "{{SCRIPT_PATH}} --claude"}]}],
+    "PostModelSwitch": [{"hooks": [{"type": "command", "command": "{{SCRIPT_PATH}} --claude"}]}],
+    "Elicitation": [{"hooks": [{"type": "command", "command": "{{SCRIPT_PATH}} --claude"}]}],
+    "ElicitationResult": [{"hooks": [{"type": "command", "command": "{{SCRIPT_PATH}} --claude"}]}]
   }
 }

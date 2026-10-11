@@ -43,7 +43,14 @@ export const OtelHookPlugin: Plugin = async ({ $, directory }) => {
   return {
     // ── Session lifecycle ──────────────────────────────────────────────────
     event: async ({ event }) => {
-      type Props = { info?: { id?: string }; message?: { role?: string; sessionID?: string; parts?: Array<{ type: string; text?: string }> } }
+      type Props = {
+        sessionID?: string
+        error?: unknown
+        info?: { id?: string; role?: string; sessionID?: string }
+        permission?: string
+        id?: string
+        tool?: { callID?: string }
+      }
       const props = event.properties as Props | undefined
 
       if (event.type === "session.created") {
@@ -60,11 +67,12 @@ export const OtelHookPlugin: Plugin = async ({ $, directory }) => {
           session_id: props?.info?.id,
         })
       } else if (event.type === "session.error") {
-        // Emit SessionEnd with status=error so the trace is closed on failure.
+        // An error can be recoverable; it does not mean the session was deleted.
         await invoke({
-          hook_event_name: "SessionEnd",
+          hook_event_name: "ErrorOccurred",
           source_app: "OpenCode",
-          session_id: props?.info?.id,
+          session_id: props?.sessionID,
+          error: props?.error,
           status: "error",
         })
       } else if (event.type === "session.idle") {
@@ -72,19 +80,34 @@ export const OtelHookPlugin: Plugin = async ({ $, directory }) => {
         await invoke({
           hook_event_name: "Stop",
           source_app: "OpenCode",
-          session_id: props?.info?.id,
+          session_id: props?.sessionID,
           status: "idle",
+        })
+      } else if (event.type === "session.compacted") {
+        await invoke({
+          hook_event_name: "PostCompact",
+          source_app: "OpenCode",
+          session_id: props?.sessionID,
+        })
+      } else if (event.type === "permission.asked") {
+        await invoke({
+          hook_event_name: "PermissionRequest",
+          source_app: "OpenCode",
+          session_id: props?.sessionID,
+          event_id: props?.id,
+          tool_name: props?.permission,
+          tool_use_id: props?.tool?.callID,
         })
       } else if (event.type === "message.updated") {
         // Capture user prompts only (not assistant responses).
-        const msg = props?.message
+        // MessageUpdated supplies metadata in info; text parts are separate events.
+        const msg = props?.info
         if (msg?.role === "user") {
-          const textPart = msg.parts?.find((p) => p.type === "text")
           await invoke({
             hook_event_name: "UserPromptSubmit",
             source_app: "OpenCode",
             session_id: msg.sessionID,
-            prompt: textPart?.text,
+            event_id: msg.id,
           })
         }
       } else if (event.type === "file.edited") {

@@ -2,6 +2,17 @@
 
 ## 0.14.1 (unreleased)
 
+### Added
+- Expanded current hook registration for Claude Code, Codex, Cursor, Gemini CLI and Copilot; added passive compaction and permission observations to the OpenCode bridge.
+- Added Copilot CLI user-level setup, including `COPILOT_HOME`, and explicit event arguments for native callbacks without event names.
+- Added privacy-safe response, reasoning, notification, task and streamed-message facts, plus event metadata for compaction and workspace changes.
+
+### Changed
+- Gemini agent callbacks now define user turns; model callbacks no longer create synthetic subagents or end a generation per response chunk.
+- Windsurf setup now uses native Cascade events and `hooks.json`, normalizing trajectory/turn IDs and nested tool fields. Existing active Devin workspace hook configs are respected.
+- Codex shutdown/interruption hooks use the documented three-second limit and skip stale-session maintenance. Claude API failures and Codex interruptions finalize the current generation.
+- OpenCode session idle/error callbacks now use native `sessionID`; recoverable errors preserve session state. User-message metadata is read from `properties.info`.
+
 ### Fixed
 - Prevented a hook running under one Python ABI from importing compiled OpenTelemetry dependencies from a stale bootstrap venv created by another Python version.
 - Bounded stale-session finalization per interactive hook invocation so an accumulated backlog cannot exhaust the agent's Stop-hook timeout.
