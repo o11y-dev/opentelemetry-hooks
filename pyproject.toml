@@ -36,7 +36,7 @@ Issues = "https://github.com/o11y-dev/opentelemetry-hooks/issues"
 Changelog = "https://github.com/o11y-dev/opentelemetry-hooks/blob/main/CHANGELOG.md"
 
 [project.scripts]
-otel-hook = "otel_hook:cli"
+otel-hook = "otel_hook:run_cli"
 
 [tool.setuptools]
 py-modules = ["otel_hook", "enrichment_connectors"]

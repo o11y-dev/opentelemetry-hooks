@@ -5921,5 +5921,14 @@ def uninstall_cmd(agents: tuple, global_: bool, cwd: str) -> None:
             click.echo(f"  {'✓' if removed else '·'} [codex] Removed {removed} entries ({path})")
 
 
-if __name__ == "__main__":
+def run_cli() -> None:
+    """Use UTF-8 for redirected Windows output before Click renders help/errors."""
+    if sys.platform == "win32":
+        for stream in (sys.stdout, sys.stderr):
+            if hasattr(stream, "reconfigure"):
+                stream.reconfigure(encoding="utf-8", errors="backslashreplace")
     cli()
+
+
+if __name__ == "__main__":
+    run_cli()

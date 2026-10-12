@@ -119,6 +119,15 @@ def test_windows_username_masking(path):
     assert "[REDACTED]" in otel_hook._mask_text(path)
 
 
+def test_cli_entrypoint_handles_legacy_output_encoding():
+    result = subprocess.run([
+        sys.executable, "-c",
+        "import otel_hook, sys; sys.platform = 'win32'; otel_hook.run_cli()", "--help",
+    ], env={**os.environ, "PYTHONIOENCODING": "cp1252"}, capture_output=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    assert "→" in result.stdout.decode("utf-8")
+
+
 def test_installed_cli_replays_unicode_session_outside_checkout(tmp_path):
     command = shutil.which("otel-hook")
     assert command, "Install the package before running platform tests"
