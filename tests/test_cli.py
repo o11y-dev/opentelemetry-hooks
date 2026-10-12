@@ -219,18 +219,18 @@ class TestSetupWindsurf:
     def test_creates_new_file_with_source_flag(self, tmp_path, monkeypatch):
         monkeypatch.setattr(otel_hook, "_resolve_hook_cmd", lambda: "otel-hook")
         setup_windsurf(global_=False, cwd=str(tmp_path))
-        hooks_path = tmp_path / ".windsurf" / "settings.json"
+        hooks_path = tmp_path / ".windsurf" / "hooks.json"
         assert hooks_path.exists()
         doc = _read(str(hooks_path))
-        assert "sessionStart" in doc["hooks"]
-        assert doc["hooks"]["sessionStart"] == [{"command": "otel-hook --windsurf"}]
+        assert "pre_user_prompt" in doc["hooks"]
+        assert doc["hooks"]["pre_user_prompt"] == [{"command": "otel-hook --windsurf"}]
 
     def test_idempotent(self, tmp_path, monkeypatch):
         monkeypatch.setattr(otel_hook, "_resolve_hook_cmd", lambda: "otel-hook")
         setup_windsurf(global_=False, cwd=str(tmp_path))
-        before = _read(str(tmp_path / ".windsurf" / "settings.json"))
+        before = _read(str(tmp_path / ".windsurf" / "hooks.json"))
         setup_windsurf(global_=False, cwd=str(tmp_path))
-        after = _read(str(tmp_path / ".windsurf" / "settings.json"))
+        after = _read(str(tmp_path / ".windsurf" / "hooks.json"))
         assert before == after
 
 
@@ -317,10 +317,10 @@ class TestSetupCopilot:
         monkeypatch.setattr(otel_hook, "_resolve_hook_cmd", lambda: "otel-hook")
         setup_copilot(cwd=str(tmp_path))
         doc = _read(str(tmp_path / ".github" / "hooks" / "otel-hooks.json"))
-        for entries in doc["hooks"].values():
+        for event, entries in doc["hooks"].items():
             for h in entries:
                 assert "bash" in h
-                assert h["bash"] == "otel-hook --copilot"
+                assert h["bash"] == f"otel-hook --copilot --event {event}"
 
     def test_idempotent(self, tmp_path, monkeypatch):
         monkeypatch.setattr(otel_hook, "_resolve_hook_cmd", lambda: "otel-hook")
@@ -389,7 +389,7 @@ class TestSetupCodex:
         monkeypatch.setattr(otel_hook, "_resolve_hook_cmd", lambda: "otel-hook")
         setup_codex(global_=False, cwd=str(tmp_path))
         doc = _read(str(tmp_path / ".codex" / "hooks.json"))
-        assert doc["hooks"]["SessionStart"][0]["matcher"] == "startup|resume|clear"
+        assert doc["hooks"]["SessionStart"][0]["matcher"] == "startup|resume|clear|compact"
         assert doc["hooks"]["PreToolUse"][0]["matcher"] == "*"
         assert "matcher" not in doc["hooks"]["UserPromptSubmit"][0]
         assert "matcher" not in doc["hooks"]["Stop"][0]
@@ -441,12 +441,13 @@ class TestSetupCmd:
         assert (tmp_path / ".cursor" / "hooks.json").exists()
         assert (tmp_path / ".claude" / "settings.json").exists()
 
-    def test_copilot_skipped_with_global(self, tmp_path, monkeypatch):
+    def test_copilot_user_hooks_with_global(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("COPILOT_HOME", str(tmp_path / "copilot-user"))
         monkeypatch.setattr(otel_hook, "_resolve_hook_cmd", lambda: "otel-hook")
         runner = CliRunner()
         result = runner.invoke(cli, ["setup", "--agent", "copilot", "--global", "--cwd", str(tmp_path)])
         assert result.exit_code == 0
-        assert "Skipping" in result.output
+        assert (tmp_path / "copilot-user" / "hooks" / "otel-hooks.json").exists()
 
     def test_no_agents_detected_exits_1(self, tmp_path, monkeypatch):
         monkeypatch.setattr(otel_hook, "_detect_available_agents", lambda: [])

@@ -2,12 +2,12 @@
   "schema_version": 1,
   "providers": {
     "cursor": ["conversation", "subagent", "tool", "mcp", "workspace"],
-    "windsurf": ["conversation", "subagent", "tool", "workspace"],
+    "windsurf": ["conversation", "tool", "mcp", "workspace"],
     "claude": ["conversation", "subagent", "tool", "compaction"],
-    "codex": ["conversation", "tool", "permission"],
-    "gemini": ["conversation", "subagent", "tool"],
-    "copilot": ["conversation", "tool", "error"],
-    "opencode": ["conversation", "tool", "error"],
+    "codex": ["conversation", "tool", "permission", "subagent", "compaction", "interrupt"],
+    "gemini": ["conversation", "tool", "model", "compaction", "notification"],
+    "copilot": ["conversation", "tool", "error", "subagent", "compaction", "permission", "notification"],
+    "opencode": ["conversation", "tool", "error", "compaction", "permission"],
     "antigravity": ["conversation", "subagent", "tool"]
   }
 }

@@ -305,14 +305,14 @@ class TestSetupShGlobalScoping:
             "--cursor --claude --global must not install OpenCode's global plugin"
         )
 
-    def test_copilot_global_is_rejected(self, tmp_path):
-        """--copilot --global must fail because Copilot hooks are repo-scoped."""
+    def test_copilot_global_creates_user_hooks(self, tmp_path):
+        """User-level hooks must not create a repository config."""
         hook_dir = _make_hook_dir(str(tmp_path))
         env = self._minimal_env(tmp_path)
 
         result = _run_setup(hook_dir, args=["--copilot", "--global"], env=env)
-        assert result.returncode != 0, "Expected non-zero exit for --copilot --global"
-        assert "repository-scoped" in result.stdout or "repository-scoped" in result.stderr
+        assert result.returncode == 0, result.stderr
+        assert (tmp_path / ".copilot" / "hooks" / "otel-hooks.json").exists()
 
         copilot_hooks = os.path.join(str(tmp_path), ".github", "hooks", "otel-hooks.json")
         assert not os.path.exists(copilot_hooks), (
@@ -335,7 +335,7 @@ class TestSetupShIdeDetectionConfig:
         assert result.returncode == 0, result.stderr
 
         doc = _hooks_json_doc(str(tmp_path))
-        for event_hooks in doc["hooks"].values():
+        for event, event_hooks in doc["hooks"].items():
             assert len(event_hooks) == 1
             hook = event_hooks[0]
             assert "command" in hook and hook["command"]
@@ -411,13 +411,13 @@ class TestSetupShIdeDetectionConfig:
         assert result.returncode == 0, result.stderr
 
         doc = _copilot_hooks_doc(str(tmp_path))
-        for event_hooks in doc["hooks"].values():
+        for event, event_hooks in doc["hooks"].items():
             assert len(event_hooks) == 1
             hook = event_hooks[0]
             assert hook["type"] == "command"
             assert hook["timeoutSec"] == 30
             assert "IDE_OTEL_IDE_NAME" not in hook["bash"]
-            assert hook["bash"].endswith("otel_hook.py")
+            assert hook["bash"].endswith(f"otel_hook.py --copilot --event {event}")
 
     def test_copilot_merge_removes_legacy_ide_override_env(self, tmp_path):
         hook_dir = _make_hook_dir(str(tmp_path))
@@ -438,13 +438,13 @@ class TestSetupShIdeDetectionConfig:
         session_start = doc["hooks"]["sessionStart"]
         assert session_start == [{
             "type": "command",
-            "bash": "python3 %s/otel_hook.py" % hook_dir,
+            "bash": "python3 %s/otel_hook.py --copilot --event sessionStart" % hook_dir,
             "timeoutSec": 30,
         }]
         pre_tool_use = doc["hooks"]["preToolUse"]
         assert pre_tool_use == [{
             "type": "command",
-            "bash": "python3 %s/otel_hook.py" % hook_dir,
+            "bash": "python3 %s/otel_hook.py --copilot --event preToolUse" % hook_dir,
             "timeoutSec": 45,
         }]
 
@@ -594,9 +594,9 @@ class TestProcessDiscoveryExamples:
         with open(COPILOT_EXAMPLE) as f:
             doc = json.load(f)
 
-        for event_hooks in doc["hooks"].values():
+        for event, event_hooks in doc["hooks"].items():
             for hook in event_hooks:
-                assert hook["bash"] == "{{SCRIPT_PATH}}"
+                assert hook["bash"] == f"{{{{SCRIPT_PATH}}}} --copilot --event {event}"
 
 
 class TestGeminiSetup:
@@ -752,7 +752,7 @@ class TestGeminiSetup:
 
         doc = _codex_hooks_doc(str(tmp_path))
         assert "PermissionRequest" in doc["hooks"]
-        assert doc["hooks"]["SessionStart"][0]["matcher"] == "startup|resume|clear"
+        assert doc["hooks"]["SessionStart"][0]["matcher"] == "startup|resume|clear|compact"
         assert doc["hooks"]["PreToolUse"][0]["matcher"] == "*"
         assert "matcher" not in doc["hooks"]["UserPromptSubmit"][0]
 

@@ -3,11 +3,19 @@
   "_comment_timeout": "timeoutSec is in seconds. Default is 30.",
   "version": 1,
   "hooks": {
-    "sessionStart": [{ "type": "command", "bash": "{{SCRIPT_PATH}}", "timeoutSec": 30 }],
-    "sessionEnd": [{ "type": "command", "bash": "{{SCRIPT_PATH}}", "timeoutSec": 30 }],
-    "userPromptSubmitted": [{ "type": "command", "bash": "{{SCRIPT_PATH}}", "timeoutSec": 30 }],
-    "preToolUse": [{ "type": "command", "bash": "{{SCRIPT_PATH}}", "timeoutSec": 30 }],
-    "postToolUse": [{ "type": "command", "bash": "{{SCRIPT_PATH}}", "timeoutSec": 30 }],
-    "errorOccurred": [{ "type": "command", "bash": "{{SCRIPT_PATH}}", "timeoutSec": 30 }]
+    "sessionStart": [{"type": "command", "bash": "{{SCRIPT_PATH}} --copilot --event sessionStart", "timeoutSec": 30}],
+    "sessionEnd": [{"type": "command", "bash": "{{SCRIPT_PATH}} --copilot --event sessionEnd", "timeoutSec": 30}],
+    "userPromptSubmitted": [{"type": "command", "bash": "{{SCRIPT_PATH}} --copilot --event userPromptSubmitted", "timeoutSec": 30}],
+    "preToolUse": [{"type": "command", "bash": "{{SCRIPT_PATH}} --copilot --event preToolUse", "timeoutSec": 30}],
+    "postToolUse": [{"type": "command", "bash": "{{SCRIPT_PATH}} --copilot --event postToolUse", "timeoutSec": 30}],
+    "errorOccurred": [{"type": "command", "bash": "{{SCRIPT_PATH}} --copilot --event errorOccurred", "timeoutSec": 30}],
+    "postToolUseFailure": [{"type": "command", "bash": "{{SCRIPT_PATH}} --copilot --event postToolUseFailure", "timeoutSec": 30}],
+    "agentStop": [{"type": "command", "bash": "{{SCRIPT_PATH}} --copilot --event agentStop", "timeoutSec": 30}],
+    "subagentStart": [{"type": "command", "bash": "{{SCRIPT_PATH}} --copilot --event subagentStart", "timeoutSec": 30}],
+    "subagentStop": [{"type": "command", "bash": "{{SCRIPT_PATH}} --copilot --event subagentStop", "timeoutSec": 30}],
+    "preCompact": [{"type": "command", "bash": "{{SCRIPT_PATH}} --copilot --event preCompact", "timeoutSec": 30}],
+    "permissionRequest": [{"type": "command", "bash": "{{SCRIPT_PATH}} --copilot --event permissionRequest", "timeoutSec": 30}],
+    "notification": [{"type": "command", "bash": "{{SCRIPT_PATH}} --copilot --event notification", "timeoutSec": 30}],
+    "userPromptTransformed": [{"type": "command", "bash": "{{SCRIPT_PATH}} --copilot --event userPromptTransformed", "timeoutSec": 30}]
   }
 }

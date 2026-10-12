@@ -1,31 +1,31 @@
-# OpenTelemetry Hook for AI Coding Agents
+# Harness Monitoring and Hooks with OpenTelemetry
 
 [![PyPI](https://img.shields.io/pypi/v/opentelemetry-hooks)](https://pypi.org/project/opentelemetry-hooks/)
 [![Release](https://img.shields.io/github/v/release/o11y-dev/opentelemetry-hooks?display_name=tag)](https://github.com/o11y-dev/opentelemetry-hooks/releases)
 [![Tests](https://img.shields.io/github/actions/workflow/status/o11y-dev/opentelemetry-hooks/ci.yml?branch=main&label=tests)](https://github.com/o11y-dev/opentelemetry-hooks/actions/workflows/ci.yml)
 [![OpenTelemetry GenAI SemConv](https://img.shields.io/badge/OpenTelemetry-GenAI%20SemConv-425CC7?logo=opentelemetry)](https://opentelemetry.io/docs/specs/semconv/gen-ai/)
 
-> Observability for AI coding agents — any OTLP-compatible backend.
+> Monitor AI coding harnesses through their hooks — export to any OTLP-compatible backend.
 
-An open-source OpenTelemetry integration that captures AI coding agent activity as structured **traces and logs** and exports them to any OTLP-compatible backend. Works with **any AI coding agent** — today: **Antigravity**, **Claude Code**, **Codex**, **Cursor IDE / Cursor CLI**, **Gemini CLI**, **GitHub Copilot**, **OpenCode**, and **Windsurf** — using [OpenTelemetry GenAI semantic conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/).
+`opentelemetry-hooks` provides **harness monitoring through harness hooks**. A harness is the application or runtime that runs an AI coding agent: a CLI, an editor integration, or another agent runner. The hook turns supported lifecycle events into structured **OpenTelemetry traces and logs** for an OTLP-compatible backend. Integrations cover **Claude Code**, **Codex**, **Cursor IDE / Cursor CLI**, **Gemini CLI**, **GitHub Copilot**, **OpenCode**, **Windsurf**, and compatible runners such as **Antigravity**, using [OpenTelemetry GenAI semantic conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/).
 
-Every hook event — prompt submissions, tool calls, shell commands, MCP interactions, file edits, subagent orchestration — becomes an OpenTelemetry span you can query, alert on, and visualize in Jaeger, Grafana, Datadog, Honeycomb, Coralogix, or any OTLP-compatible backend.
+Captured harness events — prompt submissions, tool calls, shell commands, MCP interactions, file edits, subagent orchestration — become OpenTelemetry spans you can query, alert on, and visualize in Jaeger, Grafana, Datadog, Honeycomb, Coralogix, or any OTLP-compatible backend.
 
-> **Note**: Claude Code and Codex native telemetry describes agent internals, while `otel-hook` describes hook lifecycle and governance. The hook tags its own provenance and does not deduplicate native signals; downstream analysis can reconcile the two sources when both are enabled.
+> **Note**: Native telemetry from Claude Code, Codex, and Cursor describes harness internals, while `otel-hook` describes hook lifecycle and governance. The hook tags its own provenance and does not deduplicate native signals; downstream analysis can reconcile the two sources when both are enabled. See [Cursor native export and hooks](docs/hook-coverage.md#cursor-native-export-and-hooks) for correlation and accounting guidance.
 
 ## How It Works
 
-The hook is a lightweight Python command that your IDE invokes on every agent event. The IDE pipes a JSON payload to stdin, the hook processes it, emits OpenTelemetry spans and logs, and returns the runner-compatible success response on stdout so the IDE proceeds normally. For most events that is `{"continue": true}`; Codex uses event-specific response contracts, so passive Codex hooks stay silent except for `Stop`, which still returns JSON. No sidecar, no daemon — just a command your IDE calls.
+The hook is a lightweight Python command that your harness invokes for registered lifecycle events. The harness pipes a JSON payload to stdin, the hook processes it, emits OpenTelemetry spans and logs, and returns the harness-compatible success response on stdout so execution proceeds normally. Cursor permission hooks return `{"permission": "allow"}` so this telemetry observer does not block the operation. Most other events return `{"continue": true}`; Codex uses event-specific response contracts, so passive Codex hooks stay silent except for `Stop`, which still returns JSON. No sidecar, no daemon — just a command your harness calls. OpenCode uses a small plugin to forward its callbacks to the same command.
 
 ```
-IDE Event → stdin (JSON) → otel-hook → OpenTelemetry SDK → OTLP Backend
+Harness event → stdin (JSON) → otel-hook → OpenTelemetry SDK → OTLP backend
                                  ↓
-                          stdout: {"continue": true}
+                          stdout: harness-specific response
 ```
 
 ## Features
 
-- **Multi-agent support**: One hook command, multiple agent integrations. The CLI can register Codex, Cursor, Claude Code, Gemini CLI, GitHub Copilot, OpenCode, and Windsurf. Managed setup commands stamp an explicit source flag such as `otel-hook --cursor`, `otel-hook --codex`, or `otel-hook --claude`; process-tree and payload inference remain compatibility fallbacks for legacy or unmanaged hooks.
+- **Multi-harness support**: One hook command, multiple harness integrations. The CLI can register Codex, Cursor, Claude Code, Gemini CLI, GitHub Copilot, OpenCode, and Windsurf. Managed setup commands stamp an explicit source flag such as `otel-hook --cursor`, `otel-hook --codex`, or `otel-hook --claude`; process-tree and payload inference remain compatibility fallbacks for legacy or unmanaged hooks.
 
 - **Session-level Traces**: Groups all events within a session into a single trace with a 3-tier hierarchy:
 
@@ -45,7 +45,7 @@ gen_ai.client.session (root)
 
 - **GenAI Semantic Conventions**: Emits OpenTelemetry GenAI attributes aligned with v1.37+ (`gen_ai.provider.name`, `gen_ai.operation.name`, `gen_ai.request.model`, `gen_ai.usage.*`, etc.) while preserving legacy `gen_ai.system` for backward compatibility.
 
-- **All Hook Events**: Captures the full lifecycle — sessions, prompts, tool usage, shell commands, MCP calls, file operations, subagents, errors, and more.
+- **Harness Lifecycle Monitoring**: Captures supported hooks across the lifecycle — sessions, prompts, tool usage, shell commands, MCP calls, file operations, subagents, errors, and more.
 
 - **Structured OTel Logs**: Emits trace-correlated log records for MCP calls, shell executions, and tool usage — with full I/O payloads, server output, and duration. Logs are exported via OTLP alongside spans.
 
@@ -57,47 +57,49 @@ gen_ai.client.session (root)
 
 - **JSON Config File**: All settings in `otel_config.json` — no environment variable exports needed.
 
-## Supported Agents
+<a id="supported-agents"></a>
 
-| Agent | Setup Command | Scope | Config Written |
+## Supported Harnesses
+
+| Harness | Setup Command | Scope | Config Written |
 |---|---|---|---|
 | Cursor IDE / CLI | `otel-hook setup --agent cursor` | Global by default; use `--no-global` for project scope | `~/.cursor/hooks.json` or `.cursor/hooks.json` |
 | Claude Code | `otel-hook setup --agent claude` | Global by default; use `--no-global` for project scope | `~/.claude/settings.json` or `.claude/settings.json` |
+| Codex | `otel-hook setup --agent codex` | Global by default; use `--no-global` for project scope | `~/.codex/hooks.json` and `config.toml`, or their project equivalents |
 | Gemini CLI | `otel-hook setup --agent gemini` | Global by default; use `--no-global` for project scope | `~/.gemini/settings.json` or `.gemini/settings.json` |
-| GitHub Copilot coding agent | `otel-hook setup --agent copilot --no-global` | Repository only | `.github/hooks/otel-hooks.json` |
+| GitHub Copilot CLI / cloud agent | `otel-hook setup --agent copilot` | User-level CLI hooks by default; `--no-global` for repository/cloud hooks | `~/.copilot/hooks/otel-hooks.json` (or `$COPILOT_HOME/hooks/`) or `.github/hooks/otel-hooks.json` |
 | OpenCode | `otel-hook setup --agent opencode` | Global by default; use `--no-global` for project scope | `~/.config/opencode/plugins/otel-hook.ts` or `.opencode/plugins/otel-hook.ts` |
-| Windsurf | `otel-hook setup --agent windsurf` | Global by default; use `--no-global` for project scope | `~/.codeium/windsurf/settings.json` or `.windsurf/settings.json` |
+| Windsurf | `otel-hook setup --agent windsurf` | Global by default; use `--no-global` for project scope | `~/.codeium/windsurf/hooks.json` or `.windsurf/hooks.json` |
 | Antigravity / compatible runners | Manual hook command | Runner-defined | Runner workflow/config |
 
-Run `otel-hook diagnose` to see what is currently registered. Run `otel-hook doctor` for registration, privacy, exporter-health, and pending-delivery diagnostics. Use `otel-hook uninstall --agent <agent>` to remove this hook from an agent config.
+Run `otel-hook diagnose` to see what is currently registered. Run `otel-hook doctor` for registration, privacy, exporter-health, and pending-delivery diagnostics. Use `otel-hook uninstall --agent <agent>` to remove this hook from a harness config.
 
 ## Supported Events
 
-| Canonical Name | Antigravity / Claude Code | Codex | Cursor IDE / CLI / Windsurf | Gemini CLI | GitHub Copilot | OpenCode (plugin) |
-|---|---|---|---|---|---|---|
-| `SessionStart` | `SessionStart` | `SessionStart` | `sessionStart` | `SessionStart` | `sessionStart` | `session.created` |
-| `SessionEnd` | `SessionEnd` | — | `sessionEnd` | `SessionEnd` | `sessionEnd` | `session.deleted`, `session.error` |
-| `UserPromptSubmit` | `UserPromptSubmit` | `UserPromptSubmit` | `beforeSubmitPrompt` | `BeforeModel` ¹ | `userPromptSubmitted` | `message.updated` (role=user) |
-| `PreToolUse` | `PreToolUse` | `PreToolUse` | `preToolUse` | `BeforeTool` | `preToolUse` | `tool.execute.before` ² |
-| `PermissionRequest` | — | `PermissionRequest` | — | — | — | — |
-| `PostToolUse` | `PostToolUse` | `PostToolUse` | `postToolUse` | `AfterTool` | `postToolUse` | `tool.execute.after` (exit=0) |
-| `PostToolUseFailure` | `PostToolUseFailure` | — | `postToolUseFailure` | — | — | `tool.execute.after` (exit≠0) |
-| `PreCompact` | `PreCompact` | — | — | — | — | — |
-| `PostCompact` | `PostCompact` | — | — | — | — | — |
-| `Stop` | `Stop` | `Stop` | `stop` | `AfterModel` ¹ | — | `session.idle` |
-| `SubagentStart` | `SubagentStart` | — | `subagentStart` | `BeforeAgent` | — | — ³ |
-| `SubagentStop` | `SubagentStop` | — | `subagentStop` | `AfterAgent` | — | — ³ |
-| `ErrorOccurred` | — | — | — | — | `errorOccurred` | — |
-| `BeforeShellExecution` | — | — | `beforeShellExecution` | — | — | — ² |
-| `AfterShellExecution` | — | — | `afterShellExecution` | — | — | — ² |
-| `BeforeMCPExecution` | — | — | `beforeMCPExecution` | — | — | — ² |
-| `AfterMCPExecution` | — | — | `afterMCPExecution` | — | — | — ² |
-| `BeforeReadFile` | — | — | `beforeReadFile` | — | — | — ² |
-| `AfterFileEdit` | — | — | `afterFileEdit` | — | — | `file.edited` |
+Current first-party contracts and deliberate exclusions are recorded in [Hook coverage](docs/hook-coverage.md).
 
-¹ Gemini CLI uses `BeforeModel`/`AfterModel` where other agents use `UserPromptSubmit`/`Stop`; the hook normalizes both to canonical span names.<br>
-² OpenCode routes bash, read, write, MCP, and all other tools through the universal `tool.execute.before/after` hooks, so these events are observable as `PreToolUse`/`PostToolUse` with the appropriate `tool_name`.<br>
-³ Subagent invocations surface as `PreToolUse`/`PostToolUse` with `tool_name=task` — there are no dedicated subagent hook events in OpenCode.
+| Harness | Registered events / callbacks | Coverage |
+|---|---:|---|
+| Claude Code | 31 | Permissions, notifications, failure stops, tasks/teams, instruction/config/workspace changes, model switches, elicitation, streamed message facts |
+| Codex | 12 | Session end, compaction, subagents, interruption |
+| Cursor | 21 | Compaction, Tab read/edit, responses/thoughts, workspace open |
+| Gemini CLI | 11 | Tool selection, notification, pre-compression; corrected turn boundaries |
+| Copilot | 14 | Turn end, tool failures, subagents, compaction, permissions, notifications, transformed prompts |
+| Windsurf / Cascade | 11 | Native file, shell, MCP, prompt, response and worktree events |
+| OpenCode plugin | 11 | Compaction, permission requests/replies; corrected session/message payloads |
+| Antigravity / compatible runners | Manual | Existing compatibility adapter; no verified native installer |
+
+Gemini `BeforeAgent` / `AfterAgent` become `UserPromptSubmit` / `Stop`. Model callbacks remain separate observations and do not open or close turns. Windsurf uses `trajectory_id` for the session and `execution_id` for the generation. Copilot commands include `--copilot --event <name>` because native camelCase payloads omit the event name. Original event names remain available on spans.
+
+Raw conversation content is opt-in. New message, notification, reasoning and task facts follow the existing length/hash contract. `MessageDisplay` records response **chunks**, not complete responses. Gemini nested model messages/chunks are omitted; model names and callback occurrence are observed without duplicating native token accounting.
+
+Rerun the setup command for the relevant harness to register new events. Installing the updated package alone does not rewrite existing harness settings. Current documentation can describe features absent from older installed harness versions; these contracts are tested with fixtures, not a live session in every harness.
+
+## Compatibility and Migration
+
+“Harness” is the product term used throughout this guide. Existing public identifiers remain supported: the `otel-hook` command, `--agent` option, `IDE_OTEL_*` settings, `ide` / `ide_name` payload fields, and default names such as `ide-agent` and `ide-hooks`. This terminology update does not rename configuration keys, telemetry attributes, or defaults. “IDE” still appears in editor product names and accepted identity aliases.
+
+The expanded hooks replace some incorrect behavior: Windsurf now registers native events in `hooks.json`, Gemini uses agent callbacks for turn boundaries, and OpenCode errors no longer close the session. Existing Copilot users who want repository-scoped CLI setup should specify `--no-global`. See [migration notes](docs/hook-coverage.md#upgrading-existing-installations) before updating registrations or queries based on the old behavior.
 
 ## Installation
 
@@ -170,7 +172,7 @@ from otel_hook import setup_claude, setup_cursor, setup_gemini, setup_windsurf
 setup_claude(global_=True)   # ~/.claude/settings.json
 setup_cursor(global_=True)   # ~/.cursor/hooks.json
 setup_gemini(global_=True)   # ~/.gemini/settings.json
-setup_windsurf(global_=True) # ~/.codeium/windsurf/settings.json
+setup_windsurf(global_=True) # ~/.codeium/windsurf/hooks.json
 ```
 
 ### Source Checkout Setup
@@ -220,7 +222,9 @@ rm -rf /tmp/otel-hook-source
 - Python 3.12+ (the setup script checks for this)
 - An OTLP-compatible backend (Jaeger, Coralogix, Datadog, Grafana, Honeycomb, etc.)
 
-### Other IDEs
+<a id="other-ides"></a>
+
+### Other Harnesses
 
 #### Cursor CLI
 
@@ -228,13 +232,13 @@ Cursor CLI uses the same `.cursor/hooks.json` configuration and hook payload sha
 
 #### Windsurf
 
-Windsurf uses a Cursor-compatible hook payload schema and is configured through its `settings.json` file:
+Windsurf uses native Cascade snake_case events in `hooks.json`. Project setup updates an existing active `.devin/hooks.json` when present, otherwise the backward-compatible `.windsurf/hooks.json`:
 
 ```bash
-# Global Windsurf settings (~/.codeium/windsurf/settings.json)
+# Global Windsurf settings (~/.codeium/windsurf/hooks.json)
 otel-hook setup --agent windsurf
 
-# Project-scoped Windsurf settings (.windsurf/settings.json)
+# Project-scoped Windsurf settings (.windsurf/hooks.json)
 otel-hook setup --agent windsurf --no-global
 ```
 
@@ -247,9 +251,9 @@ Windsurf spans are recorded with the canonical `gen_ai.client.name=windsurf`.
 bash setup.sh --copilot
 ```
 
-`setup.sh --copilot` creates or merges `.github/hooks/otel-hooks.json` and points each event directly at `otel-hook` (or the local `otel_hook.py` fallback). Copilot is then detected from the process tree first, with `session_id`-based heuristics as a fallback.
+`setup.sh --copilot` creates or merges `.github/hooks/otel-hooks.json` and points each event directly at `otel-hook` (or the local `otel_hook.py` fallback). The command supplies `--copilot --event <name>` so native payloads retain their source and event identity.
 
-GitHub Copilot hooks are repository-scoped, so `--copilot --global` is intentionally unsupported. Commit `.github/hooks/otel-hooks.json` to your default branch for the coding agent to pick it up.
+Copilot CLI also supports user hooks: run `otel-hook setup --agent copilot` or `bash setup.sh --copilot --global`. `COPILOT_HOME` overrides the default `~/.copilot` directory. For the cloud agent, commit the repository hook file and ensure the hook runtime is available in its environment.
 
 If you prefer a manual install, copy the bundled example instead:
 
@@ -277,7 +281,7 @@ python3 .cursor/hooks/opentelemetry-hook/otel_hook.py
 otel-hook
 ```
 
-The bundled Claude example and `setup.sh --claude` both invoke `otel-hook` directly without an IDE override env var.
+The bundled Claude example and `setup.sh --claude` both invoke `otel-hook` directly without a harness identity override env var.
 Claude Code is auto-detected from the parent process tree first; hook metadata such as `session_id`, `transcript_path`, `permission_mode`, and `notification_type` is used as a fallback. The camelCase alias handling is mainly for compatible third-party hook runners and mixed payload formats.
 
 ##### Managed settings / enterprise rollout
@@ -307,13 +311,13 @@ For a source checkout, use:
 bash setup.sh --gemini --global
 ```
 
-Gemini CLI emits model, tool, and agent lifecycle events. The hook maps `BeforeModel` / `AfterModel` to prompt and stop spans, `BeforeTool` / `AfterTool` to tool spans, and `BeforeAgent` / `AfterAgent` to subagent spans.
+Gemini CLI emits model, tool, and turn lifecycle events. `BeforeAgent` / `AfterAgent` mark the user turn; `BeforeModel` / `AfterModel` remain model observations, including streamed response chunks. `PreCompress` becomes `PreCompact`; `BeforeToolSelection` and `Notification` are passive observations.
 
 > **Privacy note:** Avoid putting sensitive prompts directly on the command line with `gemini -p "..."`. Like most CLI arguments, the prompt can end up in shell history and may be visible in process lists while the command is running. Prefer interactive mode, stdin, or prompt files for sensitive input.
 
 #### Antigravity
 
-Antigravity workflow and hook formats can vary, so the simplest integration is to invoke the hook command directly from your workflow/rule and pin the IDE name explicitly:
+Antigravity workflow and hook formats can vary, so the simplest integration is to invoke the hook command directly from your workflow/rule and pin the harness name explicitly:
 
 ```bash
 # source checkout / copied-source
@@ -418,7 +422,7 @@ Edit the hook config file. For pip/pipx installs this lives at `~/.local/share/o
 }
 ```
 
-Then restart your agent or IDE.
+Then restart your harness.
 
 > **Why the config file matters:** `otel-hook` reads its own `otel_config.json` on every invocation, overlays this repo's MDM/registry policy, and only fills variables that are still unset from the live process environment. Explicit env vars still win, but the hook does not depend on parent-process `OTEL_*` inheritance. This is the safe path for Claude Code hooks, because Claude does not forward `OTEL_*` to hook subprocesses.
 
@@ -440,7 +444,7 @@ Then restart your agent or IDE.
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `IDE_OTEL_BATCH_ON_STOP` | Enable session-level batching (recommended) | `false` |
-| `IDE_OTEL_IDE_NAME` | Force the detected IDE name (`codex`, `cursor`, `copilot`, `claude`, `gemini`, `antigravity`, `opencode`, `windsurf`) for generic hook runners; common labels like `OpenAI Codex`, `Codex CLI`, `GitHub Copilot`, `Claude Code`, `Cursor IDE` / `Cursor CLI`, `Gemini CLI`, `Anti Gravity`, `OpenCode`, `Windsurf IDE`, `Codeium Windsurf`, and their `... CLI` / `... IDE` variants normalize automatically | auto-detect |
+| `IDE_OTEL_IDE_NAME` | Force the detected harness name (`codex`, `cursor`, `copilot`, `claude`, `gemini`, `antigravity`, `opencode`, `windsurf`) for generic hook runners; common labels like `OpenAI Codex`, `Codex CLI`, `GitHub Copilot`, `Claude Code`, `Cursor IDE` / `Cursor CLI`, `Gemini CLI`, `Anti Gravity`, `OpenCode`, `Windsurf IDE`, `Codeium Windsurf`, and their `... CLI` / `... IDE` variants normalize automatically | auto-detect |
 | `IDE_OTEL_LOCAL_SPANS` | Save hook spans locally as JSONL files for agent analysis (`.state/local_spans/*.jsonl`) | unset |
 | `IDE_OTEL_CAPTURE_CONVERSATION_CONTENT` | Include prompt, response, stop-message, error, and delegation text in spans | `false` |
 | `IDE_OTEL_CAPTURE_TEXT` | Legacy broad text-capture gate; also enables conversation content | `false` |
@@ -494,7 +498,7 @@ These settings have sensible defaults and typically don't need to be changed:
 
 ## Hook Stdout Response
 
-The hook writes the response expected by the current IDE/client.
+The hook writes the response expected by the current harness.
 
 - Default (backward compatible):
 
@@ -508,13 +512,19 @@ The hook writes the response expected by the current IDE/client.
 <no stdout>
 ```
 
-- If `IDE_OTEL_LOCAL_SPANS` is explicitly set (`true` or `false`), the response includes:
+- Cursor permission hooks (`preToolUse`, `subagentStart`, `beforeShellExecution`, `beforeMCPExecution`, `beforeReadFile`, `beforeTabFileRead`) return the required observer response:
+
+```json
+{"permission": "allow"}
+```
+
+- For events using the default response, if `IDE_OTEL_LOCAL_SPANS` is explicitly set (`true` or `false`), the response includes:
 
 ```json
 {"continue": true, "local_spans": true}
 ```
 
-For the stdout response field, `local_spans` uses `IDE_OTEL_LOCAL_SPANS` when set; otherwise internal behavior falls back to `IDE_OTEL_BATCH_ON_STOP`. Codex responses are adapter-managed: passive non-`Stop` events skip stdout entirely, and Codex responses do not include the custom `local_spans` field because Codex validates event-specific JSON schemas.
+For the stdout response field, `local_spans` uses `IDE_OTEL_LOCAL_SPANS` when set; otherwise internal behavior falls back to `IDE_OTEL_BATCH_ON_STOP`. Codex responses are adapter-managed: passive non-`Stop` events skip stdout entirely. Codex responses and Cursor permission responses omit the custom `local_spans` field to respect their schemas.
 
 ## Local Trace Files (Agent-Friendly)
 
@@ -720,7 +730,7 @@ Requires the [Datadog Agent](https://docs.datadoghq.com/opentelemetry/) with OTL
 
 - Codex and Claude encoded names use `mcp__<server>__<tool>`. One bounded parser preserves the original `gen_ai.client.tool_name` and exports `gen_ai.client.mcp_server` plus `gen_ai.client.mcp_tool`; `__` inside the tool portion is preserved. Parsing applies to pre, post, permission, and failure callbacks on both spans and logs.
 - Cursor dedicated MCP callbacks use `mcp_server_name` and `tool_name`. `mcp_server_name` takes precedence over `mcp_server` and the executable `command`, so a command path cannot replace a real server identity.
-- Cursor's stable generic `tool_use_id` owns the logical invocation. Session-backed FIFO correlation merges `BeforeMCPExecution` / `AfterMCPExecution` server, tool, duration, status, and result metadata into the matching generic pre/post callbacks. Cursor's dedicated `duration` value is seconds and is normalized to the `duration_ms` contract. Batch mode folds correlated dedicated evidence into the buffered generic call; streaming mode emits dedicated lifecycle evidence spans (and logs when enabled) with the same ID and enriches the later generic post span. `gen_ai.client.mcp.correlated_evidence=true` distinguishes those callback spans from the logical generic tool span. Unmatched dedicated evidence is still emitted as a span without inventing an ID.
+- Cursor's stable generic `tool_use_id` owns the logical invocation. Session-backed FIFO correlation merges `BeforeMCPExecution` / `AfterMCPExecution` server, tool, duration, status, and result metadata into the matching generic pre/post callbacks. Cursor's dedicated `duration` value is milliseconds and is preserved as `duration_ms`. Batch mode folds correlated dedicated evidence into the buffered generic call; streaming mode emits dedicated lifecycle evidence spans (and logs when enabled) with the same ID and enriches the later generic post span. `gen_ai.client.mcp.correlated_evidence=true` distinguishes those callback spans from the logical generic tool span. Unmatched dedicated evidence is still emitted as a span without inventing an ID.
 - Codex `PermissionRequest` reuses an open tool ID only when session, turn/generation, tool name, and event order identify one unambiguous invocation. Ambiguous permissions remain uncorrelated.
 - Duplicate session, prompt, generation-stop, tool, error, subagent, compaction, and permission callbacks are suppressed with bounded session state. Stable IDs use event-plus-ID keys; no-ID callbacks use lifecycle-scoped fingerprints and short bounded windows. Legitimate calls across completed generation boundaries are preserved.
 - Result size and digest are emitted as content-free metadata. Existing content gates remain unchanged: prompt capture is off by default, tool input content requires `IDE_OTEL_CAPTURE_TOOL_INPUT_CONTENT`, and MCP log payloads continue to follow `IDE_OTEL_MCP_LOG_PAYLOAD`.
@@ -734,8 +744,8 @@ Requires the [Datadog Agent](https://docs.datadoghq.com/opentelemetry/) with OTL
 | `gen_ai.client.hook.event` | Canonical event name (PascalCase) |
 | `gen_ai.client.hook.event_id` | Provider event ID or deterministic hook callback identity |
 | `gen_ai.client.telemetry_source` / `gen_ai.client.hook_schema_version` | Explicit hook provenance and contract version |
-| `gen_ai.client.name` | Outer IDE or hook host (`codex`, `cursor`, `copilot`, `claude`, `opencode`, etc.) |
-| `gen_ai.client.agent_engine` | Inner agent engine when it differs from the outer IDE (for example Cursor running Claude Code) |
+| `gen_ai.client.name` | Canonical harness/engine identity (`codex`, `cursor`, `copilot`, `claude`, `opencode`, etc.); see [Harness Detection](#harness-detection) |
+| `gen_ai.client.agent_engine` | Inner agent engine when it differs from the outer harness (for example Cursor running Claude Code) |
 | `gen_ai.client.session_id` | Session identifier |
 | `gen_ai.client.generation_id` | Generation identifier (Cursor) |
 | `gen_ai.client.workspace` | Workspace / working directory |
@@ -832,26 +842,29 @@ When `IDE_OTEL_BATCH_ON_STOP=true` (recommended):
 
 1. **SessionStart**: Creates the persisted trace/session record once. Duplicate starts reuse the same trace and phantom parent and do not emit another root.
 2. **Generation events**: Buffer to `.state/batches/<generation_id>.jsonl`. Explicit generation IDs and implicit fallback generations are both registered as session-owned pending batches, so Cursor sessions without `UserPromptSubmit` are still flushable.
-3. **Stop**: Flushes the current generation exactly once and removes only that generation's pending/dedupe/correlation state. The session remains open; this is required for multi-prompt Codex and Claude sessions.
+3. **Stop / StopFailure / Interrupt**: Flushes the current generation exactly once and removes only that generation's pending/dedupe/correlation state. The session remains open; this is required for multi-prompt Codex and Claude sessions.
 4. **SessionEnd**: Discovers and flushes every registered or on-disk batch owned by the session, then emits one `gen_ai.client.session` root. Batch, dedupe, correlation, and session state are removed after the authoritative trace flush succeeds. Logs are flushed and diagnosed independently, so a log-only exporter failure cannot replay spans that were already delivered.
 
-For IDEs without a `generation_id`, the hook derives generation boundaries from `UserPromptSubmit` → `Stop` cycles. If a provider emits neither a prompt boundary nor a generation ID, the first generation-owned event creates an implicit fallback generation. Codex currently has no hook-level `SessionEnd`; bounded stale-session finalization emits its root later and is idempotent.
+For harnesses without a `generation_id`, the hook derives generation boundaries from `UserPromptSubmit` → `Stop` cycles. If a provider emits neither a prompt boundary nor a generation ID, the first generation-owned event creates an implicit fallback generation. Codex now registers `SessionEnd` and `Interrupt`. Bounded, idempotent stale-session finalization remains a fallback for sessions whose end callback never arrives.
 
 Local JSON export routes spans by `gen_ai.client.session_id`, including roots emitted during stale-session finalization. A sessionless cleanup trigger therefore cannot move a stale root into `unscoped.jsonl` or copy it into another session's file.
 
 When upstream context is present, hook spans keep the real `trace_id` and attach to the real upstream parent span. The hook still cannot force a specific emitted `span_id` for its own spans because the Python OpenTelemetry SDK assigns span IDs when spans are started.
 
-## IDE Detection
+<a id="ide-detection"></a>
 
-The hook auto-detects which IDE is calling it:
+## Harness Detection
 
-| Signal | IDE |
+The hook identifies which harness is calling it:
+
+| Signal | Harness identity |
 |--------|-----|
 | Managed command source flag (`otel-hook --cursor`, `--codex`, `--claude`, etc.) | Preferred identity for setup-generated hooks |
 | Legacy managed `IDE_OTEL_HOOK_SOURCE` env | Compatibility identity for older setup-generated hooks |
 | `IDE_OTEL_IDE_NAME` env var | Explicit override for generic hook runners or manual debugging |
 | Parent process tree (`ps` parent-chain walk) | Compatibility fallback for legacy/unmanaged hooks |
 | Self-reported `ide_name`, `client`, or `source_app` values such as `OpenAI Codex`, `Codex CLI`, `GitHub Copilot`, `GitHub Copilot CLI`, `GitHub Copilot Chat`, `Claude Code`, `Claude Code CLI`, `Anthropic Claude Code`, `Cursor IDE`, `Cursor CLI`, `Anti Gravity`, `Anti Gravity CLI`, `OpenCode` / `OpenCode CLI`, `Windsurf IDE`, or `Codeium Windsurf` (case-insensitive, hyphen/space-insensitive) | Normalized to the canonical `gen_ai.client.name` |
+| Native `agent_action_name` and `trajectory_id` | Windsurf / Cascade; checked before the Cursor ID heuristic |
 | `conversation_id` or `generation_id` in input | Cursor |
 | `transcript_path`, `permission_mode`, or `notification_type` | Claude Code |
 | `turn_id`, `tool_response`, or `last_assistant_message` | Codex |
@@ -859,7 +872,7 @@ The hook auto-detects which IDE is calling it:
 
 Detection order is: (1) managed command source flag, (2) legacy managed source env, (3) explicit `IDE_OTEL_IDE_NAME`, (4) process-tree fallback, (5) self-reported payload fields, then (6) heuristics. Setup-generated hooks therefore do not depend on process-tree or ambient environment inference for their primary identity.
 
-The hook still detects the outer wrapper IDE/process, but the emitted canonical client identity usually prefers a distinct inner engine when one is present (for example Gemini running under Claude Code). In those cases, spans/resources use the inner engine for `gen_ai.client.name` and `gen_ai.system`, keep `gen_ai.client.agent_engine` for compatibility, and record the wrapper as `gen_ai.client.wrapper`. Cross-engine promotion is now gated on strong payload evidence (explicit engine fields, self-reported client identity, or corroborated semantic fields), so weak hints such as leaked wrapper env vars do not relabel Cursor events and create duplicate workspace-context telemetry for the same hook event. Native payload signals beat leaked wrapper-only env hints, so Cursor-specific fields such as `conversation_id` / `generation_id` still emit `gen_ai.client.name=cursor` when stale Claude-specific hints are present. When the hook can infer a provider from the payload, it also sets `gen_ai.provider.name` as the canonical provider attribute (v1.37+).
+The hook still detects the outer wrapper harness/process, but the emitted canonical client identity usually prefers a distinct inner engine when one is present (for example Gemini running under Claude Code). In those cases, spans/resources use the inner engine for `gen_ai.client.name` and `gen_ai.system`, keep `gen_ai.client.agent_engine` for compatibility, and record the wrapper as `gen_ai.client.wrapper`. Cross-engine promotion is now gated on strong payload evidence (explicit engine fields, self-reported client identity, or corroborated semantic fields), so weak hints such as leaked wrapper env vars do not relabel Cursor events and create duplicate workspace-context telemetry for the same hook event. Native payload signals beat leaked wrapper-only env hints, so Cursor-specific fields such as `conversation_id` / `generation_id` still emit `gen_ai.client.name=cursor` when stale Claude-specific hints are present. When the hook can infer a provider from the payload, it also sets `gen_ai.provider.name` as the canonical provider attribute (v1.37+).
 
 ## File Structure
 
@@ -903,6 +916,8 @@ Set `IDE_OTEL_CAPTURE_CONVERSATION_CONTENT=true` to include conversation and del
 - Email addresses
 - Long tokens / API keys
 - macOS usernames from paths
+
+Claude compaction instructions and summaries follow the same conversation-content gate. Tool-batch inputs/results are reduced to lengths and hashes before local buffering; `IDE_OTEL_CAPTURE_TOOL_INPUT_CONTENT=true` permits previews bounded by `IDE_OTEL_TEXT_MAX_CHARS`, with masking when enabled. This applies to newly received callbacks, not existing buffer files.
 
 ### Never Sent
 
@@ -964,7 +979,7 @@ This bypasses the SDK's background exporter only; `IDE_OTEL_BATCH_ON_STOP` still
 | `cx.application.name required` | Coralogix needs this — set automatically, or add to `OTEL_RESOURCE_ATTRIBUTES` |
 | Orphan spans | Enable `IDE_OTEL_BATCH_ON_STOP=true` for session-level traces |
 | No traces appearing | Check endpoint, protocol, and auth headers in config. Verify the backend is running and reachable. |
-| Wrong IDE detected | Check the parent process chain and input payload first; for generic runners or debugging, set `IDE_OTEL_IDE_NAME` explicitly in the hook command |
+| Wrong harness detected | Check the parent process chain and input payload first; for generic runners or debugging, set `IDE_OTEL_IDE_NAME` explicitly in the hook command |
 | Traces going to the wrong backend | Verify `OTEL_EXPORTER_OTLP_ENDPOINT` points to the intended backend |
 
 ## Contributing

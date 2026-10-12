@@ -1,19 +1,19 @@
-// OpenTelemetry Hook — OpenCode plugin example
-//
-// Copy this file to one of:
-//   ~/.config/opencode/plugins/otel-hook.ts   (global)
-//   .opencode/plugins/otel-hook.ts             (project)
-//
-// Or use the setup script:
-//   bash setup.sh --opencode           # project-level
-//   bash setup.sh --opencode --global  # global
-//
-// Requires otel-hook in PATH:
-//   pip install opentelemetry-hooks
-//
-// Configure your OTLP endpoint in otel_config.json (see otel_config.example.json).
-
 import type { Plugin } from "@opencode-ai/plugin"
+
+// OpenTelemetry Hook — OpenCode plugin
+//
+// Captures AI agent activity (sessions, tool calls) as OpenTelemetry traces
+// and forwards them to any OTLP-compatible backend (Jaeger, Grafana, Datadog, …).
+//
+// Requires: otel-hook in PATH
+//   pip install opentelemetry-hooks
+//   # or: pipx install opentelemetry-hooks
+//
+// Setup:
+//   bash setup.sh --opencode           # project-level  (.opencode/plugins/)
+//   bash setup.sh --opencode --global  # global  (~/.config/opencode/plugins/)
+//
+// Docs: https://github.com/o11y-dev/opentelemetry-hooks
 
 export const OtelHookPlugin: Plugin = async ({ $, directory }) => {
   try {
@@ -24,6 +24,10 @@ export const OtelHookPlugin: Plugin = async ({ $, directory }) => {
     return {}
   }
 
+  // Pipe a JSON payload to otel-hook on stdin.
+  // The payload carries source_app: "OpenCode", and the hook also prefers
+  // parent-process discovery, so no IDE override env var is needed here.
+  // Hook errors are always non-fatal — never block agent execution.
   async function invoke(payload: Record<string, unknown>): Promise<void> {
     const json = JSON.stringify(payload)
     try {
@@ -32,14 +36,25 @@ export const OtelHookPlugin: Plugin = async ({ $, directory }) => {
         .quiet()
         .nothrow()
     } catch {
-      // Hook errors are non-fatal — never block agent execution
+      // pass
     }
   }
 
   return {
     // ── Session lifecycle ──────────────────────────────────────────────────
     event: async ({ event }) => {
-      type Props = { info?: { id?: string }; message?: { role?: string; sessionID?: string; parts?: Array<{ type: string; text?: string }> } }
+      type Props = {
+        sessionID?: string
+        error?: unknown
+        info?: { id?: string; role?: string; sessionID?: string }
+        permission?: string
+        requestID?: string
+        reply?: string
+        permissionID?: string
+        response?: string
+        id?: string
+        tool?: { callID?: string }
+      }
       const props = event.properties as Props | undefined
 
       if (event.type === "session.created") {
@@ -56,11 +71,12 @@ export const OtelHookPlugin: Plugin = async ({ $, directory }) => {
           session_id: props?.info?.id,
         })
       } else if (event.type === "session.error") {
-        // Close the trace even when the session ends in error.
+        // An error can be recoverable; it does not mean the session was deleted.
         await invoke({
-          hook_event_name: "SessionEnd",
+          hook_event_name: "ErrorOccurred",
           source_app: "OpenCode",
-          session_id: props?.info?.id,
+          session_id: props?.sessionID,
+          error: props?.error,
           status: "error",
         })
       } else if (event.type === "session.idle") {
@@ -68,19 +84,45 @@ export const OtelHookPlugin: Plugin = async ({ $, directory }) => {
         await invoke({
           hook_event_name: "Stop",
           source_app: "OpenCode",
-          session_id: props?.info?.id,
+          session_id: props?.sessionID,
           status: "idle",
+        })
+      } else if (event.type === "session.compacted") {
+        await invoke({
+          hook_event_name: "PostCompact",
+          source_app: "OpenCode",
+          session_id: props?.sessionID,
+        })
+      } else if (event.type === "permission.asked") {
+        await invoke({
+          hook_event_name: "PermissionRequest",
+          source_app: "OpenCode",
+          session_id: props?.sessionID,
+          event_id: props?.id,
+          tool_name: props?.permission,
+          tool_use_id: props?.tool?.callID,
+        })
+      } else if (event.type === "permission.replied") {
+        // Observe the completed decision without changing the permission flow.
+        const requestID = props?.requestID ?? props?.permissionID
+        await invoke({
+          hook_event_name: "PermissionReplied",
+          source_app: "OpenCode",
+          session_id: props?.sessionID,
+          event_id: requestID,
+          permission_request_id: requestID,
+          permission_response: props?.reply ?? props?.response,
         })
       } else if (event.type === "message.updated") {
         // Capture user prompts only (not assistant responses).
-        const msg = props?.message
+        // MessageUpdated supplies metadata in info; text parts are separate events.
+        const msg = props?.info
         if (msg?.role === "user") {
-          const textPart = msg.parts?.find((p) => p.type === "text")
           await invoke({
             hook_event_name: "UserPromptSubmit",
             source_app: "OpenCode",
             session_id: msg.sessionID,
-            prompt: textPart?.text,
+            event_id: msg.id,
           })
         }
       } else if (event.type === "file.edited") {
@@ -96,6 +138,12 @@ export const OtelHookPlugin: Plugin = async ({ $, directory }) => {
     },
 
     // ── Tool call lifecycle ────────────────────────────────────────────────
+    //
+    // tool.execute.before: input = { tool, sessionID, callID }
+    //                      output = { args }   ← mutable; can be modified
+    //
+    // tool.execute.after:  input  = { tool, sessionID, callID, args }
+    //                      output = { title, output, metadata }
     "tool.execute.before": async (input, output) => {
       await invoke({
         hook_event_name: "PreToolUse",

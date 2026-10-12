@@ -33,39 +33,34 @@ fi
 
 # ─── Event names per IDE ─────────────────────────────────────────────────────
 CURSOR_EVENTS=(
-  sessionStart sessionEnd
-  subagentStart subagentStop
-  preToolUse postToolUse postToolUseFailure
-  beforeShellExecution afterShellExecution
-  beforeMCPExecution afterMCPExecution
-  beforeReadFile afterFileEdit
-  beforeSubmitPrompt stop
+  sessionStart sessionEnd subagentStart subagentStop preToolUse postToolUse postToolUseFailure
+  beforeShellExecution afterShellExecution beforeMCPExecution afterMCPExecution beforeReadFile
+  afterFileEdit beforeSubmitPrompt stop preCompact beforeTabFileRead afterTabFileEdit
+  afterAgentResponse afterAgentThought workspaceOpen
 )
 
 CLAUDE_EVENTS=(
-  SessionStart SessionEnd
-  SubagentStart SubagentStop
-  PreToolUse PostToolUse PostToolUseFailure
-  UserPromptSubmit PreCompact PostCompact Stop
+  SessionStart SessionEnd SubagentStart SubagentStop PreToolUse PostToolUse PostToolUseFailure
+  UserPromptSubmit PreCompact PostCompact Stop PermissionRequest PermissionDenied Notification
+  StopFailure Setup InstructionsLoaded UserPromptExpansion MessageDisplay PostToolBatch
+  TaskCreated TaskCompleted TeammateIdle ConfigChange CwdChanged DirectoryAdded WorktreeRemove
+  PreModelSwitch PostModelSwitch Elicitation ElicitationResult
 )
 
 GEMINI_EVENTS=(
-  SessionStart SessionEnd
-  BeforeAgent AfterAgent
-  BeforeModel AfterModel
-  BeforeTool AfterTool
+  SessionStart SessionEnd BeforeAgent AfterAgent BeforeModel AfterModel BeforeTool AfterTool
+  BeforeToolSelection Notification PreCompress
 )
 
 COPILOT_EVENTS=(
-  sessionStart sessionEnd
-  userPromptSubmitted
-  preToolUse postToolUse
-  errorOccurred
+  sessionStart sessionEnd userPromptSubmitted preToolUse postToolUse errorOccurred
+  postToolUseFailure agentStop subagentStart subagentStop preCompact permissionRequest
+  notification userPromptTransformed
 )
 
 CODEX_EVENTS=(
-  SessionStart PreToolUse PermissionRequest
-  PostToolUse UserPromptSubmit Stop
+  SessionStart PreToolUse PermissionRequest PostToolUse UserPromptSubmit Stop SessionEnd
+  PreCompact PostCompact SubagentStart SubagentStop Interrupt
 )
 
 REPO_MARKERS=(.git .github .cursor .claude .opencode .gemini .codex)
@@ -115,10 +110,6 @@ done
 if [[ -n "$WANT_GLOBAL" ]]; then
   if [[ -z "$DO_CURSOR" && -z "$DO_COPILOT" && -z "$DO_CLAUDE" && -z "$DO_OPENCODE" && -z "$DO_GEMINI" && -z "$DO_CODEX" ]]; then
     echo "Error: --global requires an explicit IDE flag (--cursor, --copilot, --claude, --gemini, --codex, or --opencode)."
-    exit 1
-  fi
-  if [[ -n "$DO_COPILOT" ]]; then
-    echo "Error: GitHub Copilot hooks are repository-scoped; --copilot does not support --global."
     exit 1
   fi
   [[ -n "$DO_CURSOR" ]]   && CURSOR_GLOBAL=1
@@ -839,7 +830,7 @@ import json, os, re, sys
 hooks_path, config_path, hook_cmd = sys.argv[1:4]
 events = sys.argv[4:]
 matchers = {
-    'SessionStart': 'startup|resume|clear',
+    'SessionStart': 'startup|resume|clear|compact',
     'PreToolUse': '*',
     'PermissionRequest': '*',
     'PostToolUse': '*',
@@ -892,8 +883,15 @@ else:
 hooks = doc.setdefault('hooks', {})
 added, updated, skipped = [], [], []
 for event in events:
+    timeout = 3 if event in {'SessionEnd', 'Interrupt'} else 30
     event_list = hooks.setdefault(event, [])
     matcher = matchers.get(event)
+    if event == 'SessionStart':
+        for old in list(event_list):
+            if old.get('matcher') == 'startup|resume|clear':
+                old['hooks'] = [h for h in old.get('hooks', []) if not any(t in h.get('command', '') for t in ('otel-hook', 'otel_hook'))]
+                if not old['hooks']:
+                    event_list.remove(old)
     matches = []
     for entry in event_list:
         if matcher is not None and entry.get('matcher', '') != matcher:
@@ -913,12 +911,12 @@ for event in events:
             if hook.get('type') != 'command':
                 hook['type'] = 'command'
                 changed = True
-            if 'timeout' not in hook:
-                hook['timeout'] = 30
+            if 'timeout' not in hook or (event in {'SessionEnd', 'Interrupt'} and hook['timeout'] != timeout):
+                hook['timeout'] = timeout
                 changed = True
         (updated if changed else skipped).append(event)
         continue
-    entry = {'hooks': [{'type': 'command', 'command': hook_cmd, 'timeout': 30}]}
+    entry = {'hooks': [{'type': 'command', 'command': hook_cmd, 'timeout': timeout}]}
     if matcher is not None:
         entry['matcher'] = matcher
     event_list.append(entry)
@@ -1328,15 +1326,29 @@ diagnose_copilot() {
   local repo_root
   repo_root="$(find_repo_root)"
   hooks_json="$repo_root/.github/hooks/otel-hooks.json"
+  if [[ -n "$WANT_GLOBAL" ]]; then
+    hooks_json="${COPILOT_HOME:-$HOME/.copilot}/hooks/otel-hooks.json"
+  fi
 
-  echo "🔍 GitHub Copilot (repo: $hooks_json)"
+  echo "🔍 GitHub Copilot ($hooks_json)"
   if [ ! -f "$hooks_json" ]; then
     echo "  ⏭️  Hooks file not found"
     return 0
   fi
 
   python3 -c "
-import json, sys, os
+import json, sys, os, shlex, shutil
+
+def cmd_has_valid_path(cmd):
+    try:
+        parts = shlex.split(cmd)
+    except ValueError:
+        return True  # Do not delete a command that cannot be safely interpreted.
+    script = next((p for p in parts if p.endswith('otel_hook.py')), None)
+    if script:
+        return os.path.exists(script)
+    executable = next((p for p in parts if os.path.basename(p) == 'otel-hook'), None)
+    return executable is None or bool(shutil.which(executable))
 
 hooks_path = sys.argv[1]
 with open(hooks_path, 'r') as f:
@@ -1356,8 +1368,7 @@ for event, entries in hooks.items():
         if 'otel_hook' in cmd or 'otel-hook' in cmd:
             registered_count += 1
             # Check for command path in the bash string
-            path_part = cmd.split(' ')[-1] if ' ' in cmd else cmd
-            if not (os.path.exists(path_part) or path_part.startswith('/usr/local')):
+            if not cmd_has_valid_path(cmd):
                 stale_count += 1
 
 if registered_count > 0:
@@ -1372,8 +1383,11 @@ uninstall_copilot() {
   local repo_root
   repo_root="$(find_repo_root)"
   hooks_json="$repo_root/.github/hooks/otel-hooks.json"
+  if [[ -n "$WANT_GLOBAL" ]]; then
+    hooks_json="${COPILOT_HOME:-$HOME/.copilot}/hooks/otel-hooks.json"
+  fi
 
-  echo "🗑️  GitHub Copilot (repo: $hooks_json)"
+  echo "🗑️  GitHub Copilot ($hooks_json)"
   if [ ! -f "$hooks_json" ]; then
     echo "  ⏭️  Hooks file not found — nothing to uninstall"
     return 0
@@ -1421,15 +1435,29 @@ clean_copilot() {
   local repo_root
   repo_root="$(find_repo_root)"
   hooks_json="$repo_root/.github/hooks/otel-hooks.json"
+  if [[ -n "$WANT_GLOBAL" ]]; then
+    hooks_json="${COPILOT_HOME:-$HOME/.copilot}/hooks/otel-hooks.json"
+  fi
 
-  echo "🧹 GitHub Copilot (repo: $hooks_json)"
+  echo "🧹 GitHub Copilot ($hooks_json)"
   if [ ! -f "$hooks_json" ]; then
     echo "  ⏭️  Hooks file not found — nothing to clean"
     return 0
   fi
 
   python3 -c "
-import json, sys, os
+import json, sys, os, shlex, shutil
+
+def cmd_has_valid_path(cmd):
+    try:
+        parts = shlex.split(cmd)
+    except ValueError:
+        return True  # Do not delete a command that cannot be safely interpreted.
+    script = next((p for p in parts if p.endswith('otel_hook.py')), None)
+    if script:
+        return os.path.exists(script)
+    executable = next((p for p in parts if os.path.basename(p) == 'otel-hook'), None)
+    return executable is None or bool(shutil.which(executable))
 
 hooks_path = sys.argv[1]
 with open(hooks_path, 'r') as f:
@@ -1448,8 +1476,7 @@ for event, entries in list(hooks.items()):
     for h in entries:
         cmd = h.get('bash', '')
         total_count += 1
-        path_part = cmd.split(' ')[-1] if ' ' in cmd else cmd
-        if os.path.exists(path_part) or path_part.startswith('/usr/local'):
+        if not ('otel_hook' in cmd or 'otel-hook' in cmd) or cmd_has_valid_path(cmd):
             surviving_hooks.append(h)
         else:
             removed_count += 1
@@ -1474,8 +1501,11 @@ setup_copilot() {
   local repo_root
   repo_root="$(find_repo_root)"
   hooks_json="$repo_root/.github/hooks/otel-hooks.json"
+  if [[ -n "$WANT_GLOBAL" ]]; then
+    hooks_json="${COPILOT_HOME:-$HOME/.copilot}/hooks/otel-hooks.json"
+  fi
 
-  echo "📦 GitHub Copilot (repo: $hooks_json)"
+  echo "📦 GitHub Copilot ($hooks_json)"
   mkdir -p "$(dirname "$hooks_json")"
 
   if [ ! -f "$hooks_json" ]; then
@@ -1487,7 +1517,8 @@ hook_cmd = sys.argv[1]
 events = sys.argv[2:]
 hooks = {}
 for event in events:
-    hooks[event] = [{'type': 'command', 'bash': hook_cmd, 'timeoutSec': 30}]
+    event_cmd = f'{hook_cmd} --copilot --event {event}'
+    hooks[event] = [{'type': 'command', 'bash': event_cmd, 'timeoutSec': 30}]
 doc = {'version': 1, 'hooks': hooks}
 print(json.dumps(doc, indent=2))
 " "$HOOK_CMD" "${COPILOT_EVENTS[@]}" > "$hooks_json"
@@ -1517,8 +1548,9 @@ updated = []
 skipped = []
 
 for event in events:
+    event_cmd = f'{hook_cmd} --copilot --event {event}'
     event_hooks = hooks.setdefault(event, [])
-    plain_matches = [h for h in event_hooks if h.get('type') == 'command' and h.get('bash') == hook_cmd]
+    plain_matches = [h for h in event_hooks if h.get('type') == 'command' and h.get('bash') == event_cmd]
     if plain_matches:
         changed = False
         for hook in plain_matches:
@@ -1531,16 +1563,16 @@ for event in events:
             skipped.append(event)
         continue
 
-    legacy_matches = [h for h in event_hooks if h.get('type') == 'command' and h.get('bash') in wrapped_bash_cmds]
+    legacy_matches = [h for h in event_hooks if h.get('type') == 'command' and h.get('bash') in [*wrapped_bash_cmds, hook_cmd, f'{hook_cmd} --copilot']]
     if legacy_matches:
         for hook in legacy_matches:
             hook['type'] = 'command'
-            hook['bash'] = hook_cmd
+            hook['bash'] = event_cmd
             hook.setdefault('timeoutSec', 30)
         updated.append(event)
         continue
 
-    event_hooks.append({'type': 'command', 'bash': hook_cmd, 'timeoutSec': 30})
+    event_hooks.append({'type': 'command', 'bash': event_cmd, 'timeoutSec': 30})
     added.append(event)
 
 with open(hooks_path, 'w') as f:

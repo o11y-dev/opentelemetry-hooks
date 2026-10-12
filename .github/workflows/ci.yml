@@ -10,6 +10,14 @@ permissions:
   contents: read
 
 jobs:
+  plugin-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: Test OpenCode callback contracts
+        run: bun test tests/opencode.test.ts
+
   lint:
     runs-on: ubuntu-latest
     steps:
@@ -49,7 +57,7 @@ jobs:
         run: python -m pytest tests/ -v
 
   build:
-    needs: [lint, test]
+    needs: [lint, test, plugin-test]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
