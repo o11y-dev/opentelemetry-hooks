@@ -7,7 +7,7 @@ name = "opentelemetry-hooks"
 version = "0.15.0"
 description = "OpenTelemetry integration for AI coding agents (Codex, Cursor IDE/CLI, GitHub Copilot, Claude Code, Gemini CLI, Antigravity, OpenCode-compatible runners)"
 readme = "README.md"
-license = {text = "MIT"}
+license = {file = "LICENSE"}
 requires-python = ">=3.12"
 keywords = ["opentelemetry", "observability", "ai-agents", "codex", "claude", "copilot", "cursor", "gemini", "telemetry", "hooks", "tracing"]
 classifiers = [

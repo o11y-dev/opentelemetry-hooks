@@ -1033,16 +1033,8 @@ This bypasses the SDK's background exporter only; `IDE_OTEL_BATCH_ON_STOP` still
 
 ## Contributing
 
-Contributions are welcome. To get started:
-
-```bash
-git clone https://github.com/o11y-dev/opentelemetry-hooks.git
-cd opentelemetry-hooks
-pip install -r requirements-dev.txt
-python -m pytest tests/ -v
-```
-
-Please open an issue first if you plan a large change.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, the source layout,
+validation commands and pull request guidance.
 
 ## Credits
 
@@ -1052,4 +1044,4 @@ Please open an issue first if you plan a large change.
 
 ## License
 
-MIT
+[MIT](LICENSE)
