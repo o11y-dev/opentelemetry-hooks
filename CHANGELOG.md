@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.14.1 (unreleased)
+## 0.15.0 (2026-10-12)
 
 ### Added
 - Added OpenCode permission-reply observations and documented Cursor native-export coexistence and remaining hook coverage limits.
