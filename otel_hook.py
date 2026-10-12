@@ -30,6 +30,7 @@ import platform
 import random
 import re
 import shutil
+import shlex
 import subprocess
 import sys
 import threading
@@ -41,6 +42,76 @@ from datetime import datetime, timezone
 from typing import Optional, Tuple
 
 import click
+from otel_hooks import bootstrap
+
+# Compatibility re-exports; parsing itself lives in the SDK-independent package.
+from otel_hooks.parsers.events import (
+    _CANONICAL_EVENT as _CANONICAL_EVENT,
+    _COPILOT_EVENTS as _COPILOT_EVENTS,
+    _WINDSURF_EVENT_ALIASES as _WINDSURF_EVENT_ALIASES,
+    _INPUT_ALIASES as _INPUT_ALIASES,
+    _GENERATION_START_EVENTS as _GENERATION_START_EVENTS,
+    _TRACE_ID_RE as _TRACE_ID_RE,
+    _SPAN_ID_RE as _SPAN_ID_RE,
+    _MCP_EVENTS as _MCP_EVENTS,
+)
+from otel_hooks.parsers.common import (
+    _EMAIL_RE as _EMAIL_RE,
+    _TOKEN_RE as _TOKEN_RE,
+    _HOME_RE as _HOME_RE,
+    _safe_bool as _safe_bool,
+    _stringify as _stringify,
+    _first_present as _first_present,
+    _normalize_input_data as _normalize_input_data,
+    _bound_tool_response_payload as _bound_tool_response_payload,
+    _hash_text as _hash_text,
+    _mask_text as _mask_text,
+    _conversation_content_enabled as _conversation_content_enabled,
+    _text_max_chars as _text_max_chars,
+    _session_key as _session_key,
+    _generation_key_from_data as _generation_key_from_data,
+    _parse_encoded_mcp_tool_name as _parse_encoded_mcp_tool_name,
+    _normalize_mcp_event_data as _normalize_mcp_event_data,
+)
+from otel_hooks.parsers.models import (
+    ConversationRecord as ConversationRecord,
+    AgentRelationship as AgentRelationship,
+    WorkspaceIdentity as WorkspaceIdentity,
+    NativeTelemetryContext as NativeTelemetryContext,
+    CanonicalHookEvent as CanonicalHookEvent,
+)
+from otel_hooks.parsers.base import (
+    ProviderEventAdapter as ProviderEventAdapter,
+)
+from otel_hooks.parsers.cursor import (
+    CursorEventAdapter as CursorEventAdapter,
+)
+from otel_hooks.parsers.windsurf import (
+    WindsurfEventAdapter as WindsurfEventAdapter,
+)
+from otel_hooks.parsers.claude import (
+    ClaudeEventAdapter as ClaudeEventAdapter,
+)
+from otel_hooks.parsers.codex import (
+    CodexEventAdapter as CodexEventAdapter,
+)
+from otel_hooks.parsers.gemini import (
+    GeminiEventAdapter as GeminiEventAdapter,
+)
+from otel_hooks.parsers.antigravity import (
+    AntigravityEventAdapter as AntigravityEventAdapter,
+)
+from otel_hooks.parsers.copilot import (
+    CopilotEventAdapter as CopilotEventAdapter,
+)
+from otel_hooks.parsers.opencode import (
+    OpenCodeEventAdapter as OpenCodeEventAdapter,
+)
+from otel_hooks.parsers import (
+    _DEFAULT_EVENT_ADAPTER as _DEFAULT_EVENT_ADAPTER,
+    _PROVIDER_EVENT_ADAPTERS as _PROVIDER_EVENT_ADAPTERS,
+    _event_adapter_for as _event_adapter_for,
+)
 from enrichment_connectors import (
     aggregate_generation_memory,
     extract_event_memory_facts,
@@ -67,12 +138,13 @@ def _resolve_hook_home() -> str:
 
     Resolution order:
     1. ``IDE_OTEL_HOOK_HOME`` environment variable (explicit override).
-    2. ``$XDG_DATA_HOME/opentelemetry-hooks`` (defaults to
+    2. ``%LOCALAPPDATA%/opentelemetry-hooks`` on Windows, or
+       ``$XDG_DATA_HOME/opentelemetry-hooks`` on POSIX (defaults to
        ``~/.local/share/opentelemetry-hooks`` when ``XDG_DATA_HOME`` is unset)
        when the hook is running from an installed package — i.e. ``__file__``
        lives inside a *site-packages* directory.
     3. The directory that contains ``__file__`` — legacy behaviour for a
-       source-checkout or a directly-copied script.
+       source checkout (keep its companion modules).
     """
     explicit = os.environ.get("IDE_OTEL_HOOK_HOME", "").strip()
     if explicit:
@@ -103,6 +175,11 @@ def _resolve_hook_home() -> str:
             pass
 
     if in_site_packages:
+        if sys.platform == "win32":
+            local_data = os.environ.get("LOCALAPPDATA", "").strip() or os.path.join(
+                os.path.expanduser("~"), "AppData", "Local",
+            )
+            return os.path.join(local_data, "opentelemetry-hooks")
         xdg_data = os.environ.get("XDG_DATA_HOME", "").strip()
         if not xdg_data:
             xdg_data = os.path.join(os.path.expanduser("~"), ".local", "share")
@@ -116,6 +193,8 @@ _HOOK_DIR = _resolve_hook_home()
 
 def _venv_site_packages_path(venv_dir: str) -> str:
     """Return the site-packages path compatible with this Python runtime."""
+    if sys.platform == "win32":
+        return os.path.join(venv_dir, "Lib", "site-packages")
     version = f"python{sys.version_info.major}.{sys.version_info.minor}"
     return os.path.join(venv_dir, "lib", version, "site-packages")
 
@@ -123,7 +202,8 @@ def _venv_site_packages_path(venv_dir: str) -> str:
 def _select_bootstrap_venv_dir(hook_dir: str) -> str:
     """Reuse a compatible legacy venv or isolate bootstrap deps by Python ABI."""
     legacy = os.path.join(hook_dir, ".venv")
-    if os.path.isdir(_venv_site_packages_path(legacy)):
+    # Windows venv layouts do not encode the Python ABI; use a versioned venv.
+    if sys.platform != "win32" and os.path.isdir(_venv_site_packages_path(legacy)):
         return legacy
     suffix = f".venv-py{sys.version_info.major}.{sys.version_info.minor}"
     return os.path.join(hook_dir, suffix)
@@ -154,7 +234,7 @@ _SETUP_LOCK = os.path.join(
 
 def _auto_provision_venv() -> None:
     """Create .venv and install opentelemetry-sdk + exporter in the background if missing."""
-    venv_python = os.path.join(_VENV_DIR, "bin", "python")
+    venv_python = bootstrap.venv_python(_VENV_DIR)
     if os.path.isfile(venv_python):
         return
     lock_dir = os.path.dirname(_SETUP_LOCK)
@@ -164,19 +244,14 @@ def _auto_provision_venv() -> None:
     try:
         with open(_SETUP_LOCK, "w") as f:
             f.write(str(os.getpid()))
-        setup_script = (
-            f'{sys.executable} -m venv "{_VENV_DIR}" && '
-            f'"{_VENV_DIR}/bin/pip" install --quiet --upgrade pip && '
-            f'"{_VENV_DIR}/bin/pip" install --quiet '
-            f'opentelemetry-sdk '
-            f'opentelemetry-exporter-otlp-proto-grpc '
-            f'opentelemetry-exporter-otlp-proto-http && '
-            f'rm -f "{_SETUP_LOCK}"'
+        process_options = (
+            {"creationflags": subprocess.CREATE_NO_WINDOW}
+            if sys.platform == "win32" else {"start_new_session": True}
         )
         subprocess.Popen(
-            setup_script, shell=True,
+            [sys.executable, bootstrap.__file__, _VENV_DIR, _SETUP_LOCK],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            start_new_session=True,
+            **process_options,
         )
     except Exception:
         try:
@@ -310,57 +385,12 @@ _MDM_DOMAIN = "dev.o11y.opentelemetry-hook"  # macOS managed preferences domain
 _MDM_REGISTRY_PATH = r"SOFTWARE\Policies\OpenTelemetryHook"  # Windows registry path
 
 # Privacy patterns
-_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
-_TOKEN_RE = re.compile(r"\b[A-Za-z0-9_\-]{24,}\b")
-_HOME_RE = re.compile(r"/Users/[^/\s]+")
 _HEX_DIGITS = frozenset("0123456789abcdef")
-_TRACE_ID_RE = re.compile(r"^[0-9a-f]{32}$")
-_SPAN_ID_RE = re.compile(r"^[0-9a-f]{16}$")
 
 
 # ---------------------------------------------------------------------------
 # Event name canonicalization (all IDE variants -> PascalCase)
 # ---------------------------------------------------------------------------
-_CANONICAL_EVENT = {
-    # Cursor camelCase
-    "sessionStart": "SessionStart",
-    "sessionEnd": "SessionEnd",
-    "beforeSubmitPrompt": "UserPromptSubmit",
-    "preToolUse": "PreToolUse",
-    "postToolUse": "PostToolUse",
-    "postToolUseFailure": "PostToolUseFailure",
-    "beforeShellExecution": "BeforeShellExecution",
-    "afterShellExecution": "AfterShellExecution",
-    "beforeMCPExecution": "BeforeMCPExecution",
-    "afterMCPExecution": "AfterMCPExecution",
-    "beforeReadFile": "BeforeReadFile",
-    "afterFileEdit": "AfterFileEdit",
-    "subagentStart": "SubagentStart",
-    "subagentStop": "SubagentStop",
-    "stop": "Stop",
-    "preCompact": "PreCompact",
-    "beforeTabFileRead": "BeforeReadFile",
-    "afterTabFileEdit": "AfterFileEdit",
-    "afterAgentResponse": "AfterAgentResponse",
-    "afterAgentThought": "AfterAgentThought",
-    "workspaceOpen": "WorkspaceOpen",
-    # Copilot camelCase
-    "userPromptSubmitted": "UserPromptSubmit",
-    "errorOccurred": "ErrorOccurred",
-    "agentStop": "Stop",
-    "permissionRequest": "PermissionRequest",
-    "notification": "Notification",
-    "userPromptTransformed": "UserPromptTransformed",
-    # Gemini CLI
-    "BeforeModel": "UserPromptSubmit",
-    "AfterModel": "Stop",
-    "BeforeTool": "PreToolUse",
-    "AfterTool": "PostToolUse",
-    "BeforeAgent": "SubagentStart",
-    "AfterAgent": "SubagentStop",
-    # Codex
-    "PermissionRequest": "PermissionRequest",
-}
 
 # ---------------------------------------------------------------------------
 # Setup CLI: per-agent event lists
@@ -390,12 +420,6 @@ _CLAUDE_EVENTS = [
 # Neither belongs in an automatically installed telemetry observer.
 _CLAUDE_MATCHER_EVENTS = {"PreToolUse", "PostToolUse", "PostToolUseFailure"}
 
-_COPILOT_EVENTS = [
-    "sessionStart", "sessionEnd", "userPromptSubmitted",
-    "preToolUse", "postToolUse", "errorOccurred",
-    "postToolUseFailure", "agentStop", "subagentStart", "subagentStop",
-    "preCompact", "permissionRequest", "notification", "userPromptTransformed",
-]
 
 _GEMINI_EVENTS = [
     "SessionStart", "SessionEnd", "BeforeAgent", "AfterAgent",
@@ -416,15 +440,6 @@ _CODEX_MATCHERS = {
     "PostToolUse": "*",
 }
 
-_WINDSURF_EVENT_ALIASES = {
-    "pre_read_code": "BeforeReadFile", "post_read_code": "AfterReadFile",
-    "pre_write_code": "BeforeFileEdit", "post_write_code": "AfterFileEdit",
-    "pre_run_command": "BeforeShellExecution", "post_run_command": "AfterShellExecution",
-    "pre_mcp_tool_use": "BeforeMCPExecution", "post_mcp_tool_use": "AfterMCPExecution",
-    "pre_user_prompt": "UserPromptSubmit", "post_cascade_response": "Stop",
-    "post_cascade_response_with_transcript": "TranscriptReady",
-    "post_setup_worktree": "WorktreeReady",
-}
 # TranscriptReady is accepted, but registration would cause the harness to write
 # full conversation transcripts independently of our content-capture setting.
 _WINDSURF_EVENTS = [event for event in _WINDSURF_EVENT_ALIASES if event != "post_cascade_response_with_transcript"]
@@ -437,87 +452,6 @@ _OPENCODE_PLUGIN_FILENAME = "otel-hook.ts"
 # Claude Code's documented hook payloads are already snake_case, but generic
 # runners and workflow adapters that forward Claude- or Antigravity-style
 # events may supply camelCase fields instead.
-_INPUT_ALIASES = {
-    "sessionId": "session_id",
-    "conversationId": "conversation_id",
-    "generationId": "generation_id",
-    "transcriptPath": "transcript_path",
-    "providerName": "provider_name",
-    "requestModel": "request_model",
-    "responseModel": "response_model",
-    "modelName": "model_name",
-    "toolName": "tool_name",
-    "toolInput": "tool_input",
-    "toolOutput": "tool_output",
-    "toolType": "tool_type",
-    "toolDefinitions": "tool_definitions",
-    "toolUseId": "tool_use_id",
-    "toolId": "tool_id",
-    "mcpServerName": "mcp_server_name",
-    "mcpServer": "mcp_server",
-    "mcpTool": "mcp_tool",
-    "turnId": "turn_id",
-    "toolResponse": "tool_response",
-    "lastAssistantMessage": "last_assistant_message",
-    "stopMessage": "stop_message",
-    "errorMessage": "error_message",
-    "errorType": "error_type",
-    "errorCode": "error_code",
-    "eventId": "event_id",
-    "hookEventId": "hook_event_id",
-    "agentId": "agent_id",
-    "parentAgentId": "parent_agent_id",
-    "agentName": "agent_name",
-    "agentVersion": "agent_version",
-    "agentDescription": "agent_description",
-    "agentType": "agent_type",
-    "subagentType": "subagent_type",
-    "subagentTask": "subagent_task",
-    "delegationTask": "delegation_task",
-    "responseFormat": "response_format",
-    "outputType": "output_type",
-    "choiceCount": "choice_count",
-    "systemInstructions": "system_instructions",
-    "systemPrompt": "system_prompt",
-    "cacheCreationInputTokens": "cache_creation_input_tokens",
-    "cacheReadInputTokens": "cache_read_input_tokens",
-    "workspacePath": "workspace_path",
-    "filePath": "file_path",
-    "userId": "user_id",
-    "userEmail": "user_email",
-    "userName": "user_name",
-    "permissionMode": "permission_mode",
-    "permissionDecision": "permission_decision",
-    "approvalPolicy": "approval_policy",
-    "approvalDecision": "approval_decision",
-    "approvalRequired": "approval_required",
-    "sandboxMode": "sandbox_mode",
-    "sandboxPolicy": "sandbox_policy",
-    "sandboxEnabled": "sandbox_enabled",
-    "isSandboxed": "is_sandboxed",
-    "toolChoice": "tool_choice",
-    "toolDecision": "tool_decision",
-    "exitCode": "exit_code",
-    "durationMs": "duration_ms",
-    "loopCount": "loop_count",
-    "stopHookActive": "stop_hook_active",
-    "isInterrupt": "is_interrupt",
-    "hookEventType": "hook_event_type",
-    "clientVersion": "client_version",
-    "ideVersion": "ide_version",
-    "appVersion": "app_version",
-    "ideName": "ide_name",
-    "sourceApp": "source_app",
-    "traceId": "trace_id",
-    "spanId": "span_id",
-    "parentSpanId": "parent_span_id",
-    "nativeTraceId": "native_trace_id",
-    "nativeSpanId": "native_span_id",
-    "nativeParentSpanId": "native_parent_span_id",
-    "nativeSource": "native_source",
-    "traceFlags": "trace_flags",
-    "traceState": "tracestate",
-}
 
 # Canonical gen_ai.client.name values accepted directly from IDE_OTEL_IDE_NAME or
 # self-reported payload metadata before alias fallback.
@@ -551,7 +485,6 @@ _CLI_HOOK_EVENT: Optional[str] = None
 # Session boundary events
 _SESSION_START_EVENTS = {"SessionStart"}
 _SESSION_END_EVENTS = {"SessionEnd"}
-_GENERATION_START_EVENTS = {"UserPromptSubmit"}
 _GENERATION_END_EVENTS = {"Stop", "StopFailure", "Interrupt"}
 
 # GenAI operation mapping (canonical PascalCase)
@@ -645,7 +578,8 @@ def _load_input() -> dict:
         print("", file=sys.stderr)
         print("This hook is intended to be called by an IDE (Cursor, Copilot, Claude Code) with JSON on stdin.", file=sys.stderr)
         raise SystemExit(0)
-    raw = sys.stdin.read()
+    # Hook protocols use UTF-8 even when Windows pipes default to a legacy code page.
+    raw = sys.stdin.buffer.read().decode("utf-8-sig") if hasattr(sys.stdin, "buffer") else sys.stdin.read()
     if not raw.strip():
         return {}
     return _fast_json_loads(raw)
@@ -663,26 +597,9 @@ def _fast_json_loads(raw: str):
         return {}
 
 
-def _safe_bool(value: str) -> bool:
-    return value.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _stringify(value) -> str:
-    if isinstance(value, (dict, list)):
-        return json.dumps(value, ensure_ascii=True)
-    return str(value)
-
-
 def _set_if_present(span, attr: str, value) -> None:
     if value is not None:
         span.set_attribute(attr, value)
-
-
-def _first_present(data: dict, keys: tuple):
-    for key in keys:
-        if key in data and data[key] is not None:
-            return data[key]
-    return None
 
 
 def _first_env(keys: tuple[str, ...]) -> Optional[str]:
@@ -1311,558 +1228,6 @@ def _set_client_identity_attributes(
         span.set_attribute("gen_ai.client.agent_engine", resolved_engine)
         return resolved_engine
     return None
-
-
-def _normalize_input_data(data: dict) -> dict:
-    """Add snake_case aliases for compatible hook payloads when needed."""
-    normalized = None
-    for source_key, target_key in _INPUT_ALIASES.items():
-        if source_key in data and target_key not in data:
-            if normalized is None:
-                normalized = dict(data)
-            normalized[target_key] = data[source_key]
-    return normalized or data
-
-
-def _bound_tool_response_payload(data: dict) -> None:
-    """Keep buffered tool responses small while preserving exact size evidence."""
-    value = data.get("tool_response")
-    if value is None:
-        return
-
-    text = _stringify(value)
-    data["tool_response_length"] = len(text)
-    data["tool_response_sha256"] = _hash_text(text)
-
-    # Provider aliases are normalized before this boundary. Keeping both copies
-    # defeats the payload bound for camelCase callbacks.
-    data.pop("toolResponse", None)
-
-    max_chars = _text_max_chars()
-    if len(text) <= max_chars:
-        return
-
-    data["tool_response_truncated"] = True
-    retain_preview = _safe_bool(os.getenv("IDE_OTEL_CAPTURE_TOOL_INPUT_CONTENT", "")) or _safe_bool(
-        os.getenv("IDE_OTEL_MCP_LOG_PAYLOAD", "true")
-    )
-    if retain_preview and max_chars > 0:
-        data["tool_response"] = text[:max_chars]
-    else:
-        data.pop("tool_response", None)
-
-
-@dataclass(frozen=True, slots=True)
-class ConversationRecord:
-    """One privacy-controlled conversation fact extracted from a hook callback."""
-
-    kind: str
-    role: str
-    text: Optional[str] = None
-    length: int = 0
-    sha256: str = ""
-
-    @classmethod
-    def from_text(cls, kind: str, role: str, text: str) -> "ConversationRecord":
-        """Build a content fact without retaining raw text unless capture is enabled."""
-        return cls(
-            kind=kind,
-            role=role,
-            text=text if _conversation_content_enabled() else None,
-            length=len(text),
-            sha256=_hash_text(text),
-        )
-
-
-@dataclass(frozen=True, slots=True)
-class AgentRelationship:
-    """Provider-neutral agent/delegation identity carried by an event."""
-
-    agent_id: Optional[str] = None
-    parent_agent_id: Optional[str] = None
-    task: Optional[str] = None
-    task_length: int = 0
-    task_sha256: str = ""
-    status: Optional[str] = None
-
-
-@dataclass(frozen=True, slots=True)
-class WorkspaceIdentity:
-    """Provider-supplied workspace identity before Git enrichment."""
-
-    workspace_path: Optional[str] = None
-    cwd: Optional[str] = None
-
-
-@dataclass(frozen=True, slots=True)
-class NativeTelemetryContext:
-    """Validated trace identifiers supplied by the native agent, when present."""
-
-    source: Optional[str] = None
-    trace_id: Optional[str] = None
-    span_id: Optional[str] = None
-    parent_span_id: Optional[str] = None
-
-
-@dataclass(frozen=True, slots=True)
-class CanonicalHookEvent:
-    """Canonical event contract shared by every provider adapter."""
-
-    provider: str
-    original_event_name: str
-    event_name: str
-    event_id: str
-    event_id_source: str
-    original_tool_name: Optional[str]
-    session_id: Optional[str]
-    generation_id: Optional[str]
-    turn_id: Optional[str]
-    conversation: tuple[ConversationRecord, ...]
-    relationship: AgentRelationship
-    workspace: WorkspaceIdentity
-    native: NativeTelemetryContext
-    lifecycle_data: dict
-
-    def to_lifecycle_data(self) -> dict:
-        """Return the normalized, privacy-safe payload used by lifecycle services."""
-        return dict(self.lifecycle_data)
-
-
-class ProviderEventAdapter:
-    """Translate one provider payload into the canonical hook event model."""
-
-    provider = "unknown"
-    event_aliases: dict[str, str] = {}
-    response_fields = ("response", "last_assistant_message", "assistant_response")
-    stop_message_fields = ("stop_message",)
-    # Text facts are bounded and hash-only unless conversation capture is enabled.
-    event_text_fields = {
-        "AfterAgentResponse": ("response", "assistant", ("text",)),
-        "AfterAgentThought": ("reasoning", "assistant", ("text",)),
-        "MessageDisplay": ("response.chunk", "assistant", ("delta",)),
-        "Notification": ("notification", "system", ("message",)),
-        "UserPromptTransformed": ("prompt.transformed", "user", ("transformedPrompt", "transformed_prompt", "prompt")),
-        "UserPromptExpansion": ("prompt.expanded", "user", ("prompt", "command_args")),
-        "StopFailure": ("error", "error", ("last_assistant_message", "error_details", "error")),
-        "SubagentStop": ("response", "assistant", ("response", "last_assistant_message")),
-        "TaskCreated": ("task", "system", ("task_subject", "task_description")),
-        "TaskCompleted": ("task", "system", ("task_subject", "task_description")),
-        "PreCompact": ("compaction.instructions", "user", ("custom_instructions",)),
-        "PostCompact": ("compaction.summary", "system", ("compact_summary",)),
-    }
-
-    def canonical_event_name(self, original_event_name: str) -> str:
-        """Translate the provider callback name into the shared event vocabulary."""
-        return self.event_aliases.get(original_event_name, original_event_name)
-
-    def normalize(
-        self,
-        original_event_name: str,
-        event_name: Optional[str],
-        data: dict,
-        session_ctx: Optional[dict] = None,
-    ) -> CanonicalHookEvent:
-        event_name = event_name or self.canonical_event_name(original_event_name)
-        normalized = dict(_normalize_input_data(data))
-        self._normalize_provider_fields(event_name, normalized)
-        conversation = tuple(self._conversation_records(event_name, normalized))
-        event_id, event_id_source = self._event_identity(event_name, normalized, conversation, session_ctx)
-        normalized["_hook_event_id"] = event_id
-        normalized["_hook_event_id_source"] = event_id_source
-        normalized["_hook_original_event"] = original_event_name
-        normalized["_hook_provider_adapter"] = self.provider
-        normalized["_canonical_event_name"] = event_name
-
-        task = _first_present(normalized, ("delegation_task", "subagent_task", "task"))
-        if task is not None and not isinstance(task, str):
-            task = _stringify(task)
-        task_text = task if isinstance(task, str) else None
-        relationship = AgentRelationship(
-            agent_id=self._text_value(normalized.get("agent_id")),
-            parent_agent_id=self._text_value(normalized.get("parent_agent_id")),
-            task=task_text if task_text and _conversation_content_enabled() else None,
-            task_length=len(task_text) if task_text else 0,
-            task_sha256=_hash_text(task_text) if task_text else "",
-            status=self._text_value(normalized.get("status")),
-        )
-        workspace = WorkspaceIdentity(
-            workspace_path=self._text_value(normalized.get("workspace_path")),
-            cwd=self._text_value(normalized.get("cwd")),
-        )
-        native = NativeTelemetryContext(
-            source=self._text_value(normalized.get("native_source")) or (
-                self.provider if self._native_trace_id(normalized.get("native_trace_id")) else None
-            ),
-            trace_id=self._native_trace_id(normalized.get("native_trace_id")),
-            span_id=self._native_span_id(normalized.get("native_span_id")),
-            parent_span_id=self._native_span_id(normalized.get("native_parent_span_id")),
-        )
-        self._store_privacy_safe_conversation(event_name, normalized, conversation)
-        if not _conversation_content_enabled():
-            for source, target in _INPUT_ALIASES.items():
-                if target not in normalized:
-                    normalized.pop(source, None)
-        _bound_tool_response_payload(normalized)
-        return CanonicalHookEvent(
-            provider=self.provider,
-            original_event_name=original_event_name,
-            event_name=event_name,
-            event_id=event_id,
-            event_id_source=event_id_source,
-            original_tool_name=self._text_value(normalized.get("tool_name")),
-            session_id=_session_key(normalized),
-            generation_id=_generation_key_from_data(normalized),
-            turn_id=self._text_value(normalized.get("turn_id")),
-            conversation=conversation,
-            relationship=relationship,
-            workspace=workspace,
-            native=native,
-            lifecycle_data=normalized,
-        )
-
-    def _normalize_provider_fields(self, event_name: str, data: dict) -> None:
-        """Normalize shared encoded MCP syntax before lifecycle processing."""
-        data.update(_normalize_mcp_event_data(data, event_name, self.provider))
-
-    def _conversation_records(self, event_name: str, data: dict):
-        if event_name in self.event_text_fields:
-            kind, role, fields = self.event_text_fields[event_name]
-            text = self._first_text(data, fields)
-            if text:
-                yield ConversationRecord.from_text(kind, role, text)
-        if event_name == "UserPromptSubmit":
-            prompt = self._first_text(data, ("prompt", "user_prompt", "input"))
-            if prompt:
-                yield ConversationRecord.from_text("prompt", "user", prompt)
-        if event_name == "Stop":
-            response = self._first_text(data, self.response_fields)
-            if response:
-                yield ConversationRecord.from_text("response", "assistant", response)
-            stop_message = self._first_text(data, self.stop_message_fields)
-            if stop_message and stop_message != response:
-                yield ConversationRecord.from_text("stop_message", "system", stop_message)
-        if event_name in {"ErrorOccurred", "PostToolUseFailure"} or data.get("error") is not None:
-            error = self._first_text(data, ("error_message", "error"))
-            if error:
-                yield ConversationRecord.from_text("error", "error", error)
-        if event_name in {"SubagentStart", "SubagentStop"}:
-            task = self._first_text(data, ("delegation_task", "subagent_task", "task"))
-            if task:
-                yield ConversationRecord.from_text("delegation.task", "system", task)
-
-    def _store_privacy_safe_conversation(
-        self,
-        event_name: str,
-        data: dict,
-        conversation: tuple[ConversationRecord, ...],
-    ) -> None:
-        if conversation:
-            capture = _conversation_content_enabled()
-            data["_conversation_records"] = [
-                {
-                    "kind": record.kind,
-                    "role": record.role,
-                    "length": record.length,
-                    "sha256": record.sha256,
-                    **({"text": record.text} if capture and record.text is not None else {}),
-                }
-                for record in conversation
-            ]
-        if _conversation_content_enabled():
-            return
-
-        if event_name in self.event_text_fields:
-            for key in self.event_text_fields[event_name][2]:
-                data.pop(key, None)
-        if event_name == "Notification":
-            data.pop("details", None)
-        if event_name in {"Elicitation", "ElicitationResult"}:
-            for key in ("message", "requested_schema", "requestedSchema", "content"):
-                data.pop(key, None)
-
-        if event_name == "UserPromptSubmit":
-            for key in ("prompt", "user_prompt", "input"):
-                data.pop(key, None)
-        if event_name == "Stop":
-            for key in (*self.response_fields, *self.stop_message_fields):
-                data.pop(key, None)
-        if event_name in {"ErrorOccurred", "PostToolUseFailure", "AfterMCPExecution"} or data.get("error") is not None:
-            error = data.get("error")
-            if isinstance(error, dict):
-                data.setdefault("error_type", _first_present(error, ("type", "error_type", "name")))
-                data.setdefault("error_code", _first_present(error, ("code", "error_code")))
-            error_record = next((item for item in conversation if item.kind == "error"), None)
-            if error_record:
-                data["error_length"] = error_record.length
-                data["error_sha256"] = error_record.sha256
-                data.setdefault("status", "error")
-            data.pop("error", None)
-            data.pop("error_message", None)
-        if event_name in {"SubagentStart", "SubagentStop"}:
-            task_record = next((item for item in conversation if item.kind == "delegation.task"), None)
-            if task_record:
-                data["delegation_task_length"] = task_record.length
-                data["delegation_task_sha256"] = task_record.sha256
-            for key in ("delegation_task", "subagent_task", "task"):
-                data.pop(key, None)
-
-    def _event_identity(
-        self,
-        event_name: str,
-        data: dict,
-        conversation: tuple[ConversationRecord, ...],
-        session_ctx: Optional[dict],
-    ) -> tuple[str, str]:
-        provided = _first_present(data, ("event_id", "hook_event_id", "callback_id"))
-        if provided is not None and str(provided).strip():
-            return str(provided).strip(), "provider"
-        task = _first_present(data, ("delegation_task", "subagent_task", "task"))
-        error = _first_present(data, ("error_message", "error"))
-        payload = {
-            "provider": self.provider,
-            "event": event_name,
-            "session": _session_key(data),
-            "generation": _generation_key_from_data(data) or (
-                None if event_name in _GENERATION_START_EVENTS else (session_ctx or {}).get("current_generation")
-            ),
-            "turn": data.get("turn_id"),
-            "tool_use_id": data.get("tool_use_id"),
-            "tool_name": data.get("tool_name"),
-            "agent_id": data.get("agent_id"),
-            "agent_type": _first_present(data, ("subagent_type", "agent_type", "agent_name")),
-            "task_sha256": _hash_text(_stringify(task)) if task is not None else None,
-            "error_sha256": _hash_text(_stringify(error)) if error is not None else None,
-            "status": data.get("status"),
-            "timestamp": _first_present(data, ("timestamp_ns", "timestamp", "event_time")),
-            "conversation": [(item.kind, item.sha256) for item in conversation],
-        }
-        digest = hashlib.sha256(
-            json.dumps(payload, ensure_ascii=True, sort_keys=True, default=str).encode("utf-8")
-        ).hexdigest()
-        return f"hook:{digest}", "hook"
-
-    @staticmethod
-    def _first_text(data: dict, keys: tuple[str, ...]) -> Optional[str]:
-        value = _first_present(data, keys)
-        if value is None:
-            return None
-        return value if isinstance(value, str) else _stringify(value)
-
-    @staticmethod
-    def _text_value(value) -> Optional[str]:
-        if not isinstance(value, str) or not value.strip():
-            return None
-        return value.strip()
-
-    @staticmethod
-    def _native_trace_id(value) -> Optional[str]:
-        value = str(value).strip().lower() if value is not None else ""
-        return value if _TRACE_ID_RE.fullmatch(value) and int(value, 16) else None
-
-    @staticmethod
-    def _native_span_id(value) -> Optional[str]:
-        value = str(value).strip().lower() if value is not None else ""
-        return value if _SPAN_ID_RE.fullmatch(value) and int(value, 16) else None
-
-
-class CursorEventAdapter(ProviderEventAdapter):
-    provider = "cursor"
-    event_aliases = {
-        key: value
-        for key, value in _CANONICAL_EVENT.items()
-        if key[:1].islower() and key not in {"userPromptSubmitted", "errorOccurred"}
-    }
-
-
-class WindsurfEventAdapter(ProviderEventAdapter):
-    provider = "windsurf"
-    # Keep accepting legacy compatible-runner payloads, but install native names.
-    event_aliases = {**CursorEventAdapter.event_aliases, **_WINDSURF_EVENT_ALIASES}
-
-    def _normalize_provider_fields(self, event_name: str, data: dict) -> None:
-        for source, target in (("trajectory_id", "session_id"), ("execution_id", "generation_id")):
-            if data.get(source):
-                data.setdefault(target, data[source])
-        info = data.pop("tool_info", None)
-        if isinstance(info, dict):
-            fields = {
-                "file_path": "file_path", "command_line": "command", "cwd": "cwd",
-                "mcp_server_name": "mcp_server_name", "mcp_tool_name": "tool_name",
-                "mcp_tool_arguments": "tool_input", "mcp_result": "tool_response", "user_prompt": "prompt",
-                "response": "response", "transcript_path": "transcript_path",
-                "worktree_path": "workspace_path", "root_workspace_path": "root_workspace_path",
-            }
-            for source, target in fields.items():
-                if source in info:
-                    data.setdefault(target, info[source])
-        super()._normalize_provider_fields(event_name, data)
-
-
-class ClaudeEventAdapter(ProviderEventAdapter):
-    provider = "claude"
-    response_fields = ("last_assistant_message", "response", "assistant_response")
-
-    def _normalize_provider_fields(self, event_name: str, data: dict) -> None:
-        if event_name == "PostToolBatch":
-            # Batch results duplicate individual tool callbacks. Retain only
-            # identity and content facts unless tool-content capture is enabled.
-            calls = []
-            capture = _safe_bool(os.getenv("IDE_OTEL_CAPTURE_TOOL_INPUT_CONTENT", ""))
-            for call in data.get("tool_calls") or []:
-                if not isinstance(call, dict):
-                    continue
-                safe_call = {key: call[key] for key in ("tool_name", "tool_use_id") if key in call}
-                for key in ("tool_input", "tool_response"):
-                    if key not in call:
-                        continue
-                    text = _stringify(call[key])
-                    safe_call[f"{key}_length"] = len(text)
-                    safe_call[f"{key}_sha256"] = _hash_text(text)
-                    if capture:
-                        if _safe_bool(os.getenv("IDE_OTEL_MASK_PROMPTS", "")):
-                            text = _mask_text(text)
-                        safe_call[key] = text[:_text_max_chars()]
-                calls.append(safe_call)
-            data["tool_calls"] = calls
-        if event_name == "StopFailure":
-            data.setdefault("error_type", data.get("error"))
-            data.setdefault("status", "error")
-        super()._normalize_provider_fields(event_name, data)
-
-
-class CodexEventAdapter(ProviderEventAdapter):
-    provider = "codex"
-
-    def _normalize_provider_fields(self, event_name: str, data: dict) -> None:
-        if event_name == "Interrupt":
-            data["is_interrupt"] = True
-            data.setdefault("status", "interrupted")
-        super()._normalize_provider_fields(event_name, data)
-
-
-class GeminiEventAdapter(ProviderEventAdapter):
-    provider = "gemini"
-    event_aliases = {
-        "BeforeAgent": "UserPromptSubmit", "AfterAgent": "Stop",
-        "BeforeTool": "PreToolUse", "AfterTool": "PostToolUse",
-        "PreCompress": "PreCompact",
-    }
-    response_fields = ("prompt_response", "response", "output", "last_assistant_message")
-
-    def _normalize_provider_fields(self, event_name: str, data: dict) -> None:
-        # Model hooks can fire many times per turn (AfterModel even per chunk).
-        # Preserve their identities without opening/closing generations or
-        # persisting nested model messages outside the content privacy contract.
-        request = data.pop("llm_request", None)
-        if isinstance(request, dict) and request.get("model"):
-            data.setdefault("request_model", request["model"])
-        data.pop("llm_response", None)
-        if event_name == "Stop":
-            data.pop("prompt", None)  # repeated original request, already captured at BeforeAgent
-        if event_name == "PostToolUse" and isinstance(data.get("tool_response"), dict):
-            if data["tool_response"].get("error"):
-                data.setdefault("error", data["tool_response"]["error"])
-                data.setdefault("status", "error")
-        super()._normalize_provider_fields(event_name, data)
-
-
-class AntigravityEventAdapter(ProviderEventAdapter):
-    provider = "antigravity"
-    # The compatibility runner has its own historic event contract.
-    event_aliases = {
-        key: value for key, value in _CANONICAL_EVENT.items() if key.startswith(("Before", "After"))
-    }
-    response_fields = ("response", "output", "last_assistant_message")
-
-
-class CopilotEventAdapter(ProviderEventAdapter):
-    provider = "copilot"
-    event_aliases = {
-        key: _CANONICAL_EVENT[key]
-        for key in _COPILOT_EVENTS
-    }
-
-    def _normalize_provider_fields(self, event_name: str, data: dict) -> None:
-        if "toolArgs" in data:
-            args = data.pop("toolArgs")
-            if isinstance(args, str):
-                try:
-                    args = json.loads(args)
-                except (ValueError, TypeError):
-                    pass
-            data.setdefault("tool_input", args)
-        result = data.pop("toolResult", data.pop("tool_result", None))
-        if isinstance(result, dict):
-            data.setdefault("tool_output", result.get("textResultForLlm", result.get("text_result_for_llm")))
-        super()._normalize_provider_fields(event_name, data)
-
-
-class OpenCodeEventAdapter(ProviderEventAdapter):
-    provider = "opencode"
-
-
-_DEFAULT_EVENT_ADAPTER = ProviderEventAdapter()
-_PROVIDER_EVENT_ADAPTERS = {
-    "cursor": CursorEventAdapter(),
-    "windsurf": WindsurfEventAdapter(),
-    "claude": ClaudeEventAdapter(),
-    "codex": CodexEventAdapter(),
-    "gemini": GeminiEventAdapter(),
-    "antigravity": AntigravityEventAdapter(),
-    "copilot": CopilotEventAdapter(),
-    "opencode": OpenCodeEventAdapter(),
-}
-
-
-def _event_adapter_for(ide: str) -> ProviderEventAdapter:
-    return _PROVIDER_EVENT_ADAPTERS.get(ide, _DEFAULT_EVENT_ADAPTER)
-
-
-def _parse_encoded_mcp_tool_name(tool_name: object) -> Optional[Tuple[str, str]]:
-    """Parse ``mcp__<server>__<tool>`` while preserving ``__`` inside the tool."""
-    if not isinstance(tool_name, str) or not tool_name.startswith("mcp__"):
-        return None
-    parts = tool_name.split("__", 2)
-    if len(parts) != 3 or not parts[1] or not parts[2]:
-        return None
-    return parts[1], parts[2]
-
-
-def _normalize_mcp_event_data(data: dict, event_name: str, ide: Optional[str] = None) -> dict:
-    """Add a provider-neutral MCP identity without changing the original tool name."""
-    tool_name = data.get("tool_name")
-    parsed = _parse_encoded_mcp_tool_name(tool_name)
-    server = _first_present(data, ("mcp_server_name", "mcp_server"))
-    tool = data.get("mcp_tool")
-
-    if parsed:
-        server = server or parsed[0]
-        tool = tool or parsed[1]
-    elif ide == "cursor" and isinstance(tool_name, str) and tool_name.startswith("MCP:"):
-        tool = tool or tool_name.removeprefix("MCP:")
-    elif event_name in _MCP_EVENTS:
-        tool = tool or tool_name
-
-    # ``command`` is a legacy fallback for dedicated MCP events.  A real
-    # server field always wins, so executable paths never overwrite it.
-    if not server and event_name in _MCP_EVENTS:
-        server = data.get("command")
-
-    updates = {}
-    if server and data.get("mcp_server") != server:
-        updates["mcp_server"] = server
-    if tool and data.get("mcp_tool") != tool:
-        updates["mcp_tool"] = tool
-    if ide == "cursor" and event_name == "AfterMCPExecution" and data.get("duration_ms") is None:
-        # Cursor's hook wire contract reports duration in milliseconds.
-        duration = data.get("duration")
-        if isinstance(duration, (int, float)) and not isinstance(duration, bool):
-            updates["duration_ms"] = float(duration)
-    if not updates:
-        return data
-    normalized = dict(data)
-    normalized.update(updates)
-    return normalized
 
 
 def _mcp_identity(data: dict) -> Tuple[Optional[str], Optional[str]]:
@@ -2934,29 +2299,6 @@ def _init_tracing(
 # ---------------------------------------------------------------------------
 # Privacy
 # ---------------------------------------------------------------------------
-def _hash_text(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-
-def _mask_text(text: str) -> str:
-    text = _EMAIL_RE.sub("[REDACTED_EMAIL]", text)
-    text = _TOKEN_RE.sub("[REDACTED_TOKEN]", text)
-    text = _HOME_RE.sub("/Users/[REDACTED]", text)
-    return text
-
-
-def _conversation_content_enabled() -> bool:
-    """Return whether raw conversation/delegation content was explicitly enabled."""
-    return _safe_bool(os.getenv("IDE_OTEL_CAPTURE_CONVERSATION_CONTENT", "")) or _safe_bool(
-        os.getenv("IDE_OTEL_CAPTURE_TEXT", "")
-    )
-
-
-def _text_max_chars() -> int:
-    try:
-        return max(0, int(os.getenv("IDE_OTEL_TEXT_MAX_CHARS", "4000")))
-    except (TypeError, ValueError):
-        return 4000
 
 
 def _attach_content_fact(span, label: str, text: str, *, capture: bool) -> None:
@@ -3042,7 +2384,6 @@ def _maybe_attach_text(span, label: str, text: str) -> None:
 # ---------------------------------------------------------------------------
 # OTel Log emission (MCP, shell, tool events)
 # ---------------------------------------------------------------------------
-_MCP_EVENTS = {"BeforeMCPExecution", "AfterMCPExecution"}
 _SHELL_EVENTS = {"BeforeShellExecution", "AfterShellExecution"}
 _TOOL_EVENTS = {"PreToolUse", "PostToolUse", "PostToolUseFailure", "PermissionRequest"}
 
@@ -3368,6 +2709,10 @@ def _detect_ide_from_process_tree() -> Optional[str]:
     reuse concern.  The walk costs ~10 ms (5–8 ps calls), negligible
     compared to Python startup.
     """
+    # Managed registrations identify their source explicitly. Windows has no ps;
+    # unmanaged hooks continue through the environment and payload fallbacks.
+    if sys.platform == "win32":
+        return None
     try:
         import subprocess as _sp
         pid = os.getpid()
@@ -3468,23 +2813,6 @@ def _get_event_name(data: dict) -> str:
 def _normalize_event(event_name: str) -> str:
     """Normalize event name to canonical PascalCase."""
     return _CANONICAL_EVENT.get(event_name, event_name)
-
-
-def _session_key(data: dict) -> Optional[str]:
-    """Extract session key: conversation_id (Cursor) or session_id (Copilot)."""
-    for key in ("session_id", "conversation_id"):
-        val = data.get(key)
-        if isinstance(val, str) and val.strip():
-            return val.strip()
-    return None
-
-
-def _generation_key_from_data(data: dict) -> Optional[str]:
-    """Extract generation key from Cursor-specific fields."""
-    val = data.get("generation_id")
-    if isinstance(val, str) and val.strip():
-        return val.strip()
-    return None
 
 
 # ---------------------------------------------------------------------------
@@ -5368,9 +4696,8 @@ def main() -> int:
     initial_session_key = _session_key(data)
     initial_session_ctx = _load_session_context(initial_session_key)
     adapter = _event_adapter_for(ide)
-    canonical_event = adapter.normalize(
+    canonical_event = adapter.parse(
         raw_event,
-        None,
         data,
         session_ctx=initial_session_ctx,
     )
@@ -5585,12 +4912,27 @@ def _resolve_hook_cmd() -> str:
 
 
 def _hook_cmd_for_agent(agent: str) -> str:
-    return f"{_resolve_hook_cmd()} --{agent}"
+    executable = _resolve_hook_cmd()
+    if sys.platform == "win32":
+        if agent == "copilot":
+            executable = "& '" + executable.replace("'", "''") + "'"
+        else:
+            executable = f'"{executable}"'
+    else:
+        executable = shlex.quote(executable)
+    return f"{executable} --{agent}"
+
+
+def _is_copilot_hook(hook: dict) -> bool:
+    return any(
+        marker in hook.get(shell, "")
+        for shell in ("bash", "powershell") for marker in ("otel-hook", "otel_hook")
+    )
 
 
 def _load_json_file(path: str) -> dict:
     if os.path.exists(path):
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             try:
                 return json.load(f)
             except json.JSONDecodeError as exc:
@@ -5600,7 +4942,7 @@ def _load_json_file(path: str) -> dict:
 
 def _write_json_file(path: str, data: dict) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
         f.write("\n")
 
@@ -5610,7 +4952,7 @@ def _ensure_toml_bool(path: str, section: str, key: str, value: bool) -> None:
     desired = "true" if value else "false"
     os.makedirs(os.path.dirname(path), exist_ok=True)
     if os.path.exists(path):
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             lines = f.readlines()
     else:
         lines = []
@@ -5645,7 +4987,7 @@ def _ensure_toml_bool(path: str, section: str, key: str, value: bool) -> None:
         else:
             lines.insert(section_end, new_line)
 
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         f.writelines(lines)
 
 
@@ -5653,7 +4995,7 @@ def _remove_toml_key(path: str, section: str, key: str) -> None:
     """Remove a key from a simple TOML section while preserving unrelated text."""
     if not os.path.exists(path):
         return
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         lines = f.readlines()
 
     section_header = f"[{section}]"
@@ -5685,7 +5027,7 @@ def _remove_toml_key(path: str, section: str, key: str) -> None:
     if not removed:
         return
 
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         f.writelines(new_lines)
 
 
@@ -5752,10 +5094,25 @@ def _find_opencode_plugin_source() -> Optional[str]:
 
 def _configure_managed_hook_command(hook: dict, source: str) -> bool:
     """Stamp a setup-managed hook command with the source-agent CLI flag."""
-    desired_cmd = _hook_cmd_for_agent(source)
+    exec_form = sys.platform == "win32" and source == "claude"
+    desired_cmd = _resolve_hook_cmd() if exec_form else _hook_cmd_for_agent(source)
     changed = False
     if hook.get("command") != desired_cmd:
         hook["command"] = desired_cmd
+        changed = True
+    if exec_form:
+        if hook.get("args") != ["--claude"]:
+            hook["args"] = ["--claude"]
+            changed = True
+        if "shell" in hook:
+            del hook["shell"]
+            changed = True
+    elif source == "claude" and "args" in hook:
+        # Converting a managed Windows exec registration back to shell form.
+        del hook["args"]
+        changed = True
+    if source == "codex" and sys.platform == "win32" and hook.get("commandWindows") != desired_cmd:
+        hook["commandWindows"] = desired_cmd
         changed = True
     env = hook.get("env")
     if isinstance(env, dict):
@@ -5889,6 +5246,7 @@ def setup_claude(global_: bool = True, cwd: str = ".") -> None:
 def setup_copilot(cwd: str = ".", global_: bool = False) -> None:
     """Register otel-hook in GitHub Copilot's otel-hooks.json."""
     hook_cmd = _hook_cmd_for_agent("copilot")
+    command_key = "powershell" if sys.platform == "win32" else "bash"
     repo = _find_repo_root(cwd)
     hooks_path = os.path.join(repo, ".github", "hooks", "otel-hooks.json")
     if global_:
@@ -5904,16 +5262,16 @@ def setup_copilot(cwd: str = ".", global_: bool = False) -> None:
         # Native Copilot callbacks do not carry hook_event_name.
         event_cmd = f"{hook_cmd} --event {event}"
         event_hooks = hooks.setdefault(event, [])
-        plain = [h for h in event_hooks if "otel-hook" in h.get("bash", "") or "otel_hook" in h.get("bash", "")]
+        plain = [h for h in event_hooks if _is_copilot_hook(h)]
         if plain:
-            changed = any("timeoutSec" not in h or h.get("bash") != event_cmd for h in plain)
+            changed = any("timeoutSec" not in h or h.get(command_key) != event_cmd for h in plain)
             for h in plain:
-                h["bash"] = event_cmd
+                h[command_key] = event_cmd
                 h.setdefault("timeoutSec", 30)
             (updated if changed else skipped).append(event)
             continue
 
-        event_hooks.append({"type": "command", "bash": event_cmd, "timeoutSec": 30})
+        event_hooks.append({"type": "command", command_key: event_cmd, "timeoutSec": 30})
         added.append(event)
 
     _write_json_file(hooks_path, doc)
@@ -6065,9 +5423,9 @@ def setup_opencode(global_: bool = True, cwd: str = ".") -> None:
 
     # Check if already installed and identical
     if os.path.isfile(dest):
-        with open(src) as f:
+        with open(src, encoding="utf-8") as f:
             src_content = f.read()
-        with open(dest) as f:
+        with open(dest, encoding="utf-8") as f:
             dest_content = f.read()
         if src_content == dest_content:
             click.echo(f"  · [opencode] Already up to date ({dest})")
@@ -6430,7 +5788,7 @@ def diagnose_cmd(agents: tuple, global_: bool, cwd: str) -> None:
                 if "otel-hook" in entry.get("command", "") or "otel_hook" in entry.get("command", ""):
                     count += 1
                 # copilot: {"bash": "otel-hook"}
-                if "otel-hook" in entry.get("bash", "") or "otel_hook" in entry.get("bash", ""):
+                if _is_copilot_hook(entry):
                     count += 1
                 # claude/gemini: {"hooks": [{"command": "otel-hook"}]}
                 for h in entry.get("hooks", []):
@@ -6503,13 +5861,13 @@ def uninstall_cmd(agents: tuple, global_: bool, cwd: str) -> None:
             click.echo(f"  {'✓' if removed else '·'} [claude] Removed {removed} entries ({path})")
 
         elif agent == "copilot":
-            path = os.path.join(_find_repo_root(cwd), ".github", "hooks", "otel-hooks.json")
+            path = _agent_config_paths(global_, cwd)["copilot"]
             doc = _load_json_file(path)
             hooks = doc.get("hooks", {})
             removed = 0
             for event in list(hooks.keys()):
                 before = len(hooks[event])
-                hooks[event] = [h for h in hooks[event] if "otel-hook" not in h.get("bash", "") and "otel_hook" not in h.get("bash", "")]
+                hooks[event] = [h for h in hooks[event] if not _is_copilot_hook(h)]
                 removed += before - len(hooks[event])
                 if not hooks[event]:
                     del hooks[event]

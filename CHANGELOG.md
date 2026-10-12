@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- SDK-independent parser package with a shared `BaseParser`, typed canonical events, a provider registry and separate provider modules. Existing adapter imports remain compatible.
+- Native Windows installed-wheel CI covering parser contracts, UTF-8 input, local session capture and PowerShell/cmd command execution.
+
+### Fixed
+- Use Windows application-data and virtual-environment paths, argv-based dependency bootstrapping, quoted executable paths, Claude exec-form hooks and Copilot PowerShell registrations.
+- Recognize both Copilot shell fields during setup, diagnosis and removal, including user-level removal; mask Windows usernames when text masking is enabled.
+
 ## 0.15.0 (2026-10-12)
 
 ### Added

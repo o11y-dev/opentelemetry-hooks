@@ -125,6 +125,36 @@ pipx install opentelemetry_hooks-*.whl
 
 Once installed, run `otel-hook setup` to wire your agents.
 
+### Native Windows
+
+Use Python 3.12+ and the Python CLI; `setup.sh` is for macOS/Linux. From PowerShell:
+
+```powershell
+py -3.12 -m pip install --user pipx
+py -3.12 -m pipx ensurepath
+# Open a new terminal after ensurepath.
+py -3.12 -m pipx install opentelemetry-hooks
+otel-hook setup --agent claude --agent codex --agent copilot
+otel-hook doctor
+```
+
+Installed Windows packages keep configuration and state under
+`%LOCALAPPDATA%\opentelemetry-hooks` (fallback: `~\AppData\Local\opentelemetry-hooks`).
+`IDE_OTEL_HOOK_HOME` overrides this location. Source checkouts continue to use the
+checkout directory. Existing macOS/Linux state locations are unchanged.
+
+Setup uses Claude's [exec-form command and arguments](https://code.claude.com/docs/en/hooks#command-hook-fields),
+Copilot's [PowerShell command field](https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/use-hooks),
+and Codex's [Windows command override](https://learn.chatgpt.com/docs/hooks).
+Codex commands target its default Windows shell, `cmd.exe`; custom hook shells
+need matching command syntax. Restart the harness after installation so it sees
+the updated PATH. Rerun setup on Windows to update existing registrations.
+
+Windows CI checks the installed wheel, provider contracts, local session capture,
+UTF-8 input, and command execution in PowerShell and `cmd.exe`. It does not run
+live sessions inside every vendor's harness. Source flags and payloads identify
+the harness on Windows; the Unix process-tree inference fallback is unavailable.
+
 ## Quick Start
 
 ### One-Command Setup (pip/pipx install)
@@ -719,6 +749,21 @@ Requires the [Datadog Agent](https://docs.datadoghq.com/opentelemetry/) with OTL
 
 ## Hook fact contract and provider adapters
 
+Parsing lives in `otel_hooks/parsers/`, separate from SDK initialization, session
+state and export in `otel_hook.py`. `BaseParser` handles shared normalization,
+privacy and event identity; each provider module overrides only its own payload
+rules. `get_parser(provider).parse(event_name, payload, session_ctx=None)` returns
+a typed `CanonicalHookEvent` without starting telemetry or writing state.
+The previous `ProviderEventAdapter` and provider-class imports from `otel_hook`
+remain available; existing event schemas and configuration keys are unchanged.
+
+This separation follows the parser/model boundary used by
+[Uber ADR Sensor](https://github.com/uber/ADR/tree/main/Sensor), adapted to hook
+callbacks. It does not implement Sensor's transcript readers or `AgentEvent`
+export schema. Add a provider by subclassing `BaseParser`, registering it in
+`otel_hooks/parsers/__init__.py`, and adding sanitized contract fixtures and
+registration tests. Keep lifecycle and exporter behavior out of parser modules.
+
 - Provider-specific payload interpretation lives behind Cursor, Windsurf, Claude, Codex, Gemini/Antigravity, Copilot, and OpenCode adapters. Every adapter produces the same typed canonical event, privacy-safe conversation/relationship facts, workspace identity, and explicit native context before lifecycle services receive a normalized dictionary.
 - Spans are the authoritative/default signal. Prompt, assistant-response, stop-message, error, and delegation facts emit length plus SHA-256 metadata by default. Raw content requires `IDE_OTEL_CAPTURE_CONVERSATION_CONTENT=true` or the legacy `IDE_OTEL_CAPTURE_TEXT=true`; masking and truncation still apply.
 - Optional conversation logs are disabled by default. `IDE_OTEL_ENABLE_CONVERSATION_LOGS=true` mirrors the normalized span facts as trace-correlated structured logs using the same hook event ID.
@@ -882,7 +927,11 @@ The hook still detects the outer wrapper harness/process, but the emitted canoni
 └── hooks/
     └── opentelemetry-hook/
         ├── setup.sh                            # One-command setup (creates/merges hooks.json)
-        ├── otel_hook.py                        # Main hook implementation (exposed as `otel-hook` when installed)
+        ├── otel_hook.py                        # CLI, lifecycle, state and OpenTelemetry export
+        ├── otel_hooks/                         # Ship with the runtime; do not copy otel_hook.py alone
+        │   ├── parsers/                        # Base parser, models, registry and provider modules
+        │   └── bootstrap.py                    # Cross-platform source-checkout dependency setup
+        ├── enrichment_connectors.py            # Memory enrichment
         ├── otel_config.json                    # Your config (gitignored, auto-created)
         ├── otel_config.example.json            # Config template
         ├── README.md                           # This file

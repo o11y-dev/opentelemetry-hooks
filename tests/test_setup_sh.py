@@ -29,6 +29,7 @@ def _make_hook_dir(tmp_root: str) -> str:
     # Copy the files that setup.sh needs to find next to itself.
     shutil.copy(SETUP_SH, os.path.join(hook_dir, "setup.sh"))
     shutil.copy(OTEL_HOOK_PY, os.path.join(hook_dir, "otel_hook.py"))
+    shutil.copytree(os.path.join(REPO_ROOT, "otel_hooks"), os.path.join(hook_dir, "otel_hooks"))
     shutil.copy(OTEL_CONFIG_EXAMPLE, os.path.join(hook_dir, "otel_config.example.json"))
     # Copy the OpenCode plugin source so --opencode tests can find it.
     if os.path.exists(PLUGIN_SRC):

@@ -41,6 +41,9 @@ otel-hook = "otel_hook:cli"
 [tool.setuptools]
 py-modules = ["otel_hook", "enrichment_connectors"]
 
+[tool.setuptools.packages.find]
+include = ["otel_hooks*"]
+
 [tool.setuptools.data-files]
 "share/opentelemetry-hooks" = ["otel_config.example.json"]
 "share/opentelemetry-hooks/plugin" = ["plugin/opencode.ts"]
