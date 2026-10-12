@@ -4,7 +4,7 @@ Verifies that setup.sh prefers the system-installed otel-hook command when it
 is available on PATH, and falls back to the local script otherwise.
 
 Also verifies that --global is scoped to only the explicitly selected IDEs,
-and that --reinstall calls `pipx install --force .` before registering hooks.
+and that --reinstall uses the selected installer (pipx by default) before registering hooks.
 """
 
 import json
@@ -13,6 +13,8 @@ import shutil
 import shlex
 import subprocess
 from typing import Dict, List, Optional
+
+import pytest
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SETUP_SH = os.path.join(REPO_ROOT, "setup.sh")
@@ -481,7 +483,33 @@ class TestSetupShIdeDetectionConfig:
 
 
 class TestSetupShReinstall:
-    """--reinstall must call `pipx install --force .` before registering hooks."""
+    """Reinstall through the selected installer before registering hooks."""
+
+    @pytest.mark.parametrize("exit_code", [0, 7])
+    def test_reinstall_with_uv_respects_selection_and_failure(self, tmp_path, exit_code):
+        hook_dir = _make_hook_dir(str(tmp_path))
+        fake_bin = tmp_path / "fakebin"
+        fake_bin.mkdir()
+        log = tmp_path / "uv-args.txt"
+        uv = fake_bin / "uv"
+        uv.write_text(f'#!/bin/sh\nprintf "%s\\n" "$@" > {shlex.quote(str(log))}\nexit {exit_code}\n')
+        uv.chmod(0o755)
+        pipx = fake_bin / "pipx"
+        pipx.write_text('#!/bin/sh\necho "wrong installer" >&2\nexit 99\n')
+        pipx.chmod(0o755)
+        env = self._minimal_env(tmp_path)
+        env["PATH"] = f'{fake_bin}:{env["PATH"]}'
+        result = _run_setup(hook_dir, args=["--cursor", "--reinstall", "--installer", "uv"], env=env)
+        assert result.returncode == exit_code, result.stderr
+        assert log.read_text().splitlines() == ["tool", "install", "--reinstall", hook_dir]
+        assert (tmp_path / ".cursor" / "hooks.json").exists() is (exit_code == 0)
+
+    @pytest.mark.parametrize("args", [["--installer"], ["--installer", "unknown"]])
+    def test_invalid_installer_is_rejected(self, tmp_path, args):
+        hook_dir = _make_hook_dir(str(tmp_path))
+        result = _run_setup(hook_dir, args=args, env=self._minimal_env(tmp_path))
+        assert result.returncode == 1
+        assert "--installer requires uv or pipx" in result.stdout
 
     def _minimal_env(self, tmp_path) -> dict:
         """Return an env dict with HOME set to tmp_path and a minimal PATH."""

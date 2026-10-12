@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Added
+- Document uv tool installation and upgrades, and support `setup.sh --reinstall --installer uv` while retaining the pipx default.
 - SDK-independent parser package with a shared `BaseParser`, typed canonical events, a provider registry and separate provider modules. Existing adapter imports remain compatible.
 - Native Windows installed-wheel CI covering parser contracts, UTF-8 input, local session capture and PowerShell/cmd command execution.
 

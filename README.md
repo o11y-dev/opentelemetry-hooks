@@ -104,7 +104,10 @@ The expanded hooks replace some incorrect behavior: Windsurf now registers nativ
 ## Installation
 
 ```bash
-# Recommended: pipx keeps otel-hook on PATH in an isolated venv
+# uv: install the command in an isolated tool environment
+uv tool install --python 3.12 opentelemetry-hooks
+
+# Or with pipx
 pipx install opentelemetry-hooks
 
 # Or with pip
@@ -125,9 +128,26 @@ pipx install opentelemetry_hooks-*.whl
 
 Once installed, run `otel-hook setup` to wire your agents.
 
+With uv, run `uv tool update-shell` if `otel-hook` is not on PATH, then open a new
+terminal. Upgrade with `uv tool upgrade opentelemetry-hooks`, or install a checkout
+with `uv tool install --python 3.12 --reinstall .`. Use the same installer for
+subsequent updates. See [uv's tool guide](https://docs.astral.sh/uv/guides/tools/).
+
 ### Native Windows
 
 Use Python 3.12+ and the Python CLI; `setup.sh` is for macOS/Linux. From PowerShell:
+
+If uv is installed:
+
+```powershell
+uv tool install --python 3.12 opentelemetry-hooks
+uv tool update-shell
+# Open a new terminal, then register the hooks.
+otel-hook setup --agent claude --agent codex --agent copilot
+otel-hook doctor
+```
+
+Alternatively, with pipx:
 
 ```powershell
 py -3.12 -m pip install --user pipx
@@ -157,7 +177,7 @@ the harness on Windows; the Unix process-tree inference fallback is unavailable.
 
 ## Quick Start
 
-### One-Command Setup (pip/pipx install)
+### One-Command Setup (uv/pipx/pip install)
 
 After installing the package, configure your agents with the built-in CLI:
 
@@ -220,13 +240,20 @@ bash setup.sh --claude --global
 bash setup.sh --gemini --global
 bash setup.sh --copilot       # repository-scoped
 bash setup.sh --opencode --global
+
+# Reinstall this checkout with uv before registering hooks
+bash setup.sh --cursor --global --reinstall --installer uv
+# --reinstall defaults to pipx when --installer is omitted.
 ```
 
-Then edit your endpoint config and restart the configured agent:
+For direct source execution, edit the local endpoint config and restart the agent:
 
 ```bash
 vim otel_config.json
 ```
+
+If you installed the package with `--reinstall`, use the installed-package path
+under [Configuration](#configuration) instead.
 
 ### Clone Into an Existing Project
 
@@ -292,7 +319,7 @@ mkdir -p .github/hooks
 cp examples/copilot-hooks.example.json .github/hooks/otel-hooks.json
 ```
 
-Then replace `{{SCRIPT_PATH}}` with the hook command. For a copied-source checkout the default is `python3 .cursor/hooks/opentelemetry-hook/otel_hook.py`; use `otel-hook` only when the package is installed via pipx or pip.
+Then replace `{{SCRIPT_PATH}}` with the hook command. For a copied-source checkout the default is `python3 .cursor/hooks/opentelemetry-hook/otel_hook.py`; use `otel-hook` only when the package is installed via uv, pipx or pip.
 See [GitHub Copilot hooks docs](https://docs.github.com/en/copilot/concepts/agents/coding-agent/about-hooks).
 
 #### Claude Code
@@ -441,7 +468,7 @@ To make this hook automatically available to the GitHub Copilot coding agent acr
 
 ### Configuration
 
-Edit the hook config file. For pip/pipx installs this lives at `~/.local/share/opentelemetry-hooks/otel_config.json` unless `IDE_OTEL_HOOK_HOME` is set. For a source checkout or copied-source install, edit the local `otel_config.json` next to `otel_hook.py`.
+Edit the hook config file. For uv/pipx/pip installs, the default is `~/.local/share/opentelemetry-hooks/otel_config.json` on macOS/Linux, or `%LOCALAPPDATA%\opentelemetry-hooks\otel_config.json` on Windows. `XDG_DATA_HOME` controls the Unix data directory; `IDE_OTEL_HOOK_HOME` overrides the hook directory on either platform. For a source checkout or copied-source install, edit the local `otel_config.json` next to `otel_hook.py`.
 
 ```json
 {
@@ -988,7 +1015,7 @@ The doctor is read-only. It reports effective privacy booleans and sanitized exp
 ### Check the log
 
 ```bash
-# pip/pipx install
+# uv/pipx/pip install
 tail -f ~/.local/share/opentelemetry-hooks/otel_hook.log
 
 # source checkout / copied-source install
