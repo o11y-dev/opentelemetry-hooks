@@ -35,14 +35,16 @@ def test_public_parser_contract(fixture_path, monkeypatch):
 def test_standalone_import_has_no_sdk_or_runtime_side_effects(tmp_path):
     import otel_hooks
     package_root = Path(otel_hooks.__file__).parent.parent
+    script = """
+import sys
+sys.path.insert(0, sys.argv[1])
+from otel_hooks.parsers import get_parser
+assert get_parser('claude').parse('SessionStart', {'session_id': 'fixture'}).session_id == 'fixture'
+assert not any(name.startswith(('opentelemetry', 'click', 'otel_hook.')) or name == 'otel_hook'
+               for name in sys.modules)
+"""
     result = subprocess.run([
-        sys.executable, "-S", "-c",
-        "import sys; sys.path.insert(0, sys.argv[1]); "
-        "from otel_hooks.parsers import get_parser; "
-        "assert get_parser('claude').parse('SessionStart', {'session_id': 'fixture'}).session_id == 'fixture'; "
-        "assert not any(name.startswith(('opentelemetry', 'click', 'otel_hook.')) or name == 'otel_hook' "
-        "for name in sys.modules)",
-        str(package_root),
+        sys.executable, "-S", "-c", script, str(package_root),
     ], cwd=tmp_path, capture_output=True, text=True, timeout=10)
     assert result.returncode == 0, result.stderr
     assert not list(tmp_path.iterdir())

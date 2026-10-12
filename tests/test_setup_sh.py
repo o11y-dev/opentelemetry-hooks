@@ -10,6 +10,7 @@ and that --reinstall calls `pipx install --force .` before registering hooks.
 import json
 import os
 import shutil
+import shlex
 import subprocess
 from typing import Dict, List, Optional
 
@@ -19,6 +20,19 @@ OTEL_HOOK_PY = os.path.join(REPO_ROOT, "otel_hook.py")
 OTEL_CONFIG_EXAMPLE = os.path.join(REPO_ROOT, "otel_config.example.json")
 PLUGIN_SRC = os.path.join(REPO_ROOT, "plugin", "opencode.ts")
 COPILOT_EXAMPLE = os.path.join(REPO_ROOT, "examples", "copilot-hooks.example.json")
+
+
+
+def _python_only_bin(tmp_root: str) -> str:
+    """Expose Python without sibling otel-hook/pipx commands from its install."""
+    python = shutil.which("python3") or "/usr/bin/python3"
+    bin_dir = os.path.join(tmp_root, "python-only-bin")
+    os.makedirs(bin_dir, exist_ok=True)
+    wrapper = os.path.join(bin_dir, "python3")
+    with open(wrapper, "w", encoding="utf-8") as fh:
+        fh.write(f'#!/bin/sh\nexec {shlex.quote(python)} "$@"\n')
+    os.chmod(wrapper, 0o755)
+    return bin_dir
 
 
 def _make_hook_dir(tmp_root: str) -> str:
@@ -62,6 +76,7 @@ def _make_clean_dir(tmp_root: str) -> str:
     os.makedirs(clean_dir, exist_ok=True)
     shutil.copy(SETUP_SH, os.path.join(clean_dir, "setup.sh"))
     shutil.copy(OTEL_HOOK_PY, os.path.join(clean_dir, "otel_hook.py"))
+    shutil.copytree(os.path.join(REPO_ROOT, "otel_hooks"), os.path.join(clean_dir, "otel_hooks"))
     shutil.copy(OTEL_CONFIG_EXAMPLE, os.path.join(clean_dir, "otel_config.example.json"))
     if os.path.exists(PLUGIN_SRC):
         plugin_dir = os.path.join(clean_dir, "plugin")
@@ -72,8 +87,7 @@ def _make_clean_dir(tmp_root: str) -> str:
 
 def _run_setup_from_clean_dir(clean_dir: str, home_dir: str, args: Optional[List[str]] = None, env: Optional[Dict[str, str]] = None) -> subprocess.CompletedProcess:
     """Run setup.sh from *clean_dir* (no IDE markers in the tree) with controlled HOME."""
-    python3_bin = shutil.which("python3") or "/usr/bin/python3"
-    python3_dir = os.path.dirname(python3_bin)
+    python3_dir = _python_only_bin(home_dir)
     full_env = {
         "HOME": home_dir,
         "PATH": f"{python3_dir}:/usr/bin:/bin",
@@ -203,8 +217,7 @@ class TestSetupShCommandSelection:
 
         # Build a minimal PATH containing python3 but definitely no otel-hook,
         # so the test is portable across macOS (/opt/homebrew/bin) and Linux.
-        python3_bin = shutil.which("python3") or "/usr/bin/python3"
-        python3_dir = os.path.dirname(python3_bin)
+        python3_dir = _python_only_bin(str(tmp_path))
         env_override = {"PATH": f"{python3_dir}:/usr/bin:/bin"}
 
         result = _run_setup(hook_dir, env=env_override)
@@ -228,8 +241,7 @@ class TestSetupShGlobalScoping:
         from the real home directory. A minimal PATH ensures no spurious
         otel-hook binary leaks in.
         """
-        python3_bin = shutil.which("python3") or "/usr/bin/python3"
-        python3_dir = os.path.dirname(python3_bin)
+        python3_dir = _python_only_bin(str(tmp_path))
         return {
             "HOME": str(tmp_path),
             "PATH": f"{python3_dir}:/usr/bin:/bin",
@@ -323,8 +335,7 @@ class TestSetupShGlobalScoping:
 
 class TestSetupShIdeDetectionConfig:
     def _minimal_env(self, tmp_path) -> dict:
-        python3_bin = shutil.which("python3") or "/usr/bin/python3"
-        python3_dir = os.path.dirname(python3_bin)
+        python3_dir = _python_only_bin(str(tmp_path))
         return {
             "HOME": str(tmp_path),
             "PATH": f"{python3_dir}:/usr/bin:/bin",
@@ -474,8 +485,7 @@ class TestSetupShReinstall:
 
     def _minimal_env(self, tmp_path) -> dict:
         """Return an env dict with HOME set to tmp_path and a minimal PATH."""
-        python3_bin = shutil.which("python3") or "/usr/bin/python3"
-        python3_dir = os.path.dirname(python3_bin)
+        python3_dir = _python_only_bin(str(tmp_path))
         return {
             "HOME": str(tmp_path),
             "PATH": f"{python3_dir}:/usr/bin:/bin",
@@ -521,8 +531,7 @@ class TestSetupShReinstall:
             )
         os.chmod(fake_pipx, 0o755)
 
-        python3_bin = shutil.which("python3") or "/usr/bin/python3"
-        python3_dir = os.path.dirname(python3_bin)
+        python3_dir = _python_only_bin(str(tmp_path))
         env = {
             "HOME": str(tmp_path),
             "PATH": f"{fake_bin}:{python3_dir}:/usr/bin:/bin",
@@ -554,8 +563,7 @@ class TestSetupShReinstall:
             f.write("#!/bin/sh\nexit 0\n")
         os.chmod(fake_pipx, 0o755)
 
-        python3_bin = shutil.which("python3") or "/usr/bin/python3"
-        python3_dir = os.path.dirname(python3_bin)
+        python3_dir = _python_only_bin(str(tmp_path))
         env = {
             "HOME": str(tmp_path),
             "PATH": f"{fake_bin}:{python3_dir}:/usr/bin:/bin",
@@ -571,8 +579,7 @@ class TestSetupShReinstall:
 
 class TestProcessDiscoveryExamples:
     def _minimal_env(self, tmp_path) -> dict:
-        python3_bin = shutil.which("python3") or "/usr/bin/python3"
-        python3_dir = os.path.dirname(python3_bin)
+        python3_dir = _python_only_bin(str(tmp_path))
         return {
             "HOME": str(tmp_path),
             "PATH": f"{python3_dir}:/usr/bin:/bin",
@@ -604,8 +611,7 @@ class TestGeminiSetup:
     """Tests for Gemini CLI hook setup and operational commands."""
 
     def _minimal_env(self, tmp_path) -> dict:
-        python3_bin = shutil.which("python3") or "/usr/bin/python3"
-        python3_dir = os.path.dirname(python3_bin)
+        python3_dir = _python_only_bin(str(tmp_path))
         return {
             "HOME": str(tmp_path),
             "PATH": f"{python3_dir}:/usr/bin:/bin",
@@ -792,8 +798,7 @@ class TestOperationalFlags:
     """Tests for --diagnose, --clean, --uninstall auto-detection and behavior."""
 
     def _minimal_env(self, tmp_path) -> dict:
-        python3_bin = shutil.which("python3") or "/usr/bin/python3"
-        python3_dir = os.path.dirname(python3_bin)
+        python3_dir = _python_only_bin(str(tmp_path))
         return {
             "HOME": str(tmp_path),
             "PATH": f"{python3_dir}:/usr/bin:/bin",
