@@ -2,6 +2,10 @@
 
 import hashlib
 import json
+import os
+import subprocess
+import sys
+import time
 from pathlib import Path
 from unittest import mock
 
@@ -437,3 +441,123 @@ def test_delivery_health_sanitizes_endpoint_and_error(monkeypatch, isolated_stat
     assert record["endpoint"] == "https://collector.example.test:4318"
     assert record["last_error"]["type"] == "RuntimeError"
     assert "private failure detail" not in json.dumps(record)
+
+
+@pytest.mark.parametrize("name,fields", [
+    ("PostToolBatch", {"tool_calls": [{
+        "tool_name": "Read", "tool_use_id": "fixture-call",
+        "tool_input": {"path": "PRIVATE_FIXTURE"},
+        "tool_response": "PRIVATE_FIXTURE" * 1000,
+    }]}),
+    ("PreCompact", {"custom_instructions": "PRIVATE_FIXTURE"}),
+    ("PostCompact", {"compact_summary": "PRIVATE_FIXTURE"}),
+])
+def test_claude_batch_and_compaction_content_not_persisted(monkeypatch, isolated_state, name, fields):
+    for flag in ("CAPTURE_TEXT", "CAPTURE_CONVERSATION_CONTENT", "CAPTURE_TOOL_INPUT_CONTENT"):
+        monkeypatch.setenv(f"IDE_OTEL_{flag}", "false")
+    event = otel_hook.ClaudeEventAdapter().normalize(name, None, {"session_id": "fixture", **fields})
+    data = event.to_lifecycle_data()
+    decision = otel_hook._buffer_session_event("fixture", name, data, "claude")
+    persisted = otel_hook._load_batch_events(decision.generation_key)[0]["data"]
+    assert "PRIVATE_FIXTURE" not in json.dumps(persisted)
+    if name == "PostToolBatch":
+        call = persisted["tool_calls"][0]
+        assert call["tool_use_id"] == "fixture-call"
+        for key in ("tool_input", "tool_response"):
+            text = otel_hook._stringify(fields["tool_calls"][0][key])
+            assert call[f"{key}_length"] == len(text)
+            assert call[f"{key}_sha256"] == hashlib.sha256(text.encode()).hexdigest()
+    else:
+        span = RecordingSpan()
+        otel_hook._apply_conversation_attributes(span, name, persisted)
+        label = "instructions" if name == "PreCompact" else "summary"
+        assert span.attributes[f"gen_ai.client.compaction.{label}.length"] == len("PRIVATE_FIXTURE")
+
+
+def test_claude_batch_capture_is_explicit_masked_and_bounded(monkeypatch):
+    monkeypatch.setenv("IDE_OTEL_CAPTURE_TOOL_INPUT_CONTENT", "true")
+    monkeypatch.setenv("IDE_OTEL_MASK_PROMPTS", "true")
+    monkeypatch.setenv("IDE_OTEL_TEXT_MAX_CHARS", "32")
+    original = "fixture@example.test " + "x" * 100
+    event = otel_hook.ClaudeEventAdapter().normalize("PostToolBatch", None, {
+        "tool_calls": [{"tool_response": original}],
+    })
+    call = event.to_lifecycle_data()["tool_calls"][0]
+    assert "fixture@example.test" not in call["tool_response"]
+    assert len(call["tool_response"]) <= 32
+    assert call["tool_response_length"] == len(original)
+    assert call["tool_response_sha256"] == hashlib.sha256(original.encode()).hexdigest()
+
+
+@pytest.mark.parametrize("name,field", [("PreCompact", "custom_instructions"), ("PostCompact", "compact_summary")])
+def test_compaction_content_can_be_enabled(monkeypatch, name, field):
+    monkeypatch.setenv("IDE_OTEL_CAPTURE_CONVERSATION_CONTENT", "true")
+    event = otel_hook.ClaudeEventAdapter().normalize(name, None, {field: "fixture content"})
+    assert event.conversation[0].text == "fixture content"
+
+
+@pytest.mark.parametrize("terminal", ["Interrupt", "SessionEnd"])
+@pytest.mark.parametrize("mode", ["slow_traces", "slow_logs", "failed_traces", "healthy"])
+def test_codex_short_hook_bounds_sdk_export_and_preserves_failed_batches(tmp_path, terminal, mode):
+    # Real SDK + separate process: catches both force_flush and atexit waits.
+    # Replace transport only, so no collector or network access is needed.
+    runner = '''
+import os, time
+import otel_hook
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
+from opentelemetry.sdk.trace.export import SpanExportResult
+from opentelemetry.sdk._logs.export import LogExportResult
+def export(signal, success, failure):
+    def send(self, items):
+        mode = os.environ['FIXTURE_EXPORT_MODE']
+        if mode == 'slow_' + signal:
+            time.sleep(30)
+        return failure if mode == 'failed_' + signal else success
+    return send
+OTLPSpanExporter.export = export('traces', SpanExportResult.SUCCESS, SpanExportResult.FAILURE)
+OTLPLogExporter.export = export('logs', LogExportResult.SUCCESS, LogExportResult.FAILURE)
+otel_hook.cli()
+'''
+    config = tmp_path / "config.json"
+    config.write_text("{}")
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("OTEL_", "IDE_OTEL_", "CODEX_"))}
+    env.update(
+        IDE_OTEL_HOOK_HOME=str(tmp_path), IDE_OTEL_CONFIG=str(config),
+        IDE_OTEL_BATCH_ON_STOP="true", IDE_OTEL_LOCAL_SPANS="true",
+        IDE_OTEL_ENABLE_LOGS="true", IDE_OTEL_DISABLE_BATCH="true",
+        OTEL_EXPORTER_OTLP_ENDPOINT="http://collector.example.test:4318",
+        OTEL_EXPORTER_OTLP_PROTOCOL="http/protobuf", CODEX_VERSION="fixture",
+        FIXTURE_EXPORT_MODE=mode,
+    )
+    for name, fields in [
+        ("SessionStart", {}), ("UserPromptSubmit", {"prompt": "fixture"}),
+        ("PreToolUse", {"tool_name": "Bash", "tool_input": {"command": "pwd"}}),
+        (terminal, {}),
+    ]:
+        started = time.monotonic()
+        result = subprocess.run(
+            [sys.executable, "-c", runner, "--codex"],
+            input=json.dumps({"session_id": "fixture", "hook_event_name": name, **fields}),
+            env=env, text=True, capture_output=True, timeout=3,
+            cwd=Path(otel_hook.__file__).parent,
+        )
+        assert result.returncode == 0, result.stderr
+        assert time.monotonic() - started < 3
+        assert not result.stdout.strip()
+    batches = list((tmp_path / ".state" / "batches").glob("*.jsonl"))
+    if mode in {"slow_traces", "failed_traces"}:
+        assert batches, "Failed trace batches must survive for retry"
+        assert (tmp_path / ".state" / "sessions" / "fixture.json").exists()
+        retry = subprocess.run(
+            [sys.executable, "-c", runner, "--codex"],
+            input=json.dumps({"session_id": "fixture", "hook_event_name": terminal}),
+            env={**env, "FIXTURE_EXPORT_MODE": "healthy"}, text=True,
+            capture_output=True, timeout=3, cwd=Path(otel_hook.__file__).parent,
+        )
+        assert retry.returncode == 0, retry.stderr
+        assert not list((tmp_path / ".state" / "batches").glob("*.jsonl"))
+    else:
+        assert not batches, "Log failure must not replay successfully delivered traces"
+    spans = list((tmp_path / ".state" / "local_spans").glob("*.jsonl"))
+    assert spans, "Local capture must complete even when remote export stalls"

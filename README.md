@@ -917,6 +917,8 @@ Set `IDE_OTEL_CAPTURE_CONVERSATION_CONTENT=true` to include conversation and del
 - Long tokens / API keys
 - macOS usernames from paths
 
+Claude compaction instructions and summaries follow the same conversation-content gate. Tool-batch inputs/results are reduced to lengths and hashes before local buffering; `IDE_OTEL_CAPTURE_TOOL_INPUT_CONTENT=true` permits previews bounded by `IDE_OTEL_TEXT_MAX_CHARS`, with masking when enabled. This applies to newly received callbacks, not existing buffer files.
+
 ### Never Sent
 
 - API keys or credentials (automatically filtered)

@@ -32,6 +32,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import urllib.parse
 import uuid
@@ -283,6 +284,8 @@ if importlib.util.find_spec("orjson") is not None:
 # ---------------------------------------------------------------------------
 _TRACING_INITIALIZED = False
 _LOGS_INITIALIZED = False
+_EXPORT_DEADLINE: Optional[float] = None
+_EXPORT_FAILURES: set[str] = set()
 _FILE_EXPORTER_PATHS: set[str] = set()   # paths that already have a FileSpanExporter attached
 _CONSOLE_EXPORTER_REGISTERED = False  # True once a ConsoleSpanExporter has been attached
 _OTEL_LOG_HANDLER = None  # OTel LoggingHandler for OTLP log export
@@ -1444,6 +1447,8 @@ class ProviderEventAdapter:
         "SubagentStop": ("response", "assistant", ("response", "last_assistant_message")),
         "TaskCreated": ("task", "system", ("task_subject", "task_description")),
         "TaskCompleted": ("task", "system", ("task_subject", "task_description")),
+        "PreCompact": ("compaction.instructions", "user", ("custom_instructions",)),
+        "PostCompact": ("compaction.summary", "system", ("compact_summary",)),
     }
 
     def canonical_event_name(self, original_event_name: str) -> str:
@@ -1698,6 +1703,27 @@ class ClaudeEventAdapter(ProviderEventAdapter):
     response_fields = ("last_assistant_message", "response", "assistant_response")
 
     def _normalize_provider_fields(self, event_name: str, data: dict) -> None:
+        if event_name == "PostToolBatch":
+            # Batch results duplicate individual tool callbacks. Retain only
+            # identity and content facts unless tool-content capture is enabled.
+            calls = []
+            capture = _safe_bool(os.getenv("IDE_OTEL_CAPTURE_TOOL_INPUT_CONTENT", ""))
+            for call in data.get("tool_calls") or []:
+                if not isinstance(call, dict):
+                    continue
+                safe_call = {key: call[key] for key in ("tool_name", "tool_use_id") if key in call}
+                for key in ("tool_input", "tool_response"):
+                    if key not in call:
+                        continue
+                    text = _stringify(call[key])
+                    safe_call[f"{key}_length"] = len(text)
+                    safe_call[f"{key}_sha256"] = _hash_text(text)
+                    if capture:
+                        if _safe_bool(os.getenv("IDE_OTEL_MASK_PROMPTS", "")):
+                            text = _mask_text(text)
+                        safe_call[key] = text[:_text_max_chars()]
+                calls.append(safe_call)
+            data["tool_calls"] = calls
         if event_name == "StopFailure":
             data.setdefault("error_type", data.get("error"))
             data.setdefault("status", "error")
@@ -2495,9 +2521,12 @@ class _DiagnosticExporter:
         try:
             result = self._delegate.export(items)
             success = result == SpanExportResult.SUCCESS or getattr(result, "name", "") == "SUCCESS"
+            if not success:
+                _EXPORT_FAILURES.add(self._signal)
             _record_delivery_health(self._signal, success)
             return result
         except Exception as exc:
+            _EXPORT_FAILURES.add(self._signal)
             _record_delivery_health(self._signal, False, exc)
             raise
 
@@ -2550,7 +2579,7 @@ def _init_sdk_tracer_provider(resource_attrs: dict, disable_batch: bool) -> bool
     headers = _parse_otlp_headers(os.getenv("OTEL_EXPORTER_OTLP_HEADERS", ""))
 
     if not endpoint and _local_spans_enabled():
-        sdk_provider = SDKTracerProvider(resource=Resource.create(resource_attrs))
+        sdk_provider = SDKTracerProvider(resource=Resource.create(resource_attrs), shutdown_on_exit=_EXPORT_DEADLINE is None)
         trace.set_tracer_provider(sdk_provider)
         _LOGGER.info("SDK TracerProvider ready (file-only mode, no OTLP endpoint)")
         return True
@@ -2575,8 +2604,8 @@ def _init_sdk_tracer_provider(resource_attrs: dict, disable_batch: bool) -> bool
 
     exporter = _DiagnosticExporter(exporter, "traces")
 
-    sdk_provider = SDKTracerProvider(resource=Resource.create(resource_attrs))
-    if disable_batch:
+    sdk_provider = SDKTracerProvider(resource=Resource.create(resource_attrs), shutdown_on_exit=_EXPORT_DEADLINE is None)
+    if disable_batch and _EXPORT_DEADLINE is None:
         sdk_provider.add_span_processor(SimpleSpanProcessor(exporter))
     else:
         sdk_provider.add_span_processor(BatchSpanProcessor(exporter))
@@ -2645,8 +2674,8 @@ def _init_sdk_logger_provider(resource_attrs: dict, disable_batch: bool) -> bool
     exporter = _DiagnosticExporter(exporter, "logs")
 
     resource = Resource.create(resource_attrs)
-    logger_provider = LoggerProvider(resource=resource)
-    if disable_batch:
+    logger_provider = LoggerProvider(resource=resource, shutdown_on_exit=_EXPORT_DEADLINE is None)
+    if disable_batch and _EXPORT_DEADLINE is None:
         logger_provider.add_log_record_processor(SimpleLogRecordProcessor(exporter))
     else:
         logger_provider.add_log_record_processor(BatchLogRecordProcessor(exporter))
@@ -2780,6 +2809,33 @@ def _enable_file_exporter(path: str, expected_session_key: Optional[str] = None)
         _FILE_EXPORTER_PATHS.add(path)
 
 
+def _flush_signal(provider, signal: str, timeout_millis: int) -> bool:
+    """Bound SDK flush waits for short hooks, including SDKs ignoring timeout."""
+    result = [False]
+
+    def flush() -> None:
+        try:
+            result[0] = not hasattr(provider, "force_flush") or provider.force_flush(
+                timeout_millis=timeout_millis,
+            ) is not False
+        except Exception as exc:
+            _LOGGER.warning("%s force_flush failed: %s", signal, exc)
+
+    if _EXPORT_DEADLINE is None:
+        flush()
+    else:
+        remaining = min(timeout_millis / 1000, _EXPORT_DEADLINE - time.monotonic())
+        if remaining <= 0:
+            return False
+        worker = threading.Thread(target=flush, daemon=True)
+        worker.start()
+        worker.join(remaining)
+        if worker.is_alive():
+            return False
+    # SDK flush success only means the queue drained, not that export succeeded.
+    return result[0] and signal not in _EXPORT_FAILURES
+
+
 def _force_flush_provider(
     timeout_millis: int = 500,
     *,
@@ -2787,31 +2843,16 @@ def _force_flush_provider(
 ) -> bool:
     """Flush the SDK TracerProvider and LoggerProvider to push pending data.
 
-    Default timeout is short (500ms) to avoid hanging the IDE hook when the
-    OTLP collector is unreachable. Batch lifecycle callers use traces as the
+    Short Codex hooks enforce the timeout independently of SDK behavior.
+    Batch lifecycle callers use traces as the
     authoritative signal so a best-effort log failure cannot replay spans that
     were already exported successfully.
     """
-    trace_success = True
+    trace_success = _flush_signal(trace.get_tracer_provider(), "traces", timeout_millis)
     log_success = True
-    try:
-        provider = trace.get_tracer_provider()
-        if hasattr(provider, "force_flush"):
-            if provider.force_flush(timeout_millis=timeout_millis) is False:
-                trace_success = False
-    except Exception as exc:
-        trace_success = False
-        _LOGGER.warning("trace force_flush failed: %s", exc)
     if _LOGS_INITIALIZED:
-        try:
-            from opentelemetry._logs import get_logger_provider
-            log_provider = get_logger_provider()
-            if hasattr(log_provider, "force_flush"):
-                if log_provider.force_flush(timeout_millis=timeout_millis) is False:
-                    log_success = False
-        except Exception as exc:
-            log_success = False
-            _LOGGER.warning("log force_flush failed: %s", exc)
+        from opentelemetry._logs import get_logger_provider
+        log_success = _flush_signal(get_logger_provider(), "logs", timeout_millis)
     if authoritative_signal == "traces":
         return trace_success
     if authoritative_signal == "logs":
@@ -5305,12 +5346,13 @@ def _finalize_session(
 # Main
 # ---------------------------------------------------------------------------
 def main() -> int:
+    global _EXPORT_DEADLINE
+    started = time.monotonic()
     if _safe_bool(os.getenv("IDE_OTEL_LOG_EVENTS", "")):
         # Very early log to stderr to show the hook is alive
         sys.stderr.write(f"Hook starting (pid={os.getpid()})\n")
     _apply_config_env(_load_config())
     _configure_logging()
-    _cleanup_state()
 
     input_data = _load_input()
     if not isinstance(input_data, dict):
@@ -5318,6 +5360,11 @@ def main() -> int:
     data = _normalize_input_data(input_data)
     raw_event = _get_event_name(data)
     ide = _detect_ide(data)
+    short_hook = ide == "codex" and raw_event in {"SessionEnd", "Interrupt"}
+    # Leave one second of Codex's three-second budget for startup and local I/O.
+    _EXPORT_DEADLINE = started + 2.0 if short_hook else None
+    if not short_hook:
+        _cleanup_state()
     initial_session_key = _session_key(data)
     initial_session_ctx = _load_session_context(initial_session_key)
     adapter = _event_adapter_for(ide)

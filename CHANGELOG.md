@@ -15,6 +15,8 @@
 - OpenCode session idle/error callbacks now use native `sessionID`; recoverable errors preserve session state. User-message metadata is read from `properties.info`.
 
 ### Fixed
+- Sanitize Claude tool-batch inputs/results and compaction text before local buffering, honoring explicit content-capture gates.
+- Bound Codex terminal-hook export waits and disable SDK exit-time waits; retain failed trace batches for retry without replaying traces for log-only failures.
 - Return Cursor's required permission response for observer hooks, including Tab reads, and preserve native MCP durations in milliseconds without multiplying them by 1,000.
 - Prevented a hook running under one Python ABI from importing compiled OpenTelemetry dependencies from a stale bootstrap venv created by another Python version.
 - Bounded stale-session finalization per interactive hook invocation so an accumulated backlog cannot exhaust the agent's Stop-hook timeout.
