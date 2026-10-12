@@ -11,11 +11,11 @@
 
 Captured harness events — prompt submissions, tool calls, shell commands, MCP interactions, file edits, subagent orchestration — become OpenTelemetry spans you can query, alert on, and visualize in Jaeger, Grafana, Datadog, Honeycomb, Coralogix, or any OTLP-compatible backend.
 
-> **Note**: Claude Code and Codex native telemetry describes agent internals, while `otel-hook` describes hook lifecycle and governance. The hook tags its own provenance and does not deduplicate native signals; downstream analysis can reconcile the two sources when both are enabled.
+> **Note**: Native telemetry from Claude Code, Codex, and Cursor describes harness internals, while `otel-hook` describes hook lifecycle and governance. The hook tags its own provenance and does not deduplicate native signals; downstream analysis can reconcile the two sources when both are enabled. See [Cursor native export and hooks](docs/hook-coverage.md#cursor-native-export-and-hooks) for correlation and accounting guidance.
 
 ## How It Works
 
-The hook is a lightweight Python command that your harness invokes for registered lifecycle events. The harness pipes a JSON payload to stdin, the hook processes it, emits OpenTelemetry spans and logs, and returns the harness-compatible success response on stdout so execution proceeds normally. For most events that is `{"continue": true}`; Codex uses event-specific response contracts, so passive Codex hooks stay silent except for `Stop`, which still returns JSON. No sidecar, no daemon — just a command your harness calls. OpenCode uses a small plugin to forward its callbacks to the same command.
+The hook is a lightweight Python command that your harness invokes for registered lifecycle events. The harness pipes a JSON payload to stdin, the hook processes it, emits OpenTelemetry spans and logs, and returns the harness-compatible success response on stdout so execution proceeds normally. Cursor permission hooks return `{"permission": "allow"}` so this telemetry observer does not block the operation. Most other events return `{"continue": true}`; Codex uses event-specific response contracts, so passive Codex hooks stay silent except for `Stop`, which still returns JSON. No sidecar, no daemon — just a command your harness calls. OpenCode uses a small plugin to forward its callbacks to the same command.
 
 ```
 Harness event → stdin (JSON) → otel-hook → OpenTelemetry SDK → OTLP backend
@@ -86,7 +86,7 @@ Current first-party contracts and deliberate exclusions are recorded in [Hook co
 | Gemini CLI | 11 | Tool selection, notification, pre-compression; corrected turn boundaries |
 | Copilot | 14 | Turn end, tool failures, subagents, compaction, permissions, notifications, transformed prompts |
 | Windsurf / Cascade | 11 | Native file, shell, MCP, prompt, response and worktree events |
-| OpenCode plugin | 10 | Compaction and permission requests; corrected session/message payloads |
+| OpenCode plugin | 11 | Compaction, permission requests/replies; corrected session/message payloads |
 | Antigravity / compatible runners | Manual | Existing compatibility adapter; no verified native installer |
 
 Gemini `BeforeAgent` / `AfterAgent` become `UserPromptSubmit` / `Stop`. Model callbacks remain separate observations and do not open or close turns. Windsurf uses `trajectory_id` for the session and `execution_id` for the generation. Copilot commands include `--copilot --event <name>` because native camelCase payloads omit the event name. Original event names remain available on spans.
@@ -512,13 +512,19 @@ The hook writes the response expected by the current harness.
 <no stdout>
 ```
 
-- If `IDE_OTEL_LOCAL_SPANS` is explicitly set (`true` or `false`), the response includes:
+- Cursor permission hooks (`preToolUse`, `subagentStart`, `beforeShellExecution`, `beforeMCPExecution`, `beforeReadFile`, `beforeTabFileRead`) return the required observer response:
+
+```json
+{"permission": "allow"}
+```
+
+- For events using the default response, if `IDE_OTEL_LOCAL_SPANS` is explicitly set (`true` or `false`), the response includes:
 
 ```json
 {"continue": true, "local_spans": true}
 ```
 
-For the stdout response field, `local_spans` uses `IDE_OTEL_LOCAL_SPANS` when set; otherwise internal behavior falls back to `IDE_OTEL_BATCH_ON_STOP`. Codex responses are adapter-managed: passive non-`Stop` events skip stdout entirely, and Codex responses do not include the custom `local_spans` field because Codex validates event-specific JSON schemas.
+For the stdout response field, `local_spans` uses `IDE_OTEL_LOCAL_SPANS` when set; otherwise internal behavior falls back to `IDE_OTEL_BATCH_ON_STOP`. Codex responses are adapter-managed: passive non-`Stop` events skip stdout entirely. Codex responses and Cursor permission responses omit the custom `local_spans` field to respect their schemas.
 
 ## Local Trace Files (Agent-Friendly)
 
@@ -724,7 +730,7 @@ Requires the [Datadog Agent](https://docs.datadoghq.com/opentelemetry/) with OTL
 
 - Codex and Claude encoded names use `mcp__<server>__<tool>`. One bounded parser preserves the original `gen_ai.client.tool_name` and exports `gen_ai.client.mcp_server` plus `gen_ai.client.mcp_tool`; `__` inside the tool portion is preserved. Parsing applies to pre, post, permission, and failure callbacks on both spans and logs.
 - Cursor dedicated MCP callbacks use `mcp_server_name` and `tool_name`. `mcp_server_name` takes precedence over `mcp_server` and the executable `command`, so a command path cannot replace a real server identity.
-- Cursor's stable generic `tool_use_id` owns the logical invocation. Session-backed FIFO correlation merges `BeforeMCPExecution` / `AfterMCPExecution` server, tool, duration, status, and result metadata into the matching generic pre/post callbacks. Cursor's dedicated `duration` value is seconds and is normalized to the `duration_ms` contract. Batch mode folds correlated dedicated evidence into the buffered generic call; streaming mode emits dedicated lifecycle evidence spans (and logs when enabled) with the same ID and enriches the later generic post span. `gen_ai.client.mcp.correlated_evidence=true` distinguishes those callback spans from the logical generic tool span. Unmatched dedicated evidence is still emitted as a span without inventing an ID.
+- Cursor's stable generic `tool_use_id` owns the logical invocation. Session-backed FIFO correlation merges `BeforeMCPExecution` / `AfterMCPExecution` server, tool, duration, status, and result metadata into the matching generic pre/post callbacks. Cursor's dedicated `duration` value is milliseconds and is preserved as `duration_ms`. Batch mode folds correlated dedicated evidence into the buffered generic call; streaming mode emits dedicated lifecycle evidence spans (and logs when enabled) with the same ID and enriches the later generic post span. `gen_ai.client.mcp.correlated_evidence=true` distinguishes those callback spans from the logical generic tool span. Unmatched dedicated evidence is still emitted as a span without inventing an ID.
 - Codex `PermissionRequest` reuses an open tool ID only when session, turn/generation, tool name, and event order identify one unambiguous invocation. Ambiguous permissions remain uncorrelated.
 - Duplicate session, prompt, generation-stop, tool, error, subagent, compaction, and permission callbacks are suppressed with bounded session state. Stable IDs use event-plus-ID keys; no-ID callbacks use lifecycle-scoped fingerprints and short bounded windows. Legitimate calls across completed generation boundaries are preserved.
 - Result size and digest are emitted as content-free metadata. Existing content gates remain unchanged: prompt capture is off by default, tool input content requires `IDE_OTEL_CAPTURE_TOOL_INPUT_CONTENT`, and MCP log payloads continue to follow `IDE_OTEL_MCP_LOG_PAYLOAD`.

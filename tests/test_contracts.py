@@ -310,7 +310,7 @@ def test_cursor_duration_unit_normalization_does_not_leak_to_windsurf():
         "session_id": "session-1",
         "mcp_server_name": "reflect",
         "tool_name": "reflect_context",
-        "duration": 1.979,
+        "duration": 1979,
     }
     cursor = otel_hook.CursorEventAdapter().normalize(
         "afterMCPExecution",

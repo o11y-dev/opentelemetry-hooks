@@ -150,6 +150,39 @@ def test_provider_specific_passive_responses():
         assert hook._stdout_response(name, "codex", {}) is None
 
 
+@pytest.mark.parametrize("name", ["preToolUse", "subagentStart", "beforeShellExecution",
+                                 "beforeMCPExecution", "beforeReadFile", "beforeTabFileRead"])
+def test_cursor_permission_hooks_return_valid_observer_response(monkeypatch, name):
+    monkeypatch.setenv("IDE_OTEL_LOCAL_SPANS", "true")
+    item = event("cursor", name, conversation_id="fixture")
+    assert json.loads(hook._stdout_response(item.event_name, "cursor", item.to_lifecycle_data())) == {"permission": "allow"}
+    # Internal governance must not turn an explicit denial into approval.
+    denial = hook.GovernanceResponse(continue_=False, stop_reason="fixture policy")
+    assert json.loads(hook._stdout_response(item.event_name, "cursor", {}, denial)) == {
+        "permission": "deny", "user_message": "fixture policy",
+    }
+
+
+def test_permission_reply_is_observation_not_generation_end():
+    item = event("opencode", "PermissionReplied", session_id="fixture", event_id="p1",
+                 permission_request_id="p1", permission_response="reject")
+    assert item.event_name not in hook._GENERATION_END_EVENTS | hook._SESSION_END_EVENTS
+    assert item.to_lifecycle_data()["permission_response"] == "reject"
+
+
+def test_cursor_conversation_join_preserves_native_identifier_without_inventing_trace_context():
+    # Synthetic contract pair, not evidence of delivery from a live enterprise export.
+    native_log = {"cursor.event.id": "export-event-1", "cursor.conversation.id": "conversation-1",
+                  "cursor.request.id": "request-1"}
+    item = event("cursor", "beforeSubmitPrompt", conversation_id="conversation-1",
+                 generation_id="generation-1", prompt="fixture")
+    span = RecordingSpan()
+    hook._apply_genai_semconv(span, item.event_name, item.to_lifecycle_data(), "cursor")
+    assert span.attributes["gen_ai.conversation.id"] == native_log["cursor.conversation.id"]
+    assert item.generation_id != native_log["cursor.request.id"]
+    assert item.native.trace_id is None
+
+
 @pytest.mark.parametrize("already_registered", [False, True])
 def test_codex_upgrade_preserves_unrelated_matchers(tmp_path, monkeypatch, already_registered):
     monkeypatch.setattr(hook, "_resolve_hook_cmd", lambda: "otel-hook")

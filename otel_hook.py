@@ -601,6 +601,7 @@ _OBSERVATION_FIELDS = {
     "PreCompact": ("trigger", "context_usage_percent", "context_tokens", "context_window_size", "message_count", "messages_to_compact", "is_first_compaction"),
     "PostCompact": ("trigger",),
     "Notification": ("notification_type",),
+    "PermissionReplied": ("permission_request_id", "permission_response"),
     "InstructionsLoaded": ("file_path", "load_reason"),
     "ConfigChange": ("source", "file_path"),
     "CwdChanged": ("cwd",),
@@ -1667,19 +1668,6 @@ class CursorEventAdapter(ProviderEventAdapter):
         if key[:1].islower() and key not in {"userPromptSubmitted", "errorOccurred"}
     }
 
-    def _normalize_provider_fields(self, event_name: str, data: dict) -> None:
-        """Normalize Cursor MCP durations from seconds to the millisecond contract."""
-        super()._normalize_provider_fields(event_name, data)
-        if (
-            self.provider != "cursor"
-            or event_name != "AfterMCPExecution"
-            or data.get("duration_ms") is not None
-        ):
-            return
-        duration = data.get("duration")
-        if isinstance(duration, (int, float)) and not isinstance(duration, bool):
-            data["duration_ms"] = float(duration) * 1000
-
 
 class WindsurfEventAdapter(ProviderEventAdapter):
     provider = "windsurf"
@@ -1840,9 +1828,10 @@ def _normalize_mcp_event_data(data: dict, event_name: str, ide: Optional[str] = 
     if tool and data.get("mcp_tool") != tool:
         updates["mcp_tool"] = tool
     if ide == "cursor" and event_name == "AfterMCPExecution" and data.get("duration_ms") is None:
+        # Cursor's hook wire contract reports duration in milliseconds.
         duration = data.get("duration")
         if isinstance(duration, (int, float)) and not isinstance(duration, bool):
-            updates["duration_ms"] = float(duration) * 1000
+            updates["duration_ms"] = float(duration)
     if not updates:
         return data
     normalized = dict(data)
@@ -3728,6 +3717,20 @@ class HookResponseAdapter:
         return merged
 
 
+class CursorHookResponseAdapter(HookResponseAdapter):
+    """Cursor permission hooks require a decision, not a continue envelope."""
+
+    _PERMISSION_EVENTS = {"PreToolUse", "SubagentStart", "BeforeShellExecution", "BeforeMCPExecution", "BeforeReadFile"}
+
+    def build_payload(self, event_name, data, governance=None):
+        if event_name in self._PERMISSION_EVENTS:
+            payload = {"permission": "deny" if governance and governance.continue_ is False else "allow"}
+            if governance and governance.stop_reason:
+                payload["user_message"] = governance.stop_reason
+            return payload
+        return super().build_payload(event_name, data, governance)
+
+
 class CodexHookResponseAdapter(HookResponseAdapter):
     """Codex has event-specific stdout contracts that differ from the default envelope."""
 
@@ -3763,6 +3766,7 @@ class GeminiHookResponseAdapter(HookResponseAdapter):
 
 
 _HOOK_RESPONSE_ADAPTERS = {
+    "cursor": CursorHookResponseAdapter(),
     "codex": CodexHookResponseAdapter(),
     "gemini": GeminiHookResponseAdapter(),
 }

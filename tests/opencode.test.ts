@@ -36,3 +36,26 @@ test("telemetry failures do not reject native callbacks", async () => {
   const plugin = await OtelHookPlugin({ $: shell, directory: "/fixture" } as never)
   await expect(plugin.event!({ event: { type: "session.compacted", properties: { sessionID: "s1" } } } as never)).resolves.toBeUndefined()
 })
+
+test("permission replies retain request identity without forwarding content or deciding permissions", async () => {
+  const payloads: Record<string, unknown>[] = []
+  const shell = () => ({
+    stdin(json: string) { payloads.push(JSON.parse(json)); return this },
+    quiet() { return this },
+    nothrow() { return Promise.resolve() },
+  })
+  const plugin = await OtelHookPlugin({ $: shell, directory: "/fixture" } as never)
+  for (const reply of ["once", "always", "reject"]) {
+    const result = await plugin.event!({ event: { type: "permission.replied", properties: {
+      sessionID: "s1", requestID: "p1", reply, message: "PRIVATE_FIXTURE",
+    } } } as never)
+    expect(result).toBeUndefined()
+  }
+  await plugin.event!({ event: { type: "permission.replied", properties: {
+    sessionID: "s1", permissionID: "legacy", response: "once",
+  } } } as never)
+  expect(payloads.map(p => p.permission_response)).toEqual(["once", "always", "reject", "once"])
+  expect(payloads.map(p => p.permission_request_id)).toEqual(["p1", "p1", "p1", "legacy"])
+  expect(payloads.every(p => p.hook_event_name === "PermissionReplied" && p.session_id === "s1")).toBe(true)
+  expect(JSON.stringify(payloads)).not.toContain("PRIVATE_FIXTURE")
+})

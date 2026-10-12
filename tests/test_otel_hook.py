@@ -1387,7 +1387,7 @@ class TestCrossAgentBatchLifecycle:
                 "session_id": session_id,
                 "mcp_server_name": "reflect",
                 "tool_name": "reflect_context",
-                "duration": 1.979,
+                "duration": 1979,
                 "result_json": {"result": "CURSOR_MCP_OK"},
             },
             "cursor",
@@ -1571,7 +1571,7 @@ class TestCrossAgentBatchLifecycle:
                 "hook_event_name": "afterMCPExecution",
                 "mcp_server_name": "reflect",
                 "tool_name": "reflect_context",
-                "duration": 1.979,
+                "duration": 1979,
                 "result_json": {"result": "CURSOR_MCP_OK"},
             },
             {

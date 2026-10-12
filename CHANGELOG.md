@@ -3,6 +3,7 @@
 ## 0.14.1 (unreleased)
 
 ### Added
+- Added OpenCode permission-reply observations and documented Cursor native-export coexistence and remaining hook coverage limits.
 - Expanded current hook registration for Claude Code, Codex, Cursor, Gemini CLI and Copilot; added passive compaction and permission observations to the OpenCode bridge.
 - Added Copilot CLI user-level setup, including `COPILOT_HOME`, and explicit event arguments for native callbacks without event names.
 - Added privacy-safe response, reasoning, notification, task and streamed-message facts, plus event metadata for compaction and workspace changes.
@@ -14,6 +15,7 @@
 - OpenCode session idle/error callbacks now use native `sessionID`; recoverable errors preserve session state. User-message metadata is read from `properties.info`.
 
 ### Fixed
+- Return Cursor's required permission response for observer hooks, including Tab reads, and preserve native MCP durations in milliseconds without multiplying them by 1,000.
 - Prevented a hook running under one Python ABI from importing compiled OpenTelemetry dependencies from a stale bootstrap venv created by another Python version.
 - Bounded stale-session finalization per interactive hook invocation so an accumulated backlog cannot exhaust the agent's Stop-hook timeout.
 - Compacted oversized buffered tool responses while preserving exact length and digest evidence, preventing large tool results from inflating pending hook state.

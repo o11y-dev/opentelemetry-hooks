@@ -48,6 +48,10 @@ export const OtelHookPlugin: Plugin = async ({ $, directory }) => {
         error?: unknown
         info?: { id?: string; role?: string; sessionID?: string }
         permission?: string
+        requestID?: string
+        reply?: string
+        permissionID?: string
+        response?: string
         id?: string
         tool?: { callID?: string }
       }
@@ -97,6 +101,17 @@ export const OtelHookPlugin: Plugin = async ({ $, directory }) => {
           event_id: props?.id,
           tool_name: props?.permission,
           tool_use_id: props?.tool?.callID,
+        })
+      } else if (event.type === "permission.replied") {
+        // Observe the completed decision without changing the permission flow.
+        const requestID = props?.requestID ?? props?.permissionID
+        await invoke({
+          hook_event_name: "PermissionReplied",
+          source_app: "OpenCode",
+          session_id: props?.sessionID,
+          event_id: requestID,
+          permission_request_id: requestID,
+          permission_response: props?.reply ?? props?.response,
         })
       } else if (event.type === "message.updated") {
         // Capture user prompts only (not assistant responses).

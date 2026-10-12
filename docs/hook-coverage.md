@@ -11,13 +11,61 @@ not features proven live in each installed harness version.
 | [Gemini CLI](https://geminicli.com/docs/hooks/reference/) | 8 events, incorrect turn mapping | 11: BeforeToolSelection, Notification and PreCompress; BeforeAgent/AfterAgent define the turn, model callbacks remain observations |
 | [Copilot CLI/cloud](https://docs.github.com/en/copilot/reference/hooks-reference) | 6 repo events; native payload event name missing | 14 events with explicit CLI event arguments, normalized toolArgs/toolResult, and user-level CLI installation |
 | [Windsurf / Cascade](https://docs.devin.ai/desktop/cascade/hooks) | 15 Cursor names in settings.json | 11 native events in hooks.json; nested tool_info plus trajectory/execution IDs normalized |
-| [OpenCode](https://opencode.ai/docs/plugins/) | 8 callbacks | 10: session.compacted and permission.asked; fixes idle/error session IDs and message.updated metadata |
+| [OpenCode](https://opencode.ai/docs/plugins/) | 8 callbacks | 11: session.compacted, permission.asked and permission.replied; fixes idle/error session IDs and message.updated metadata |
 | Antigravity / compatible runners | Manual adapter | Preserved; no verified native registration contract established in this audit |
 
 OpenCode's session and message payloads were cross-checked against its
 [published SDK types](https://github.com/anomalyco/opencode-sdk-go/blob/main/event.go).
 The bridge retains event/session metadata when a bus callback lacks message text;
 it does not pretend to capture complete conversations from `message.updated`.
+Permission reply fields follow the [current event schema](https://github.com/anomalyco/opencode/blob/dev/packages/schema/src/v1/permission.ts);
+the bridge also accepts the older SDK's `permissionID` / `response` spelling.
+
+## Cursor native export and hooks
+
+[Cursor Enterprise export](https://cursor.com/docs/enterprise/opentelemetry-export)
+provides metrics and logs alongside our hook traces. It is configured separately;
+this package does not ingest it or enable its content-export settings.
+
+The [wire reference](https://cursor.com/docs/enterprise/opentelemetry-export/wire)
+defines these integration boundaries:
+
+- Native logs have no trace/span IDs. Compare `cursor.conversation.id` with our
+  `gen_ai.conversation.id` for the same conversation; validate with paired live
+  records before relying on this join. Do not equate request IDs with generation IDs.
+- `cursor.hook.execution_complete` reports hook duration and outcome, including
+  failures/timeouts. It can help detect failures before our process exports.
+- Native request logs carry token counts; estimated cost can receive billing
+  corrections linked by `cursor.usage_event.id`.
+- Dedupe native logs using `cursor.event.id`. Metrics are delta sums, lack session
+  IDs and have at-most-once delivery. Avoid adding native and hook tool counts.
+
+These are downstream integration inputs, not new callback registrations. Keep
+native-source provenance separate from `gen_ai.client.telemetry_source=hook`.
+
+## Coverage recheck
+
+The linked command-hook references were rechecked on 2026-10-12: Cursor 21/21,
+Codex 12/12, Gemini 11/11 and Copilot 14/14 event names are registered. Claude
+registers 31/33 and Cascade 11/12, with the exclusions below. Event-name coverage
+does not guarantee every field or execution surface is supported.
+
+OpenCode is a selected bridge, not full event-bus coverage. It now observes
+permission replies as well as requests. `session.status`, `session.updated`,
+`session.diff`, message-part/removal events, command, watcher, installation, LSP,
+server and TUI events remain outside this bridge. Adding them needs a concrete
+telemetry use case and payload/privacy contracts; `shell.env` mutates execution
+environment and is not an observation callback.
+
+Cursor cloud agents expose fewer callbacks than desktop: local user hooks are
+unavailable, and hooks begin only after the environment becomes writable.
+Cloud lifecycle, dedicated MCP, Tab and workspace callbacks have documented
+restrictions; self-hosted workers have separate session-boundary behavior.
+See [Cursor cloud hook coverage](https://cursor.com/docs/hooks#cloud-agent-support).
+
+The recheck also corrected Cursor permission response schemas (including Tab
+reads) and removed an incorrect seconds-to-milliseconds conversion for MCP
+durations. Earlier exported durations are not rewritten.
 
 ## Intentional limits
 
