@@ -235,14 +235,14 @@ _SETUP_LOCK = os.path.join(
 def _auto_provision_venv() -> None:
     """Create .venv and install opentelemetry-sdk + exporter in the background if missing."""
     venv_python = bootstrap.venv_python(_VENV_DIR)
-    if os.path.isfile(venv_python):
+    if os.path.isfile(venv_python) and os.path.isfile(os.path.join(_VENV_DIR, bootstrap.READY_MARKER)):
         return
     lock_dir = os.path.dirname(_SETUP_LOCK)
     os.makedirs(lock_dir, exist_ok=True)
     if os.path.exists(_SETUP_LOCK):
         return
     try:
-        with open(_SETUP_LOCK, "w") as f:
+        with open(_SETUP_LOCK, "x") as f:
             f.write(str(os.getpid()))
         process_options = (
             {"creationflags": subprocess.CREATE_NO_WINDOW}
@@ -253,6 +253,9 @@ def _auto_provision_venv() -> None:
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             **process_options,
         )
+    except FileExistsError:
+        # Another invocation owns provisioning; do not remove its lock.
+        return
     except Exception:
         try:
             os.remove(_SETUP_LOCK)
@@ -5562,7 +5565,7 @@ def _registered_hook_events(agent: str, path: str) -> list[str]:
     enabled = set()
     for event_name, entries in hooks.items():
         for entry in entries if isinstance(entries, list) else []:
-            for field in ("command", "bash"):
+            for field in ("command", "bash", "powershell"):
                 command = entry.get(field, "")
                 if "otel-hook" in command or "otel_hook" in command:
                     enabled.add(event_name)

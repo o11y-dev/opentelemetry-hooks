@@ -7,6 +7,7 @@
 - Native Windows installed-wheel CI covering parser contracts, UTF-8 input, local session capture and PowerShell/cmd command execution.
 
 ### Fixed
+- Detect PowerShell-only Copilot registrations in `doctor` and retry incomplete bootstrap installs until dependency provisioning succeeds.
 - Use Windows application-data and virtual-environment paths, argv-based dependency bootstrapping, quoted executable paths, Claude exec-form hooks and Copilot PowerShell registrations.
 - Recognize both Copilot shell fields during setup, diagnosis and removal, including user-level removal; mask Windows usernames when text masking is enabled.
 

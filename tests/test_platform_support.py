@@ -33,12 +33,16 @@ def test_windows_home_and_venv_layout(monkeypatch, tmp_path):
     )
 
 
-@pytest.mark.parametrize("failure", [False, True])
+@pytest.mark.parametrize("failure", [None, "venv", "pip"])
 def test_bootstrap_uses_argv_and_always_releases_lock(monkeypatch, tmp_path, failure):
     venv = tmp_path / "env with spaces & unicode-é"
+    venv.mkdir()
+    marker = venv / bootstrap.READY_MARKER
+    marker.touch()
     lock = tmp_path / "setup.lock"
     lock.touch()
-    run = Mock(side_effect=subprocess.CalledProcessError(1, "fixture") if failure else None)
+    error = subprocess.CalledProcessError(1, "fixture")
+    run = Mock(side_effect=[error] if failure == "venv" else [None, error] if failure == "pip" else None)
     monkeypatch.setattr(bootstrap.subprocess, "run", run)
     if failure:
         with pytest.raises(subprocess.CalledProcessError):
@@ -48,6 +52,44 @@ def test_bootstrap_uses_argv_and_always_releases_lock(monkeypatch, tmp_path, fai
         assert run.call_args_list[1].args[0][:4] == [bootstrap.venv_python(str(venv)), "-m", "pip", "install"]
     assert run.call_args_list[0].args[0] == [sys.executable, "-m", "venv", str(venv)]
     assert not lock.exists()
+    assert marker.exists() is (failure is None)
+
+
+def test_partial_bootstrap_retries_then_reuses_success(monkeypatch, tmp_path):
+    venv = tmp_path / "venv"
+    python = venv / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
+    python.parent.mkdir(parents=True)
+    python.touch()  # venv creation completed, but dependency installation did not.
+    lock = tmp_path / "setup.lock"
+    monkeypatch.setattr(otel_hook, "_VENV_DIR", str(venv))
+    monkeypatch.setattr(otel_hook, "_SETUP_LOCK", str(lock))
+    launch = Mock()
+    monkeypatch.setattr(subprocess, "Popen", launch)
+    otel_hook._auto_provision_venv()
+    launch.assert_called_once()
+    assert lock.exists()
+    otel_hook._auto_provision_venv()
+    launch.assert_called_once()  # A second callback does not race the active worker.
+    monkeypatch.setattr(subprocess, "run", Mock())
+    bootstrap.provision(str(venv), str(lock))
+    assert not lock.exists()
+    otel_hook._auto_provision_venv()
+    launch.assert_called_once()  # Successful provisioning is reused.
+
+
+def test_doctor_detects_powershell_only_copilot_hooks(monkeypatch, tmp_path):
+    monkeypatch.setattr(otel_hook, "_find_repo_root", lambda _: str(tmp_path))
+    monkeypatch.setattr(otel_hook, "_resolve_hook_cmd", lambda: r"C:\fixture\otel-hook.exe")
+    with monkeypatch.context() as windows:
+        windows.setattr(sys, "platform", "win32")
+        otel_hook.setup_copilot(str(tmp_path))
+    result = CliRunner().invoke(otel_hook.cli, [
+        "doctor", "--agent", "copilot", "--no-global", "--cwd", str(tmp_path), "--json",
+    ])
+    # Unconfigured exporters may report degraded health independently of hooks.
+    assert result.exit_code in (0, 1), result.output
+    registration = json.loads(result.output)["registrations"][0]
+    assert registration["enabled_events"] == sorted(otel_hook._COPILOT_EVENTS)
 
 
 def test_windows_skips_unix_process_probe_and_reads_utf8(monkeypatch):
