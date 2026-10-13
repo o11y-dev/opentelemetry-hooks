@@ -3,11 +3,20 @@
 ## Unreleased
 
 ### Added
+- Structured, unprefixed JSON settings with legacy `IDE_OTEL_*` compatibility; configurable metadata, selected-content and full hook capture across providers.
+- Bounded lowercase recursive span attributes and extraction mappings; optional policy-filtered raw JSON log bodies with trace/span correlation with one record per emitted callback.
+- Capture policy isolation for pending state, managed capture/log precedence, validation, and enterprise setup/configuration documentation.
 - Document uv tool installation and upgrades, and support `setup.sh --reinstall --installer uv` while retaining the pipx default.
 - SDK-independent parser package with a shared `BaseParser`, typed canonical events, a provider registry and separate provider modules. Existing adapter imports remain compatible.
 - Native Windows installed-wheel CI covering parser contracts, UTF-8 input, local session capture and PowerShell/cmd command execution.
 
+### Changed
+- Use one capture pipeline for every configuration; metadata-only capture and disabled hook logs are the defaults.
+- Remove separate MCP, shell, tool and conversation log emitters and duplicate tool/metadata flattening. Consumers must migrate old log queries and configure their own attribute mappings.
+- Retire per-content and per-event log switches; capture mode and path selection govern content, while `logs.enabled` controls hook logs.
+
 ### Fixed
+- Preserve Cursor subagent/parent relationship IDs, Claude elicitation IDs and failure duration, and OpenCode tool invocation IDs in canonical attributes.
 - Detect PowerShell-only Copilot registrations in `doctor` and retry incomplete bootstrap installs until dependency provisioning succeeds.
 - Use Windows application-data and virtual-environment paths, argv-based dependency bootstrapping, quoted executable paths, Claude exec-form hooks and Copilot PowerShell registrations.
 - Recognize both Copilot shell fields during setup, diagnosis and removal, including user-level removal; mask Windows usernames when text masking is enabled.

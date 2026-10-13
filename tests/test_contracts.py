@@ -129,28 +129,21 @@ def test_conversation_content_new_gate_and_legacy_gate(monkeypatch):
         assert span.attributes["gen_ai.client.response.text"] == "fixture response"
 
 
-def test_conversation_logs_are_explicit_opt_in(monkeypatch):
-    event = otel_hook.CopilotEventAdapter().normalize(
-        "errorOccurred",
-        "ErrorOccurred",
-        {"session_id": "session-1", "error": "synthetic failure"},
-    )
+def test_hook_logs_require_enabled_logging_and_a_captured_body(monkeypatch):
     logger = mock.MagicMock()
-    monkeypatch.setattr(otel_hook, "_LOGS_INITIALIZED", True)
     monkeypatch.setattr(otel_hook, "_get_otel_logger", lambda _name: logger)
     monkeypatch.setattr(otel_hook, "_inject_trace_context", lambda attrs: ("1", "2"))
-    monkeypatch.delenv("IDE_OTEL_CAPTURE_TEXT", raising=False)
-    monkeypatch.delenv("IDE_OTEL_CAPTURE_CONVERSATION_CONTENT", raising=False)
-    monkeypatch.delenv("IDE_OTEL_ENABLE_CONVERSATION_LOGS", raising=False)
-    otel_hook._emit_conversation_logs(event.event_name, event.to_lifecycle_data())
-    logger.error.assert_not_called()
-
-    monkeypatch.setenv("IDE_OTEL_ENABLE_CONVERSATION_LOGS", "true")
-    otel_hook._emit_conversation_logs(event.event_name, event.to_lifecycle_data())
-    logger.error.assert_called_once()
-    attrs = logger.error.call_args.kwargs["extra"]
-    assert attrs["gen_ai.client.error.length"] == 17
-    assert "gen_ai.client.error.text" not in attrs
+    monkeypatch.setattr(otel_hook, "_LOGS_INITIALIZED", False)
+    body = {"session_id": "session-1", "error": "synthetic failure"}
+    data = {"_hook_log_body": body}
+    otel_hook._emit_event_log("ErrorOccurred", data)
+    logger.info.assert_not_called()
+    monkeypatch.setattr(otel_hook, "_LOGS_INITIALIZED", True)
+    otel_hook._emit_event_log("ErrorOccurred", {})
+    logger.info.assert_not_called()
+    otel_hook._emit_event_log("ErrorOccurred", data)
+    logger.info.assert_called_once()
+    assert logger.info.call_args.args == (body,)
 
 
 def test_duplicate_prompt_and_concurrent_subagents_are_handled_independently(isolated_state):
@@ -545,10 +538,10 @@ otel_hook.cli()
         assert result.returncode == 0, result.stderr
         assert time.monotonic() - started < 3
         assert not result.stdout.strip()
-    batches = list((tmp_path / ".state" / "batches").glob("*.jsonl"))
+    batches = list((tmp_path / ".state" / "capture").glob("*/batches/fixture_gen*.jsonl"))
     if mode in {"slow_traces", "failed_traces"}:
         assert batches, "Failed trace batches must survive for retry"
-        assert (tmp_path / ".state" / "sessions" / "fixture.json").exists()
+        assert list((tmp_path / ".state" / "capture").glob("*/sessions/fixture.json"))
         retry = subprocess.run(
             [sys.executable, "-c", runner, "--codex"],
             input=json.dumps({"session_id": "fixture", "hook_event_name": terminal}),
@@ -556,8 +549,10 @@ otel_hook.cli()
             capture_output=True, timeout=3, cwd=Path(otel_hook.__file__).parent,
         )
         assert retry.returncode == 0, retry.stderr
-        assert not list((tmp_path / ".state" / "batches").glob("*.jsonl"))
+        assert not list((tmp_path / ".state" / "capture").glob("*/batches/fixture_gen*.jsonl"))
     else:
         assert not batches, "Log failure must not replay successfully delivered traces"
+    session_batches = list((tmp_path / ".state" / "capture").glob("*/batches/fixture_session.jsonl"))
+    assert bool(session_batches) == (terminal == "Interrupt")
     spans = list((tmp_path / ".state" / "local_spans").glob("*.jsonl"))
     assert spans, "Local capture must complete even when remote export stalls"

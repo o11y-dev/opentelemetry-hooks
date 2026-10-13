@@ -1270,48 +1270,6 @@ class TestMCPIdentityNormalization:
             "telemetry.distro.version": resolved_version,
         }
 
-    def test_log_only_mcp_evidence_activates_restored_parent_context(self, monkeypatch):
-        parent_ctx = object()
-        parent_span = object()
-        real_trace = mock.Mock()
-        real_trace.get_current_span.return_value = parent_span
-        monkeypatch.setattr(otel_hook, "_REAL_TRACE", real_trace)
-
-        active = []
-
-        @contextlib.contextmanager
-        def activate(span):
-            active.append(span)
-            yield
-            active.pop()
-
-        emitted = []
-        monkeypatch.setattr(otel_hook, "_span_context", activate)
-        monkeypatch.setattr(
-            otel_hook,
-            "_emit_event_log",
-            lambda event_name, data, session_ctx=None: emitted.append(
-                (event_name, dict(data), session_ctx, active[-1])
-            ),
-        )
-
-        session_ctx = {"trace_id": "1" * 32}
-        otel_hook._emit_event_log_with_context(
-            "AfterMCPExecution",
-            {"tool_use_id": "tool-1"},
-            session_ctx,
-            parent_ctx,
-        )
-
-        real_trace.get_current_span.assert_called_once_with(parent_ctx)
-        assert emitted == [
-            (
-                "AfterMCPExecution",
-                {"tool_use_id": "tool-1"},
-                session_ctx,
-                parent_span,
-            )
-        ]
 
 
 class TestCrossAgentBatchLifecycle:
@@ -1403,7 +1361,9 @@ class TestCrossAgentBatchLifecycle:
         assert duplicate_post.duplicate
 
         batch = otel_hook._load_batch_events(first_pre.generation_key)
-        assert [entry["event"] for entry in batch] == ["PreToolUse", "PostToolUse"]
+        assert [entry["event"] for entry in batch] == [
+            "PreToolUse", "BeforeMCPExecution", "AfterMCPExecution", "PostToolUse",
+        ]
 
         tracer = self._finalize(session_id, "cursor")
         names = [span.name for span in tracer.spans]
@@ -1502,13 +1462,14 @@ class TestCrossAgentBatchLifecycle:
         monkeypatch.setenv("IDE_OTEL_BATCH_ON_STOP", "false")
         monkeypatch.setenv("IDE_OTEL_ENABLE_LOGS", "false")
         monkeypatch.setattr(otel_hook, "_LOGS_INITIALIZED", False)
+        otel_hook._apply_config_env({"capture": {"mode": "full"}})
         otel_hook._create_session_context(
             session_id,
             {"session_id": session_id, "source_app": "Cursor"},
             "cursor",
         )
 
-        monkeypatch.setattr(otel_hook, "_load_config", lambda: {})
+        monkeypatch.setattr(otel_hook, "_load_config", lambda: {"capture": {"mode": "full"}})
         monkeypatch.setattr(otel_hook, "_configure_logging", lambda: None)
         monkeypatch.setattr(otel_hook, "_cleanup_state", lambda: None)
         monkeypatch.setattr(otel_hook, "_init_tracing", lambda *_args, **_kwargs: True)
@@ -1539,7 +1500,7 @@ class TestCrossAgentBatchLifecycle:
         )
         monkeypatch.setattr(
             otel_hook,
-            "_emit_event_log_with_context",
+            "_emit_event_log",
             lambda event_name, data, *_args: logged.append((event_name, dict(data))),
         )
 
@@ -2260,18 +2221,6 @@ class TestFlushStaleSessions:
 # ── Flatten helper ────────────────────────────────────────────────────────
 
 
-class TestFlatten:
-    def test_flat(self):
-        out = {}
-        otel_hook._flatten(out, "gen_ai.client.metadata", {"key": "val", "nested": {"a": 1}})
-        assert out["gen_ai.client.metadata.key"] == "val"
-        assert out["gen_ai.client.metadata.nested.a"] == 1
-
-    def test_skips_none(self):
-        out = {}
-        otel_hook._flatten(out, "prefix", {"a": None, "b": 2})
-        assert "prefix.a" not in out
-        assert out["prefix.b"] == 2
 
 
 # ── Main function integration ─────────────────────────────────────────────
@@ -2479,12 +2428,6 @@ class TestAtomicWrite:
 # ── Duration formatting ──────────────────────────────────────────────────
 
 
-class TestFmtDuration:
-    def test_with_value(self):
-        assert otel_hook._fmt_duration(150) == "150ms"
-
-    def test_none(self):
-        assert otel_hook._fmt_duration(None) == "n/a"
 
 
 # ── File-only TracerProvider mode ────────────────────────────────────────
@@ -2772,9 +2715,10 @@ class _FakeSpan:
         self.attrs[key] = value
 
 
-class TestSetCodexToolAttrs:
+class TestToolPayloadAttributes:
     def test_large_response_is_bounded_before_buffering(self, monkeypatch):
         monkeypatch.setenv("IDE_OTEL_TEXT_MAX_CHARS", "64")
+        monkeypatch.setenv("IDE_OTEL_CAPTURE_TOOL_INPUT_CONTENT", "true")
         original = {"output": "x" * 10_000}
         event = otel_hook._event_adapter_for("codex").normalize(
             "PostToolUse",
@@ -2796,7 +2740,7 @@ class TestSetCodexToolAttrs:
         assert "toolResponse" not in data
 
         span = _FakeSpan()
-        otel_hook._set_codex_tool_attrs(span, "PostToolUse", data)
+        otel_hook._set_tool_payload_attributes(span, "PostToolUse", data)
         assert span.attrs["gen_ai.client.tool.response.length"] == len(original_text)
         assert span.attrs["gen_ai.client.tool.response.sha256"] == hashlib.sha256(
             original_text.encode()
@@ -2806,8 +2750,8 @@ class TestSetCodexToolAttrs:
         monkeypatch.delenv("IDE_OTEL_CAPTURE_TOOL_INPUT_CONTENT", raising=False)
         span = _FakeSpan()
         data = {"tool_input": {"command": "ls", "path": "/tmp"}, "tool_response": {"output": "file.txt"}}
-        otel_hook._set_codex_tool_attrs(span, "PreToolUse", data)
-        # command is always safe to expose
+        otel_hook._set_tool_payload_attributes(span, "PreToolUse", data)
+        # This helper receives fields already permitted by capture policy.
         assert span.attrs.get("gen_ai.client.command") == "ls"
         # content should NOT be flattened by default
         assert "gen_ai.client.tool.input.command" not in span.attrs
@@ -2818,19 +2762,12 @@ class TestSetCodexToolAttrs:
         assert "gen_ai.client.tool.response.length" in span.attrs
         assert "gen_ai.client.tool.response.sha256" in span.attrs
 
-    def test_opt_in_flattens_content(self, monkeypatch):
-        monkeypatch.setenv("IDE_OTEL_CAPTURE_TOOL_INPUT_CONTENT", "1")
-        span = _FakeSpan()
-        data = {"tool_input": {"command": "ls", "path": "/tmp"}, "tool_response": {"output": "file.txt"}}
-        otel_hook._set_codex_tool_attrs(span, "PreToolUse", data)
-        assert span.attrs.get("gen_ai.client.tool.input.command") == "ls"
-        assert span.attrs.get("gen_ai.client.tool.response.output") == "file.txt"
 
     def test_permission_request_handled(self, monkeypatch):
         monkeypatch.delenv("IDE_OTEL_CAPTURE_TOOL_INPUT_CONTENT", raising=False)
         span = _FakeSpan()
         data = {"tool_input": {"description": "need access"}}
-        otel_hook._set_codex_tool_attrs(span, "PermissionRequest", data)
+        otel_hook._set_tool_payload_attributes(span, "PermissionRequest", data)
         assert span.attrs.get("gen_ai.client.approval.description") == "need access"
 
     def test_non_dict_response_does_not_emit_text_when_evidence_present(self, monkeypatch):
@@ -2841,13 +2778,11 @@ class TestSetCodexToolAttrs:
             "tool_response_length": 18,
             "tool_response_sha256": "abc123",
         }
-        otel_hook._set_codex_tool_attrs(span, "PostToolUse", data)
+        otel_hook._set_tool_payload_attributes(span, "PostToolUse", data)
         assert "gen_ai.client.tool_response.text" not in span.attrs
         assert span.attrs["gen_ai.client.tool.response.length"] == 18
         assert span.attrs["gen_ai.client.tool.response.sha256"] == "abc123"
 
-    def test_permission_request_in_tool_events(self):
-        assert "PermissionRequest" in otel_hook._TOOL_EVENTS
 
 
 class TestEventEnrichmentAttributes:
@@ -2893,15 +2828,11 @@ class TestEventEnrichmentAttributes:
         assert attrs["user.id"] == "user-1"
         assert attrs["user.email"] == "user@example.com"
 
-    def test_tool_logs_include_enrichment_attributes(self, monkeypatch):
+    def test_spans_include_enrichment_attributes(self, monkeypatch):
         monkeypatch.setenv("IDE_OTEL_CAPTURE_USER_IDENTITY", "1")
-        monkeypatch.setattr(otel_hook, "_LOGS_INITIALIZED", True)
-        monkeypatch.setattr(otel_hook, "_inject_trace_context", lambda attrs: ("trace", "span"))
-        logger = mock.MagicMock()
-        monkeypatch.setattr(otel_hook, "_get_otel_logger", lambda _name: logger)
-
-        otel_hook._emit_tool_log(
-            "PermissionRequest",
+        span = _FakeSpan()
+        otel_hook._apply_enrichment_attributes(
+            span,
             {
                 "tool_name": "bash",
                 "user_id": "user-1",
@@ -2910,12 +2841,10 @@ class TestEventEnrichmentAttributes:
             },
             session_ctx={"vcs.repository.name": "opentelemetry-hooks"},
         )
-
-        extra = logger.info.call_args.kwargs["extra"]
-        assert extra["user.id"] == "user-1"
-        assert extra["gen_ai.client.permission_mode"] == "acceptEdits"
-        assert extra["gen_ai.client.sandbox.mode"] == "workspace-write"
-        assert extra["vcs.repository.name"] == "opentelemetry-hooks"
+        assert span.attrs["user.id"] == "user-1"
+        assert span.attrs["gen_ai.client.permission_mode"] == "acceptEdits"
+        assert span.attrs["gen_ai.client.sandbox.mode"] == "workspace-write"
+        assert span.attrs["vcs.repository.name"] == "opentelemetry-hooks"
 
 
 # ── New IDE name aliases ─────────────────────────────────────────────────

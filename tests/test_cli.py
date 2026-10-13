@@ -101,6 +101,7 @@ class TestDoctor:
             ]
 
     def test_json_report_is_machine_readable_and_sanitized(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(otel_hook, "_load_config", lambda: {})
         config = tmp_path / "hooks.json"
         _write(str(config), {"hooks": {"SessionStart": [{"command": "otel-hook --claude"}]}})
         monkeypatch.setattr(

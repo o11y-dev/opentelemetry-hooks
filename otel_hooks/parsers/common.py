@@ -69,9 +69,7 @@ def _bound_tool_response_payload(data: dict) -> None:
         return
 
     data["tool_response_truncated"] = True
-    retain_preview = _safe_bool(os.getenv("IDE_OTEL_CAPTURE_TOOL_INPUT_CONTENT", "")) or _safe_bool(
-        os.getenv("IDE_OTEL_MCP_LOG_PAYLOAD", "true")
-    )
+    retain_preview = _safe_bool(os.getenv("IDE_OTEL_CAPTURE_TOOL_INPUT_CONTENT", ""))
     if retain_preview and max_chars > 0:
         data["tool_response"] = text[:max_chars]
     else:

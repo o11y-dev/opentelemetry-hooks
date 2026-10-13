@@ -32,6 +32,9 @@ Edit the source checkout, never an installed copy in another tool's environment.
   and provider-specific payload rules. Parsing must work without SDK imports,
   state writes or dependency installation.
 - `otel_hook.py`: CLI setup, lifecycle handling, session state and telemetry export.
+- `otel_hooks/config.py`: structured settings, managed configuration and legacy key translation.
+- `otel_hooks/capture.py`: payload filtering and bounded typed attribute extraction.
+- `otel_hooks/attributes.py`: canonical field mappings.
 - `otel_hooks/bootstrap.py`: source-checkout dependency provisioning.
 - `enrichment_connectors.py`: memory enrichment.
 - `plugin/opencode.ts`: OpenCode callback bridge.

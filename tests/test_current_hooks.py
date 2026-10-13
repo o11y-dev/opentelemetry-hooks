@@ -99,7 +99,7 @@ def test_new_response_text_capture_opt_in(monkeypatch):
 @pytest.mark.usefixtures("isolated_state")
 def test_copilot_payload_without_event_name_uses_registration(monkeypatch):
     monkeypatch.setenv("IDE_OTEL_BATCH_ON_STOP", "true")
-    monkeypatch.setattr(hook, "_load_config", lambda: {})
+    monkeypatch.setattr(hook, "_load_config", lambda: {"capture": {"mode": "full"}})
     monkeypatch.setattr(hook, "_configure_logging", lambda: None)
     monkeypatch.setattr(hook, "_cleanup_state", lambda: None)
     # Restore global CLI selection after CliRunner, as real invocations are separate processes.

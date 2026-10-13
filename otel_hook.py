@@ -43,6 +43,19 @@ from typing import Optional, Tuple
 
 import click
 from otel_hooks import bootstrap
+from otel_hooks.attributes import _EVENT_ATTR_MAP, _OBSERVATION_FIELDS as _OBSERVATION_FIELDS
+from otel_hooks.capture import CapturePolicy
+from otel_hooks.config import (
+    environment_settings, merge_settings,
+    _coerce_env_value as _coerce_env_value,
+    _headers_to_env as _headers_to_env,
+    _load_mdm_config_macos as _load_mdm_config_macos,
+    _load_mdm_config_windows as _load_mdm_config_windows,
+    _load_json_config as _load_json_config,
+    _parse_resource_attributes as _parse_resource_attributes,
+    _parse_otlp_headers as _parse_otlp_headers,
+)
+
 
 # Compatibility re-exports; parsing itself lives in the SDK-independent package.
 from otel_hooks.parsers.events import (
@@ -360,6 +373,7 @@ if importlib.util.find_spec("orjson") is not None:
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
+_CAPTURE_POLICY = CapturePolicy()
 _TRACING_INITIALIZED = False
 _LOGS_INITIALIZED = False
 _EXPORT_DEADLINE: Optional[float] = None
@@ -503,71 +517,6 @@ _OP_AGENT_EVENTS = {
     "SubagentStart", "SubagentStop",
     "PreCompact", "PostCompact",
 }
-
-# Per-event attribute extraction map (canonical names)
-_EVENT_ATTR_MAP = {
-    # Common
-    "UserPromptSubmit": {
-        "composer_mode": "gen_ai.client.composer_mode",
-        "model": "gen_ai.request.model",
-    },
-    "SessionStart": {
-        "source": "gen_ai.client.session_source", "composer_mode": "gen_ai.client.composer_mode",
-        "model": "gen_ai.request.model", "agent_type": "gen_ai.client.agent_type",
-    },
-    "SessionEnd": {"status": "gen_ai.client.status", "reason": "gen_ai.client.session_end_reason"},
-    "PreToolUse": {"tool_name": "gen_ai.client.tool_name", "tool_id": "gen_ai.client.tool_id", "tool_use_id": "gen_ai.client.tool_use_id"},
-    "PostToolUse": {"tool_name": "gen_ai.client.tool_name", "tool_id": "gen_ai.client.tool_id", "tool_use_id": "gen_ai.client.tool_use_id", "duration_ms": "gen_ai.client.duration_ms"},
-    "PostToolUseFailure": {"tool_name": "gen_ai.client.tool_name", "tool_id": "gen_ai.client.tool_id", "tool_use_id": "gen_ai.client.tool_use_id", "is_interrupt": "gen_ai.client.is_interrupt"},
-    "PermissionRequest": {"tool_name": "gen_ai.client.tool_name", "tool_id": "gen_ai.client.tool_id", "tool_use_id": "gen_ai.client.tool_use_id", "turn_id": "gen_ai.client.turn_id"},
-    "SubagentStart": {"subagent_type": "gen_ai.client.subagent_type", "agent_id": "gen_ai.client.agent_id", "parent_agent_id": "gen_ai.client.parent_agent_id", "agent_id_source": "gen_ai.client.agent_id_source", "agent_type": "gen_ai.client.agent_type"},
-    "SubagentStop": {"subagent_type": "gen_ai.client.subagent_type", "status": "gen_ai.client.status", "agent_id": "gen_ai.client.agent_id", "parent_agent_id": "gen_ai.client.parent_agent_id", "agent_id_source": "gen_ai.client.agent_id_source", "agent_type": "gen_ai.client.agent_type"},
-    "Stop": {"status": "gen_ai.client.status", "loop_count": "gen_ai.client.loop_count", "stop_hook_active": "gen_ai.client.stop_hook_active"},
-    # Cursor-specific
-    "BeforeShellExecution": {"command": "gen_ai.client.command", "cwd": "gen_ai.client.cwd"},
-    "AfterShellExecution": {"command": "gen_ai.client.command", "cwd": "gen_ai.client.cwd", "exit_code": "gen_ai.client.exit_code", "duration_ms": "gen_ai.client.duration_ms"},
-    "BeforeMCPExecution": {"mcp_server_name": "gen_ai.client.mcp_server", "mcp_server": "gen_ai.client.mcp_server", "mcp_tool": "gen_ai.client.mcp_tool", "tool_name": "gen_ai.client.mcp_tool", "tool_use_id": "gen_ai.client.tool_use_id"},
-    "AfterMCPExecution": {"mcp_server_name": "gen_ai.client.mcp_server", "mcp_server": "gen_ai.client.mcp_server", "mcp_tool": "gen_ai.client.mcp_tool", "tool_name": "gen_ai.client.mcp_tool", "tool_use_id": "gen_ai.client.tool_use_id", "duration_ms": "gen_ai.client.duration_ms", "duration": "gen_ai.client.duration_ms", "status": "gen_ai.client.status"},
-    "BeforeReadFile": {"file_path": "gen_ai.client.file_path"},
-    "AfterFileEdit": {"file_path": "gen_ai.client.file_path", "edits": "gen_ai.client.edits"},
-    # Copilot-specific
-    "ErrorOccurred": {"error_type": "error.type", "error_code": "error.code", "is_interrupt": "gen_ai.client.is_interrupt"},
-}
-
-# Metadata-only observations shared by current harness contracts. Never flatten
-# arbitrary event payloads: new hooks can carry prompt, config and MCP content.
-_OBSERVATION_FIELDS = {
-    "PreCompact": ("trigger", "context_usage_percent", "context_tokens", "context_window_size", "message_count", "messages_to_compact", "is_first_compaction"),
-    "PostCompact": ("trigger",),
-    "Notification": ("notification_type",),
-    "PermissionReplied": ("permission_request_id", "permission_response"),
-    "InstructionsLoaded": ("file_path", "load_reason"),
-    "ConfigChange": ("source", "file_path"),
-    "CwdChanged": ("cwd",),
-    "DirectoryAdded": ("directory",),
-    "WorktreeRemove": ("worktree_path",),
-    "WorktreeReady": ("workspace_path", "root_workspace_path"),
-    "TranscriptReady": ("transcript_path",),
-    "TaskCreated": ("task_id",),
-    "TaskCompleted": ("task_id",),
-    "TeammateIdle": ("teammate_name", "agent_id"),
-    "Elicitation": ("mcp_server_name", "mode"),
-    "ElicitationResult": ("mcp_server_name", "mode", "action"),
-    "PreModelSwitch": ("from_model", "to_model", "requested_model", "source", "context_tokens"),
-    "PostModelSwitch": ("from_model", "to_model", "requested_model", "source", "context_tokens"),
-    "AfterReadFile": ("file_path",),
-    "BeforeFileEdit": ("file_path",),
-    "AfterAgentThought": ("duration_ms",),
-    "MessageDisplay": ("message_id", "index", "final"),
-    "UserPromptExpansion": ("expansion_type", "command_name", "command_source"),
-    "Interrupt": ("is_interrupt", "status"),
-    "StopFailure": ("error_type", "status"),
-}
-for _observation_event, _observation_fields in _OBSERVATION_FIELDS.items():
-    _EVENT_ATTR_MAP.setdefault(_observation_event, {}).update({
-        field: f"gen_ai.client.{field}" for field in _observation_fields
-    })
-
 
 # ---------------------------------------------------------------------------
 # I/O helpers
@@ -1659,59 +1608,10 @@ def _load_mdm_config() -> dict:
 
     Returns a dict of key/value pairs (may be empty).  Never raises.
     """
-    if _safe_bool(os.getenv("IDE_OTEL_SKIP_MDM", "")):
-        return {}
     if sys.platform == "darwin":
         return _load_mdm_config_macos()
     if sys.platform == "win32":
         return _load_mdm_config_windows()
-    return {}
-
-
-def _load_mdm_config_macos() -> dict:
-    """Load managed preferences from macOS MDM profile."""
-    try:
-        import plistlib
-        managed_path = f"/Library/Managed Preferences/{_MDM_DOMAIN}.plist"
-        if os.path.exists(managed_path):
-            with open(managed_path, "rb") as fh:
-                return plistlib.load(fh) or {}
-        # Fall back to current-user managed preferences
-        user_managed = os.path.expanduser(
-            f"~/Library/Managed Preferences/{_MDM_DOMAIN}.plist"
-        )
-        if os.path.exists(user_managed):
-            with open(user_managed, "rb") as fh:
-                return plistlib.load(fh) or {}
-    except Exception:
-        _LOGGER.debug("MDM: unable to read macOS managed preferences")
-    return {}
-
-
-def _load_mdm_config_windows() -> dict:
-    """Load managed configuration from Windows registry (HKLM)."""
-    try:
-        import winreg
-        result = {}
-        for hive in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
-            try:
-                with winreg.OpenKey(hive, _MDM_REGISTRY_PATH) as key:
-                    idx = 0
-                    while True:
-                        try:
-                            name, value, _ = winreg.EnumValue(key, idx)
-                            if name and value is not None:
-                                result[name] = str(value)
-                            idx += 1
-                        except OSError:
-                            break
-            except OSError:
-                continue
-        return result
-    except ImportError:
-        pass
-    except Exception:
-        _LOGGER.debug("MDM: unable to read Windows registry")
     return {}
 
 
@@ -1761,65 +1661,40 @@ def _load_config() -> dict:
         config = _load_json_config(path)
     # MDM settings override JSON config (IT admin policy takes precedence)
     mdm = _load_mdm_config()
+    if _safe_bool(os.getenv("IDE_OTEL_SKIP_MDM", "")):
+        mdm = {key: value for key, value in mdm.items() if key in {"capture", "logs"}}
     if mdm:
-        config.update(mdm)
+        config = merge_settings(config, mdm)
+        config["_managed"] = mdm
     return config
 
 
-def _load_json_config(path: str) -> dict:
-    try:
-        with open(path, "r", encoding="utf-8") as fh:
-            return json.load(fh) or {}
-    except (OSError, json.JSONDecodeError):
-        return {}
-
-
-def _headers_to_env(value: dict) -> str:
-    return ",".join(f"{k}={v}" for k, v in value.items() if v is not None)
-
-
-def _coerce_env_value(key: str, value) -> str:
-    if isinstance(value, dict) and key == "OTEL_EXPORTER_OTLP_HEADERS":
-        return _headers_to_env(value)
-    if isinstance(value, (bool, int, float)):
-        return str(value)
-    if value is None:
-        return ""
-    if isinstance(value, (dict, list)):
-        return json.dumps(value)
-    return str(value)
-
-
 def _apply_config_env(config: dict) -> None:
-    for key, value in config.items():
-        if not key or value is None or key in os.environ or key.startswith("_"):
-            continue
+    global _CAPTURE_POLICY
+    managed = config.get("_managed", {})
+    settings = environment_settings(config)
+    settings.update(environment_settings(managed))
+    for key, value in settings.items():
+        os.environ.setdefault(key, _coerce_env_value(key, value))
+    # Managed capture/log restrictions cannot be loosened by local environment.
+    restrictions = {key: value for key, value in managed.items() if key in {"capture", "logs"}}
+    if isinstance(restrictions.get("capture"), dict) and "mode" in restrictions["capture"]:
+        # A managed selected-content mode with no include list permits metadata
+        # only; do not inherit a user's content allowlist.
+        restrictions["capture"] = {"include": [], **restrictions["capture"]}
+    for key, value in environment_settings(restrictions).items():
         os.environ[key] = _coerce_env_value(key, value)
-
-
-def _parse_resource_attributes(value: str) -> dict:
-    attrs = {}
-    for pair in (value or "").split(","):
-        pair = pair.strip()
-        if "=" not in pair:
-            continue
-        k, v = pair.split("=", 1)
-        if k.strip():
-            attrs[k.strip()] = v.strip()
-    return attrs
-
-
-def _parse_otlp_headers(value: str) -> dict:
-    headers = {}
-    for pair in (value or "").split(","):
-        pair = pair.strip()
-        if "=" not in pair:
-            continue
-        key, val = pair.split("=", 1)
-        key = key.strip()
-        if key:
-            headers[key] = urllib.parse.unquote(val.strip())
-    return headers
+    effective = merge_settings(config, restrictions)
+    _CAPTURE_POLICY = CapturePolicy.from_config(effective)
+    for suffix in ("CAPTURE_TEXT", "CAPTURE_CONVERSATION_CONTENT", "CAPTURE_TOOL_INPUT_CONTENT", "CAPTURE_TOOL_DEFINITIONS"):
+        os.environ[f"IDE_OTEL_{suffix}"] = str(_CAPTURE_POLICY.mode != "metadata_only")
+    # Keep old queues separate so stricter policy never replays old content.
+    # Local span paths stay stable for Reflect's existing watcher.
+    global _SESSION_DIR, _BATCH_DIR, _LOCK_DIR
+    policy_dir = os.path.join(_STATE_DIR, "capture", _CAPTURE_POLICY.fingerprint)
+    _SESSION_DIR = os.path.join(policy_dir, "sessions")
+    _BATCH_DIR = os.path.join(policy_dir, "batches")
+    _LOCK_DIR = os.path.join(policy_dir, "locks")
 
 
 def _sanitized_exporter_endpoint(endpoint: Optional[str]) -> Optional[str]:
@@ -2275,7 +2150,7 @@ def _init_tracing(
         return False
 
     # Init OTel Logs (LoggerProvider + OTLP log exporter)
-    if _safe_bool(os.getenv("IDE_OTEL_ENABLE_LOGS", "true")):
+    if _safe_bool(os.getenv("IDE_OTEL_ENABLE_LOGS", "false")):
         if not _init_sdk_logger_provider(resource_attrs, disable_batch):
             _LOGGER.warning("OTel Logs init failed — continuing with traces only")
 
@@ -2385,12 +2260,8 @@ def _maybe_attach_text(span, label: str, text: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# OTel Log emission (MCP, shell, tool events)
+# Correlated hook log emission
 # ---------------------------------------------------------------------------
-_SHELL_EVENTS = {"BeforeShellExecution", "AfterShellExecution"}
-_TOOL_EVENTS = {"PreToolUse", "PostToolUse", "PostToolUseFailure", "PermissionRequest"}
-
-
 def _get_otel_logger(name: str) -> logging.Logger:
     """Get or create a Python logger with the OTel log bridge handler attached."""
     logger = logging.getLogger(f"otel_hook.{name}")
@@ -2426,270 +2297,22 @@ def _inject_trace_context(attrs: dict) -> tuple:
     return tid, sid
 
 
-def _fmt_duration(duration) -> str:
-    """Format duration for log messages, handling None gracefully."""
-    if duration is None:
-        return "n/a"
-    return f"{duration}ms"
-
-
-def _emit_mcp_log(event_name: str, data: dict, session_ctx: Optional[dict] = None) -> None:
-    """Emit a structured OTel log record for MCP events with full I/O payload.
-
-    Cursor's current dedicated callbacks provide ``mcp_server_name`` and
-    ``tool_name``.  Older payloads may only provide ``command``; normalization
-    uses it strictly as a fallback and never over a real server field.
-    """
-    if not _LOGS_INITIALIZED:
+def _emit_event_log(event_name: str, data: dict) -> None:
+    """Export one policy-filtered JSON body under the active hook span."""
+    body = data.get("_hook_log_body")
+    if not _LOGS_INITIALIZED or body is None:
         return
-
-    logger = _get_otel_logger("mcp")
-    data = _normalize_mcp_event_data(data, event_name)
-    server = data.get("mcp_server") or "unknown"
-    tool = data.get("mcp_tool") or "unknown"
-
-    attrs = {
-        "gen_ai.client.mcp_server": server,
-        "gen_ai.client.mcp_tool": tool,
-        "gen_ai.client.hook.event": event_name,
-    }
-    attrs.update(_mcp_observability_attributes(event_name, data))
-    attrs.update(_collect_event_enrichment_attributes(data, session_ctx=session_ctx))
-    _tid, _sid = _inject_trace_context(attrs)
-
-    # Capture input payload
-    capture_payload = _safe_bool(os.getenv("IDE_OTEL_MCP_LOG_PAYLOAD", "true"))
-    mask = _safe_bool(os.getenv("IDE_OTEL_MASK_PROMPTS", ""))
-    max_chars = _text_max_chars()
-
-    for key in ("mcp_input", "tool_input", "input"):
-        value = data.get(key)
-        if value is not None:
-            text = _stringify(value)
-            attrs["gen_ai.client.mcp.input.length"] = len(text)
-            attrs["gen_ai.client.mcp.input.sha256"] = _hash_text(text)
-            if capture_payload:
-                if mask:
-                    text = _mask_text(text)
-                attrs["gen_ai.client.mcp.input"] = text[:max_chars]
-            break
-
-    # Capture output payload — Cursor uses "result_json" (JSON string)
-    for key in ("mcp_output", "result_json", "tool_output", "output", "tool_response"):
-        value = data.get(key)
-        if value is not None:
-            text = _stringify(value)
-            attrs["gen_ai.client.mcp.output.length"] = len(text)
-            attrs["gen_ai.client.mcp.output.sha256"] = _hash_text(text)
-            if capture_payload:
-                if mask:
-                    text = _mask_text(text)
-                attrs["gen_ai.client.mcp.output"] = text[:max_chars]
-            break
-
-    # Keep the existing duration_ms attribute contract for both source keys.
-    duration = _first_present(data, ("duration_ms", "duration"))
-    if duration is not None:
-        attrs["gen_ai.client.mcp.duration_ms"] = duration
-
-    # Server stdout/stderr (if the IDE provides it)
-    for stream in ("stdout", "stderr", "mcp_stdout", "mcp_stderr"):
-        value = data.get(stream)
-        if value:
-            stream_name = stream.replace("mcp_", "")
-            text = str(value)
-            attrs[f"gen_ai.client.mcp.{stream_name}.length"] = len(text)
-            if capture_payload:
-                if mask:
-                    text = _mask_text(text)
-                attrs[f"gen_ai.client.mcp.{stream_name}"] = text[:max_chars]
-
-    # Emit the log record — span_id in body for backend visibility
-    if event_name == "BeforeMCPExecution":
-        logger.info("[%s] MCP call: %s/%s", _sid, server, tool, extra=attrs)
-    else:
-        logger.info("[%s] MCP result: %s/%s duration=%s", _sid, server, tool, _fmt_duration(duration), extra=attrs)
-
-
-def _emit_shell_log(event_name: str, data: dict, session_ctx: Optional[dict] = None) -> None:
-    """Emit a structured OTel log record for shell execution events."""
-    if not _LOGS_INITIALIZED:
-        return
-
-    logger = _get_otel_logger("shell")
-    command = data.get("command") or "unknown"
-    cwd = data.get("cwd") or ""
-
     attrs = {
         "gen_ai.client.hook.event": event_name,
-        "gen_ai.client.command": command,
-        "gen_ai.client.cwd": cwd,
+        "gen_ai.client.telemetry_source": _TELEMETRY_SOURCE,
     }
-    attrs.update(_collect_event_enrichment_attributes(data, session_ctx=session_ctx))
-    _tid, _sid = _inject_trace_context(attrs)
-
-    exit_code = data.get("exit_code")
-    if exit_code is not None:
-        attrs["gen_ai.client.exit_code"] = exit_code
-    duration = data.get("duration_ms")
-    if duration is not None:
-        attrs["gen_ai.client.duration_ms"] = duration
-
-    # Capture stdout/stderr
-    capture_payload = _safe_bool(os.getenv("IDE_OTEL_MCP_LOG_PAYLOAD", "true"))
-    mask = _safe_bool(os.getenv("IDE_OTEL_MASK_PROMPTS", ""))
-    max_chars = _text_max_chars()
-    for stream in ("stdout", "stderr", "output"):
-        value = data.get(stream)
-        if value:
-            text = str(value)
-            stream_name = "stdout" if stream == "output" else stream
-            attrs[f"gen_ai.client.shell.{stream_name}.length"] = len(text)
-            if capture_payload:
-                if mask:
-                    text = _mask_text(text)
-                attrs[f"gen_ai.client.shell.{stream_name}"] = text[:max_chars]
-
-    if event_name == "BeforeShellExecution":
-        logger.info("[%s] Shell exec: %s", _sid, command, extra=attrs)
-    else:
-        logger.info("[%s] Shell result: %s exit=%s duration=%s", _sid, command, exit_code, _fmt_duration(duration), extra=attrs)
-
-
-def _emit_tool_log(event_name: str, data: dict, session_ctx: Optional[dict] = None) -> None:
-    """Emit a structured OTel log record for tool use events."""
-    if not _LOGS_INITIALIZED:
-        return
-
-    logger = _get_otel_logger("tool")
-    data = _normalize_mcp_event_data(data, event_name)
-    tool_name = data.get("tool_name") or "unknown"
-
-    attrs = {
-        "gen_ai.client.hook.event": event_name,
-        "gen_ai.client.tool_name": tool_name,
-    }
-    attrs.update(_mcp_observability_attributes(event_name, data))
-    attrs.update(_collect_event_enrichment_attributes(data, session_ctx=session_ctx))
-    _tid, _sid = _inject_trace_context(attrs)
-
-    for key in ("tool_id", "tool_use_id"):
-        value = data.get(key)
-        if value is not None:
-            attrs[f"gen_ai.client.{key}"] = value
-
-    duration = data.get("duration_ms")
-    if duration is not None:
-        attrs["gen_ai.client.duration_ms"] = duration
-
-    error = data.get("error")
-    if error is not None:
-        error_text = _stringify(error)
-        attrs["gen_ai.client.error.length"] = len(error_text)
-        attrs["gen_ai.client.error.sha256"] = _hash_text(error_text)
-        if _conversation_content_enabled():
-            if _safe_bool(os.getenv("IDE_OTEL_MASK_PROMPTS", "")):
-                error_text = _mask_text(error_text)
-            attrs["gen_ai.client.error.text"] = error_text[:_text_max_chars()]
-
-    # Capture tool input/output (subject to privacy controls)
-    capture_payload = _safe_bool(os.getenv("IDE_OTEL_MCP_LOG_PAYLOAD", "true"))
-    mask = _safe_bool(os.getenv("IDE_OTEL_MASK_PROMPTS", ""))
-    max_chars = _text_max_chars()
-    for key in ("tool_input", "input"):
-        value = data.get(key)
-        if value is not None:
-            text = _stringify(value)
-            attrs["gen_ai.client.tool.input.length"] = len(text)
-            if capture_payload and _safe_bool(os.getenv("IDE_OTEL_CAPTURE_TOOL_INPUT_CONTENT", "")):
-                if mask:
-                    text = _mask_text(text)
-                attrs["gen_ai.client.tool.input"] = text[:max_chars]
-            break
-
-    if data.get("mcp_tool"):
-        result = _first_present(data, ("result_json", "mcp_output", "tool_output", "output"))
-        if result is not None and capture_payload:
-            text = _stringify(result)
-            if mask:
-                text = _mask_text(text)
-            attrs["gen_ai.client.mcp.output"] = text[:max_chars]
-
-    if event_name == "PostToolUseFailure":
-        logger.warning("[%s] Tool failed: %s", _sid, tool_name, extra=attrs)
-    elif event_name == "PreToolUse":
-        logger.info("[%s] Tool call: %s", _sid, tool_name, extra=attrs)
-    else:
-        logger.info("[%s] Tool result: %s duration=%s", _sid, tool_name, _fmt_duration(duration), extra=attrs)
-
-
-def _emit_conversation_logs(event_name: str, data: dict, session_ctx: Optional[dict] = None) -> None:
-    """Optionally mirror span-first conversation facts as correlated OTel logs."""
-    if not _LOGS_INITIALIZED or not _safe_bool(
-        os.getenv("IDE_OTEL_ENABLE_CONVERSATION_LOGS", "")
-    ):
-        return
-    records = _conversation_records_from_data(data)
-    if not records:
-        return
-    logger = _get_otel_logger("conversation")
-    max_chars = _text_max_chars()
-    for record in records:
-        attrs = {
-            "event.name": f"gen_ai.client.{record.kind}",
-            "gen_ai.client.hook.event": event_name,
-            "gen_ai.client.hook.event_id": data.get("_hook_event_id", "unknown"),
-            "gen_ai.client.message.type": record.kind,
-            "gen_ai.client.message.role": record.role,
-            f"gen_ai.client.{record.kind}.length": record.length,
-            f"gen_ai.client.{record.kind}.sha256": record.sha256,
-        }
-        attrs.update(_collect_event_enrichment_attributes(data, session_ctx=session_ctx))
-        _tid, sid = _inject_trace_context(attrs)
-        if _conversation_content_enabled():
-            content = record.text
-            if content is not None:
-                if _safe_bool(os.getenv("IDE_OTEL_MASK_PROMPTS", "")):
-                    content = _mask_text(content)
-                attrs[f"gen_ai.client.{record.kind}.text"] = content[:max_chars]
-        if record.kind == "error":
-            logger.error("[%s] Conversation event: %s", sid, record.kind, extra=attrs)
-        else:
-            logger.info("[%s] Conversation event: %s", sid, record.kind, extra=attrs)
-
-
-def _emit_event_log(event_name: str, data: dict, session_ctx: Optional[dict] = None) -> None:
-    """Emit OTel log records for hook events (dispatcher)."""
-    if not _LOGS_INITIALIZED:
-        return
-    _emit_conversation_logs(event_name, data, session_ctx=session_ctx)
-    if event_name in _MCP_EVENTS:
-        _emit_mcp_log(event_name, data, session_ctx=session_ctx)
-    elif event_name in _SHELL_EVENTS:
-        _emit_shell_log(event_name, data, session_ctx=session_ctx)
-    elif event_name in _TOOL_EVENTS:
-        _emit_tool_log(event_name, data, session_ctx=session_ctx)
-    elif _safe_bool(os.getenv("IDE_OTEL_LOG_ALL_EVENTS", "")):
-        logger = _get_otel_logger("events")
-        all_attrs = {"gen_ai.client.hook.event": event_name}
-        all_attrs.update(_collect_event_enrichment_attributes(data, session_ctx=session_ctx))
-        _tid, _sid = _inject_trace_context(all_attrs)
-        logger.info("[%s] Hook event: %s", _sid, event_name, extra=all_attrs)
-
-
-def _emit_event_log_with_context(
-    event_name: str,
-    data: dict,
-    session_ctx: Optional[dict],
-    parent_ctx,
-) -> None:
-    """Emit log-only lifecycle evidence under the restored session trace context."""
-    if parent_ctx is None or _REAL_TRACE is None:
-        _emit_event_log(event_name, data, session_ctx=session_ctx)
-        return
-    parent_span = _REAL_TRACE.get_current_span(parent_ctx)
-    with _span_context(parent_span):
-        _emit_event_log(event_name, data, session_ctx=session_ctx)
+    for source, target in (("_hook_event_id", "hook.event_id"), ("session_id", "session_id"),
+                           ("conversation_id", "conversation_id"), ("turn_id", "turn_id"),
+                           ("generation_id", "generation_id")):
+        if data.get(source) is not None:
+            attrs[f"gen_ai.client.{target}"] = data[source]
+    _inject_trace_context(attrs)
+    _get_otel_logger("hooks").info(body, extra=attrs)
 
 
 # ---------------------------------------------------------------------------
@@ -3510,8 +3133,7 @@ def _store_mcp_result(invocation: dict, data: dict) -> None:
         text = _stringify(result)
         invocation["mcp_result_length"] = len(text)
         invocation["mcp_result_sha256"] = _hash_text(text)
-        if _safe_bool(os.getenv("IDE_OTEL_MCP_LOG_PAYLOAD", "true")):
-            invocation["result_json"] = result
+        invocation["result_json"] = result
 
 
 def _merge_invocation_data(data: dict, invocation: dict) -> dict:
@@ -3758,7 +3380,9 @@ def _buffer_session_event(session_key: str, event_name: str, data: dict, ide: st
             event_name,
             data,
         )
-        if not decision.duplicate and not decision.correlated:
+        if not decision.duplicate:
+            if decision.correlated:
+                decision.data["_mcp_correlated_evidence"] = True
             _append_batch_event(gen_key, event_name, decision.data)
         session_ctx["last_seen_at_ns"] = now_ns
         return decision
@@ -3774,7 +3398,7 @@ def _buffer_session_event(session_key: str, event_name: str, data: dict, ide: st
 
 
 def _buffer_generation_end(session_key: str, event_name: str, data: dict, ide: str) -> _BufferedEventDecision:
-    """Append a Stop event to the active generation without creating a new one."""
+    """Append a terminal callback, creating an incomplete generation if needed."""
     now_ns = time.time_ns()
 
     def mutate(session_ctx: dict) -> _BufferedEventDecision:
@@ -3785,7 +3409,7 @@ def _buffer_generation_end(session_key: str, event_name: str, data: dict, ide: s
             pending = session_ctx.get("pending_generations") or []
             gen_key = pending[-1] if pending else None
         if not gen_key:
-            return _BufferedEventDecision(None, data)
+            gen_key = _new_generation_key(session_key, session_ctx)
         decision = ToolInvocationCorrelator(session_ctx, ide, gen_key, now_ns).prepare(
             event_name,
             data,
@@ -3833,7 +3457,7 @@ def _prepare_streaming_session_event(
         elif event_name in _GENERATION_END_EVENTS:
             gen_key = explicit_gen or session_ctx.get("current_generation")
             if not gen_key:
-                return _BufferedEventDecision(None, data, duplicate=True)
+                gen_key = _new_generation_key(session_key, session_ctx)
         elif explicit_gen:
             gen_key = _remember_pending_generation(session_ctx, explicit_gen)
         else:
@@ -4314,18 +3938,10 @@ def _apply_genai_semconv(span, event_name: str, data: dict, ide: str, session_ct
 def _populate_span(span, event_name: str, data: dict, ide: str, session_ctx: Optional[dict] = None, batch_model: Optional[str] = None) -> None:
     """Attach all attributes to a span and emit OTel log records."""
     data = _normalize_mcp_event_data(data, event_name, ide)
-    span.set_attribute("gen_ai.client.hook.event", event_name)
-    span.set_attribute("gen_ai.client.telemetry_source", _TELEMETRY_SOURCE)
-    span.set_attribute("gen_ai.client.hook_schema_version", _HOOK_SCHEMA_VERSION)
-    _set_if_present(span, "gen_ai.client.hook.event_id", data.get("_hook_event_id"))
-    _set_if_present(span, "gen_ai.client.hook.event_id_source", data.get("_hook_event_id_source"))
-    _set_if_present(span, "gen_ai.client.hook.original_event", data.get("_hook_original_event"))
-    _set_if_present(span, "gen_ai.client.hook.provider_adapter", data.get("_hook_provider_adapter"))
-    _set_if_present(
-        span,
-        "gen_ai.client.mcp.correlated_evidence",
-        data.get("_mcp_correlated_evidence"),
-    )
+    # Add bounded provider fields first so canonical attributes retain priority
+    # when the SDK/backend imposes a smaller attribute count limit.
+    for key, value in (data.get("_hook_attributes") or {}).items():
+        span.set_attribute(key, value)
     _set_client_identity_attributes(span, ide, data=data, session_ctx=session_ctx)
     _apply_enrichment_attributes(span, data, session_ctx=session_ctx)
     for key, value in _workspace_observability_attributes(data, session_ctx).items():
@@ -4346,29 +3962,18 @@ def _populate_span(span, event_name: str, data: dict, ide: str, session_ctx: Opt
     _set_if_present(span, "gen_ai.client.version", client_version)
 
     # Emit structured OTel log record (MCP, shell, tool — correlated with this span)
-    _emit_event_log(event_name, data, session_ctx=session_ctx)
-    _set_if_present(span, "gen_ai.client.session_id", data.get("session_id") or data.get("conversation_id"))
-    _set_if_present(span, "gen_ai.client.generation_id", data.get("generation_id"))
-    _set_if_present(span, "gen_ai.client.turn_id", data.get("turn_id"))
+    _emit_event_log(event_name, data)
     span.set_attribute("gen_ai.client.timestamp", datetime.now(timezone.utc).isoformat())
 
     # GenAI semantic conventions
     _apply_genai_semconv(span, event_name, data, ide, session_ctx=session_ctx, batch_model=batch_model)
-
-    # Flatten metadata dict
-    metadata = data.get("metadata")
-    if isinstance(metadata, dict):
-        flat = {}  # type: dict
-        _flatten(flat, "gen_ai.client.metadata", metadata)
-        for k, v in flat.items():
-            _set_if_present(span, k, v)
 
     # Event-specific attributes
     mapping = _EVENT_ATTR_MAP.get(event_name, {})
     for key, attr in mapping.items():
         _set_if_present(span, attr, data.get(key))
     _apply_mcp_attributes(span, event_name, data)
-    _set_codex_tool_attrs(span, event_name, data)
+    _set_tool_payload_attributes(span, event_name, data)
     _apply_conversation_attributes(span, event_name, data)
     _apply_operation_status(span, event_name, data)
 
@@ -4377,90 +3982,50 @@ def _populate_span(span, event_name: str, data: dict, ide: str, session_ctx: Opt
         if value is not None and not isinstance(value, dict):
             _maybe_attach_text(span, label, _stringify(value))
 
+    # Attach correlation last so large content cannot evict it from bounded
+    # SDK attribute storage. Explicit configured mappings still take precedence.
+    span.set_attribute("gen_ai.client.hook.event", event_name)
+    span.set_attribute("gen_ai.client.telemetry_source", _TELEMETRY_SOURCE)
+    span.set_attribute("gen_ai.client.hook_schema_version", _HOOK_SCHEMA_VERSION)
+    _set_if_present(span, "gen_ai.client.hook.event_id", data.get("_hook_event_id"))
+    _set_if_present(span, "gen_ai.client.hook.event_id_source", data.get("_hook_event_id_source"))
+    _set_if_present(span, "gen_ai.client.hook.original_event", data.get("_hook_original_event"))
+    _set_if_present(span, "gen_ai.client.hook.provider_adapter", data.get("_hook_provider_adapter"))
+    _set_if_present(
+        span,
+        "gen_ai.client.mcp.correlated_evidence",
+        data.get("_mcp_correlated_evidence"),
+    )
+    _set_if_present(span, "gen_ai.client.session_id", data.get("session_id") or data.get("conversation_id"))
+    _set_if_present(span, "gen_ai.client.generation_id", data.get("generation_id"))
+    _set_if_present(span, "gen_ai.client.turn_id", data.get("turn_id"))
 
-def _set_codex_tool_attrs(span, event_name: str, data: dict) -> None:
-    """Attach useful attributes from Codex's structured tool hook payloads."""
-    if event_name not in {"PreToolUse", "PermissionRequest", "PostToolUse"}:
+    # Explicit extraction mappings can override a canonical value. This lets
+    # consumers choose their field semantics without provider-specific switches.
+    for key in _CAPTURE_POLICY.mappings.values():
+        if key in (data.get("_hook_attributes") or {}):
+            span.set_attribute(key, data["_hook_attributes"][key])
+
+
+def _set_tool_payload_attributes(span, event_name: str, data: dict) -> None:
+    """Attach canonical facts from payloads already permitted by capture policy."""
+    if event_name not in _OP_TOOL_EVENTS:
         return
-
     tool_input = data.get("tool_input")
     if isinstance(tool_input, dict):
-        command = tool_input.get("command")
-        if isinstance(command, str):
-            span.set_attribute("gen_ai.client.command", command)
-        description = tool_input.get("description")
-        if isinstance(description, str):
-            span.set_attribute("gen_ai.client.approval.description", description)
-        # Flatten full input only when explicitly opted in (IDE_OTEL_CAPTURE_TOOL_INPUT_CONTENT
-        # gates both tool input and tool response content — consistent with _emit_tool_log).
-        if _safe_bool(os.getenv("IDE_OTEL_CAPTURE_TOOL_INPUT_CONTENT", "")):
-            mask = _safe_bool(os.getenv("IDE_OTEL_MASK_PROMPTS", ""))
-            max_chars = _text_max_chars()
-            flat_input: dict = {}
-            _flatten(flat_input, "gen_ai.client.tool.input", tool_input)
-            for key, value in flat_input.items():
-                if isinstance(value, str):
-                    if mask:
-                        value = _mask_text(value)
-                    _set_if_present(span, key, value[:max_chars])
-                else:
-                    _set_if_present(span, key, value)
-        else:
-            # Always emit length+digest for cardinality-safe observability
-            text = _stringify(tool_input)
-            span.set_attribute("gen_ai.client.tool.input.length", len(text))
-            span.set_attribute("gen_ai.client.tool.input.sha256", _hash_text(text))
-
-    tool_response = data.get("tool_response")
-    response_length = _int_or_none(data.get("tool_response_length"))
-    response_sha256 = data.get("tool_response_sha256")
-    if isinstance(tool_response, dict):
-        # Flatten full response only when explicitly opted in (same gate as tool input above)
-        if _safe_bool(os.getenv("IDE_OTEL_CAPTURE_TOOL_INPUT_CONTENT", "")):
-            mask = _safe_bool(os.getenv("IDE_OTEL_MASK_PROMPTS", ""))
-            max_chars = _text_max_chars()
-            flat_response: dict = {}
-            _flatten(flat_response, "gen_ai.client.tool.response", tool_response)
-            for key, value in flat_response.items():
-                if isinstance(value, str):
-                    if mask:
-                        value = _mask_text(value)
-                    _set_if_present(span, key, value[:max_chars])
-                else:
-                    _set_if_present(span, key, value)
-        else:
-            # Always emit length+digest for cardinality-safe observability
-            if response_length is None or not response_sha256:
-                text = _stringify(tool_response)
-                response_length = len(text)
-                response_sha256 = _hash_text(text)
-            span.set_attribute("gen_ai.client.tool.response.length", response_length)
-            span.set_attribute("gen_ai.client.tool.response.sha256", response_sha256)
-    elif tool_response is not None:
-        if response_length is None or not response_sha256:
-            _maybe_attach_text(span, "tool_response", _stringify(tool_response))
-        if response_length is not None:
-            span.set_attribute("gen_ai.client.tool.response.length", response_length)
-        if response_sha256:
-            span.set_attribute("gen_ai.client.tool.response.sha256", response_sha256)
-    else:
-        if response_length is not None:
-            span.set_attribute("gen_ai.client.tool.response.length", response_length)
-        if response_sha256:
-            span.set_attribute("gen_ai.client.tool.response.sha256", response_sha256)
-
-
-def _flatten(out: dict, prefix: str, data: dict) -> None:
-    for key, value in data.items():
-        if value is None:
-            continue
-        name = f"{prefix}.{key}"
-        if isinstance(value, dict):
-            _flatten(out, name, value)
-        elif isinstance(value, list):
-            out[name] = json.dumps(value, ensure_ascii=True)
-        else:
-            out[name] = value
+        for source, target in (("command", "command"), ("description", "approval.description")):
+            value = tool_input.get(source)
+            if isinstance(value, str):
+                span.set_attribute(f"gen_ai.client.{target}", value[:_text_max_chars()])
+    for source, target in (("tool_input", "input"), ("tool_response", "response")):
+        value = data.get(source)
+        length = _int_or_none(data.get(f"{source}_length"))
+        digest = data.get(f"{source}_sha256")
+        if value is not None and (length is None or not digest):
+            text = _stringify(value)
+            length, digest = len(text), _hash_text(text)
+        _set_if_present(span, f"gen_ai.client.tool.{target}.length", length)
+        _set_if_present(span, f"gen_ai.client.tool.{target}.sha256", digest)
 
 
 # ---------------------------------------------------------------------------
@@ -4621,6 +4186,17 @@ def _flush_session(tracer, session_key: str, session_ctx: dict, ide: str, flush:
         context=parent_ctx, start_time=start_ns,
     )
     with _span_context(session_span):
+        for entry in session_batch:
+            data = entry.get("data") or {}
+            event = entry["event"]
+            timestamp = entry.get("timestamp_ns") or end_ns
+            hook_span = tracer.start_span(
+                f"gen_ai.client.hook.{event}", kind=span_kind,
+                context=trace.set_span_in_context(session_span), start_time=timestamp,
+            )
+            with _span_context(hook_span):
+                _populate_span(hook_span, event, data, ide, session_ctx=session_ctx)
+            hook_span.end(end_time=timestamp)
         session_span.set_attribute("gen_ai.client.session_id", session_key)
         _set_if_present(session_span, "gen_ai.agent.id", session_ctx.get("root_agent_id"))
         _set_if_present(
@@ -4682,7 +4258,17 @@ def main() -> int:
     if _safe_bool(os.getenv("IDE_OTEL_LOG_EVENTS", "")):
         # Very early log to stderr to show the hook is alive
         sys.stderr.write(f"Hook starting (pid={os.getpid()})\n")
-    _apply_config_env(_load_config())
+    try:
+        _apply_config_env(_load_config())
+    except ValueError as exc:
+        # A bad capture policy must neither export unfiltered data nor prevent
+        # the harness from continuing its work.
+        _LOGGER.error("Hook telemetry disabled: %s", exc)
+        data = _normalize_input_data(_load_input())
+        ide = _detect_ide(data)
+        event = _event_adapter_for(ide).canonical_event_name(_get_event_name(data))
+        _emit_stdout_response(event, ide, data)
+        return 0
     _configure_logging()
 
     input_data = _load_input()
@@ -4691,6 +4277,9 @@ def main() -> int:
     data = _normalize_input_data(input_data)
     raw_event = _get_event_name(data)
     ide = _detect_ide(data)
+    captured_payload = _CAPTURE_POLICY.filter(input_data)
+    # Never trust incoming private keys as runtime-generated state.
+    data = _normalize_input_data({k: v for k, v in captured_payload.items() if not k.startswith("_")})
     short_hook = ide == "codex" and raw_event in {"SessionEnd", "Interrupt"}
     # Leave one second of Codex's three-second budget for startup and local I/O.
     _EXPORT_DEADLINE = started + 2.0 if short_hook else None
@@ -4706,9 +4295,27 @@ def main() -> int:
     )
     event_name = canonical_event.event_name
     data = canonical_event.to_lifecycle_data()
+    # Pure parsing can retain identity and length/hash facts from omitted
+    # conversation content, without persisting that content.
+    observed = adapter.parse(raw_event, _normalize_input_data(input_data), session_ctx=initial_session_ctx)
+    if canonical_event.event_id_source != "provider":
+        # Unmapped fields can distinguish real callbacks (for example,
+        # model_params-only thoughts). Include them in fallback identity.
+        data["_hook_event_id"] = "hook:" + _hash_text(json.dumps(
+            [observed.event_id, input_data], sort_keys=True, ensure_ascii=False,
+        ))
+    records = data.setdefault("_conversation_records", [])
+    retained = {record["kind"] for record in records}
+    records.extend({"kind": record.kind, "role": record.role, "length": record.length, "sha256": record.sha256}
+                   for record in observed.conversation if record.kind not in retained)
+    data["_hook_attributes"] = _CAPTURE_POLICY.attributes(captured_payload)
+    if _safe_bool(os.getenv("IDE_OTEL_ENABLE_LOGS", "false")):
+        data["_hook_log_body"] = captured_payload
     data = _normalize_mcp_event_data(data, event_name, ide)
     sk = _session_key(data)
     session_ctx = initial_session_ctx if sk == initial_session_key else _load_session_context(sk)
+    if sk and session_ctx is None and event_name not in _SESSION_START_EVENTS:
+        session_ctx = _create_session_context(sk, data, ide)
     session_ctx = _maybe_bind_session_to_upstream_context(sk, session_ctx, data)
     session_ctx = _maybe_enrich_session_context(sk, session_ctx, data)
     agent_engine = _resolved_agent_engine(data, session_ctx, ide=ide)
@@ -4725,6 +4332,8 @@ def main() -> int:
         if event_name in _SESSION_START_EVENTS:
             if sk:
                 _create_session_context(sk, data, ide)
+                if initial_session_ctx is None:
+                    _append_batch_event(f"{sk}_session", event_name, data)
             _emit_stdout_response(event_name, ide, data)
             return 0
 
@@ -4790,6 +4399,11 @@ def main() -> int:
             # SessionEnd: emit session root span, clean up
             if event_name in _SESSION_END_EVENTS:
                 if sk:
+                    with _acquire_lock(_session_lock_path(sk)):
+                        key = f"{sk}_session"
+                        if not any(entry.get("data", {}).get("_hook_event_id") == data.get("_hook_event_id")
+                                   for entry in _load_batch_events(key)):
+                            _append_batch_event(key, event_name, data)
                     _finalize_session(tracer, sk, session_ctx, ide)
                 _emit_stdout_response(event_name, ide, data)
                 return 0
@@ -5611,7 +5225,7 @@ def _doctor_report(agents: tuple, global_: bool, cwd: str) -> tuple[dict, int]:
     endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
     health = _load_delivery_health()
     signal_health = health.get("signals", {}) if isinstance(health, dict) else {}
-    logs_enabled = _safe_bool(os.getenv("IDE_OTEL_ENABLE_LOGS", "true"))
+    logs_enabled = _safe_bool(os.getenv("IDE_OTEL_ENABLE_LOGS", "false"))
 
     def signal_failed_recently(signal: str) -> bool:
         record = signal_health.get(signal, {})
@@ -5658,8 +5272,11 @@ def _doctor_report(agents: tuple, global_: bool, cwd: str) -> tuple[dict, int]:
         "hook_schema_version": _HOOK_SCHEMA_VERSION,
         "registrations": registrations,
         "privacy": {
+            "capture_mode": _CAPTURE_POLICY.mode,
+            "hook_log_body": (
+                _CAPTURE_POLICY.mode if logs_enabled else "disabled"
+            ),
             "conversation_content": _conversation_content_enabled(),
-            "conversation_logs": _safe_bool(os.getenv("IDE_OTEL_ENABLE_CONVERSATION_LOGS", "")),
             "tool_input_content": _safe_bool(os.getenv("IDE_OTEL_CAPTURE_TOOL_INPUT_CONTENT", "")),
             "user_identity": _safe_bool(os.getenv("IDE_OTEL_CAPTURE_USER_IDENTITY", "")),
             "masking": _safe_bool(os.getenv("IDE_OTEL_MASK_PROMPTS", "")),
@@ -5740,6 +5357,7 @@ def _doctor_human_lines(report: dict) -> list[str]:
 def doctor_cmd(agents: tuple, global_: bool, cwd: str, json_output: bool) -> None:
     """Inspect hook registration, privacy, exporter health, and pending state."""
     try:
+        _apply_config_env(_load_config())
         report, exit_code = _doctor_report(agents, global_, cwd)
     except Exception as exc:
         report = {

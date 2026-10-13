@@ -64,6 +64,10 @@ _WINDSURF_EVENT_ALIASES = {
 
 
 _INPUT_ALIASES = {
+    "subagentId": "subagent_id",
+    "parentConversationId": "parent_conversation_id",
+    "toolCallId": "tool_call_id",
+    "elicitationId": "elicitation_id",
     "sessionId": "session_id",
     "conversationId": "conversation_id",
     "generationId": "generation_id",
