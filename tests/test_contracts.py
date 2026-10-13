@@ -364,6 +364,10 @@ def test_real_failure_sets_otel_error_but_interrupt_stays_unset():
 
 
 def test_trace_authoritative_flush_does_not_fail_for_log_only_failure(monkeypatch):
+    # Each real callback is a fresh process. Do not inherit exporter failures or
+    # short-hook deadlines from earlier CLI tests in this pytest process.
+    monkeypatch.setattr(otel_hook, "_EXPORT_FAILURES", set())
+    monkeypatch.setattr(otel_hook, "_EXPORT_DEADLINE", None)
     trace_provider = mock.MagicMock()
     trace_provider.force_flush.return_value = True
     log_provider = mock.MagicMock()
@@ -378,6 +382,8 @@ def test_trace_authoritative_flush_does_not_fail_for_log_only_failure(monkeypatc
 
     assert not otel_hook._force_flush_provider()
     assert otel_hook._force_flush_provider(authoritative_signal="traces")
+    otel_hook._EXPORT_FAILURES.add("traces")
+    assert not otel_hook._force_flush_provider(authoritative_signal="traces")
 
 
 def test_workspace_identity_is_not_invented_from_hook_process_cwd(monkeypatch):
