@@ -19,7 +19,16 @@
       "metadata.request_model",
       "metadata.response_model",
       "metadata.temperature",
-      "metadata.max_tokens"
+      "metadata.max_tokens",
+      "tool_info.cwd",
+      "tool_info.file_path",
+      "tool_info.command_line",
+      "tool_info.mcp_tool_arguments.command",
+      "tool_info.mcp_tool_arguments.file_path",
+      "tool_info.mcp_tool_arguments.path",
+      "tool_info.mcp_tool_arguments.description",
+      "tool_info.mcp_result.exit_code",
+      "llm_request.model"
     ]
   },
   "logs": {

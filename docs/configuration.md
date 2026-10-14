@@ -95,6 +95,19 @@ capture/logs with this allowlist and file-path mappings consumed by Reflect.
 It requires the local Reflect gateway and the updated hook package; it does not
 update Reflect's own setup or normalization code.
 
+The Reflect example covers all eight parsers: Cursor, Windsurf, Claude Code,
+Codex, Gemini CLI, Copilot, OpenCode and the Antigravity compatibility runner.
+Source paths match the original callback structure: Windsurf uses `tool_info.*`,
+and Gemini model hooks use `llm_request.model`. Copilot's JSON-encoded `toolArgs`
+are parsed for canonical command and tool file/path attributes; the encoded
+string is not selected as a recursive span attribute. Canonical tool paths are
+available for other providers too, when capture policy permits their content.
+Antigravity still requires a manual runner; this config does not add native hooks.
+
+These checks replay representative callbacks through the actual SDK and verify
+span fields and complete correlated logs. They do not verify a live agent
+installation or Reflect ingestion.
+
 ### Attribute names and limits
 
 Span extraction uses a `hook.` prefix by default, such as `hook.model_params.0.id`.

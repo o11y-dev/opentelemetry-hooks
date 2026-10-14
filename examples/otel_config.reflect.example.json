@@ -20,12 +20,26 @@
       "metadata.request_model",
       "metadata.response_model",
       "metadata.temperature",
-      "metadata.max_tokens"
+      "metadata.max_tokens",
+      "tool_info.cwd",
+      "tool_info.file_path",
+      "tool_info.command_line",
+      "tool_info.mcp_tool_arguments.command",
+      "tool_info.mcp_tool_arguments.file_path",
+      "tool_info.mcp_tool_arguments.path",
+      "tool_info.mcp_tool_arguments.description",
+      "tool_info.mcp_result.exit_code",
+      "llm_request.model"
     ],
     "max_attributes": 64,
     "mappings": {
       "tool_input.file_path": "gen_ai.client.tool.input.file_path",
-      "tool_input.path": "gen_ai.client.tool.input.path"
+      "tool_input.path": "gen_ai.client.tool.input.path",
+      "tool_info.file_path": "gen_ai.client.file_path",
+      "tool_info.cwd": "gen_ai.client.cwd",
+      "tool_info.command_line": "gen_ai.client.command",
+      "tool_info.mcp_tool_arguments.file_path": "gen_ai.client.tool.input.file_path",
+      "tool_info.mcp_tool_arguments.path": "gen_ai.client.tool.input.path"
     }
   },
   "logs": {

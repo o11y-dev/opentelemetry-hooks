@@ -4013,7 +4013,8 @@ def _set_tool_payload_attributes(span, event_name: str, data: dict) -> None:
         return
     tool_input = data.get("tool_input")
     if isinstance(tool_input, dict):
-        for source, target in (("command", "command"), ("description", "approval.description")):
+        for source, target in (("command", "command"), ("description", "approval.description"),
+                               ("file_path", "tool.input.file_path"), ("path", "tool.input.path")):
             value = tool_input.get(source)
             if isinstance(value, str):
                 span.set_attribute(f"gen_ai.client.{target}", value[:_text_max_chars()])

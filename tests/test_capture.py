@@ -126,7 +126,7 @@ def test_primary_log_body_and_trace_correlation_without_legacy_fanout(monkeypatc
     assert logger.info.call_args.kwargs["extra"]["gen_ai.client.session_id"] == "s"
 
 
-@pytest.mark.parametrize("provider", ["cursor", "claude", "codex", "copilot", "gemini", "windsurf", "opencode"])
+@pytest.mark.parametrize("provider", ["cursor", "claude", "codex", "copilot", "gemini", "windsurf", "antigravity", "opencode"])
 def test_metadata_filter_precedes_buffer_writes(isolated_runtime, monkeypatch, provider):
     monkeypatch.setattr(hook, "_load_config", lambda: {
         "capture": {"mode": "metadata_only"}, "batch": {"on_stop": True}, "logs": {"enabled": True},
@@ -178,14 +178,7 @@ def test_sdk_exports_raw_json_body_with_active_span_context(monkeypatch):
     provider.shutdown()
 
 
-@pytest.mark.parametrize("mode,logs_enabled,selection", [
-    ("full", True, {}), ("full", False, {}), ("metadata_only", True, {}),
-    ("full", True, {"span_include": ["tool_input.command"]}),
-    ("full", False, {"span_include": []}),
-])
-def test_batched_lifecycle_replay_with_real_sdk(tmp_path, mode, logs_enabled, selection):
-    """Separate hook processes, actual SDK export, no collector/network required."""
-    runner = '''
+_SDK_REPLAY_RUNNER = '''
 import json, os
 import otel_hook
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
@@ -205,6 +198,15 @@ OTLPSpanExporter.export = traces
 OTLPLogExporter.export = logs
 otel_hook.cli()
 '''
+
+
+@pytest.mark.parametrize("mode,logs_enabled,selection", [
+    ("full", True, {}), ("full", False, {}), ("metadata_only", True, {}),
+    ("full", True, {"span_include": ["tool_input.command"]}),
+    ("full", False, {"span_include": []}),
+])
+def test_batched_lifecycle_replay_with_real_sdk(tmp_path, mode, logs_enabled, selection):
+    """Separate hook processes, actual SDK export, no collector/network required."""
     config = tmp_path / "config.json"
     config.write_text(json.dumps({
         "capture": {"mode": mode, **selection}, "logs": {"enabled": logs_enabled},
@@ -226,7 +228,7 @@ otel_hook.cli()
     ]
     for event in events:
         result = subprocess.run(
-            [sys.executable, "-c", runner, "--claude"], input=json.dumps(event), env=env,
+            [sys.executable, "-c", _SDK_REPLAY_RUNNER, "--claude"], input=json.dumps(event), env=env,
             capture_output=True, text=True, timeout=15, cwd=Path(hook.__file__).parent,
         )
         assert result.returncode == 0, result.stderr
@@ -443,3 +445,109 @@ def test_managed_span_allowlist_overrides_local_and_isolates_pending_state(isola
     assert hook._BATCH_DIR != old_batches
     assert hook._CAPTURE_POLICY.attributes({"field": 42}) == {}
     assert hook._CAPTURE_POLICY.filter({"field": 42}) == {"field": 42}
+
+
+@pytest.mark.parametrize("provider", ["cursor", "windsurf", "claude", "codex", "gemini", "antigravity", "copilot", "opencode"])
+def test_reflect_config_replays_supported_harnesses(tmp_path, provider):
+    """Replay provider shapes through separate processes and real SDK signals."""
+    example = next(path for path in (
+        Path(hook.__file__).parent / "examples/otel_config.reflect.example.json",
+        Path(sys.prefix) / "share/opentelemetry-hooks/examples/otel_config.reflect.example.json",
+    ) if path.exists())
+    config_data = json.loads(example.read_text())
+    # Substitute only the exporter transport; intercept SDK export, without a gateway.
+    config_data.update(OTEL_EXPORTER_OTLP_ENDPOINT="http://collector.example.test:4318",
+                       OTEL_EXPORTER_OTLP_PROTOCOL="http/protobuf")
+    config_data["batch"]["disable_sdk_batch"] = True
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps(config_data))
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("OTEL_", "IDE_OTEL_"))}
+    env.update(IDE_OTEL_HOOK_HOME=str(tmp_path), IDE_OTEL_CONFIG=str(config),
+               FIXTURE_LOG_FILE=str(tmp_path / "exported_logs.jsonl"))
+    args = {"command": "echo fixture", "file_path": "/workspace/example.py", "path": "/workspace", "description": "fixture"}
+    events = [
+        {"hook_event_name": "UserPromptSubmit", "session_id": "fixture", "prompt": "fixture prompt"},
+        {"hook_event_name": "PreToolUse", "session_id": "fixture", "tool_use_id": "call", "tool_name": "read",
+         "tool_input": args, "unselected": {"secret": "LOG_ONLY"}},
+        {"hook_event_name": "PostToolUse", "session_id": "fixture", "tool_use_id": "call", "tool_name": "read",
+         "tool_response": {"exit_code": 0, "output": "fixture output"}},
+        {"hook_event_name": "Stop", "session_id": "fixture", "response": "fixture response"},
+    ]
+    if provider == "copilot":
+        for event, name in zip(events, ["userPromptSubmitted", "preToolUse", "postToolUse", "agentStop"]):
+            event["hook_event_name"] = name
+            event["sessionId"] = event.pop("session_id")
+            if "tool_input" in event:
+                event["toolArgs"] = json.dumps(event.pop("tool_input"))
+            if "tool_name" in event:
+                event["toolName"] = event.pop("tool_name")
+            if "tool_response" in event:
+                event["toolResult"] = {"textResultForLlm": "fixture output"}
+    elif provider == "windsurf":
+        events = [
+            {"agent_action_name": "pre_user_prompt", "trajectory_id": "fixture", "execution_id": "turn",
+             "tool_info": {"user_prompt": "fixture prompt"}},
+            {"agent_action_name": "pre_mcp_tool_use", "trajectory_id": "fixture", "execution_id": "turn",
+             "tool_info": {"mcp_server_name": "fixture", "mcp_tool_name": "read", "mcp_tool_arguments": args},
+             "unselected": {"secret": "LOG_ONLY"}},
+            {"agent_action_name": "post_mcp_tool_use", "trajectory_id": "fixture", "execution_id": "turn",
+             "tool_info": {"mcp_server_name": "fixture", "mcp_tool_name": "read", "mcp_result": {"exit_code": 0}}},
+            {"agent_action_name": "post_cascade_response", "trajectory_id": "fixture", "execution_id": "turn",
+             "tool_info": {"response": "fixture response"}},
+        ]
+        events[1:1] = [
+            {"agent_action_name": "pre_read_code", "trajectory_id": "fixture", "execution_id": "turn",
+             "tool_info": {"file_path": args["file_path"]}},
+            {"agent_action_name": "pre_run_command", "trajectory_id": "fixture", "execution_id": "turn",
+             "tool_info": {"command_line": args["command"], "cwd": args["path"]}},
+        ]
+    elif provider == "gemini":
+        for event, name in zip(events, ["BeforeAgent", "BeforeTool", "AfterTool", "AfterAgent"]):
+            event["hook_event_name"] = name
+        events[-1]["prompt_response"] = events[-1].pop("response")
+        events.insert(1, {"hook_event_name": "BeforeModel", "session_id": "fixture",
+                          "llm_request": {"model": "fixture-model", "contents": ["LOG_ONLY"]}})
+    elif provider == "cursor":
+        for event, name in zip(events, ["beforeSubmitPrompt", "preToolUse", "postToolUse", "stop"]):
+            event["hook_event_name"] = name
+            event["conversation_id"] = event.pop("session_id")
+            event["generation_id"] = "turn"
+    elif provider == "opencode":
+        for event in events:
+            if "tool_use_id" in event:
+                event["tool_id"] = event.pop("tool_use_id")
+    for event in events:
+        cli_args = [] if provider == "antigravity" else [f"--{provider}"]
+        if provider == "antigravity":
+            env["IDE_OTEL_IDE_NAME"] = provider  # manual compatibility runner
+        payload = dict(event)
+        # Copilot's registered command supplies the event name, outside stdin.
+        if provider == "copilot":
+            cli_args += ["--event", payload.pop("hook_event_name")]
+        result = subprocess.run([sys.executable, "-c", _SDK_REPLAY_RUNNER, *cli_args],
+                                input=json.dumps(payload), env=env, capture_output=True, text=True,
+                                timeout=15, cwd=Path(hook.__file__).parent)
+        assert result.returncode == 0, result.stderr
+        assert "LOG_ONLY" not in result.stdout
+    spans = [json.loads(line) for path in (tmp_path / ".state/local_spans").glob("*.jsonl")
+             for line in path.read_text().splitlines()]
+    assert spans
+    attrs = {key: value for span in spans for key, value in span["attributes"].items()}
+    assert attrs["gen_ai.client.tool.input.file_path"] == args["file_path"]
+    assert attrs["gen_ai.client.tool.input.path"] == args["path"]
+    assert attrs["gen_ai.client.command"] == args["command"]
+    assert attrs["gen_ai.client.session_id"] == "fixture"
+    assert "LOG_ONLY" not in json.dumps(spans)
+    if provider == "windsurf":
+        assert attrs["gen_ai.client.file_path"] == args["file_path"]
+        assert attrs["gen_ai.client.cwd"] == args["path"]
+        assert "hook.tool_info.command_line" not in attrs  # mapped to canonical command
+    if provider == "gemini":
+        assert attrs["hook.llm_request.model"] == "fixture-model"
+    if provider == "copilot":
+        assert "hook.tool_args" not in attrs
+    logs = [json.loads(line) for line in (tmp_path / "exported_logs.jsonl").read_text().splitlines()]
+    expected = [{k: v for k, v in event.items() if provider != "copilot" or k != "hook_event_name"} for event in events]
+    assert len(logs) == len(events)
+    assert all(body in [record["body"] for record in logs] for body in expected)
+    assert all(record["trace_id"] and record["span_id"] for record in logs)
