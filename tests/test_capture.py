@@ -448,14 +448,17 @@ def test_managed_span_allowlist_overrides_local_and_isolates_pending_state(isola
 
 
 @pytest.mark.parametrize("provider", ["cursor", "windsurf", "claude", "codex", "gemini", "antigravity", "copilot", "opencode"])
-@pytest.mark.parametrize("agent_capture", [False, True], ids=["canonical", "agent-extras"])
-def test_reflect_config_replays_supported_harnesses(tmp_path, provider, agent_capture):
+@pytest.mark.parametrize("config_kind", ["minimal", "shared", "agent-extras"])
+def test_reflect_config_replays_supported_harnesses(tmp_path, provider, config_kind):
     """Replay provider shapes through separate processes and real SDK signals."""
     example = next(path for path in (
         Path(hook.__file__).parent / "examples/otel_config.reflect.example.json",
         Path(sys.prefix) / "share/opentelemetry-hooks/examples/otel_config.reflect.example.json",
     ) if path.exists())
+    if config_kind != "shared":
+        example = example.with_name("otel_config.reflect.minimal.example.json")
     config_data = json.loads(example.read_text())
+    agent_capture = config_kind == "agent-extras"
     if agent_capture:
         config_data["capture"] = json.loads((example.parent / "capture" / f"{provider}.example.json").read_text())["capture"]
     # Substitute only the exporter transport; intercept SDK export, without a gateway.
@@ -485,6 +488,7 @@ def test_reflect_config_replays_supported_harnesses(tmp_path, provider, agent_ca
             if "tool_name" in event:
                 event["toolName"] = event.pop("tool_name")
             if "tool_response" in event:
+                event.pop("tool_response")
                 event["toolResult"] = {"textResultForLlm": "fixture output"}
     elif provider == "windsurf":
         events = [
@@ -549,8 +553,18 @@ def test_reflect_config_replays_supported_harnesses(tmp_path, provider, agent_ca
     if provider == "windsurf":
         assert attrs["gen_ai.client.file_path"] == args["file_path"]
         assert attrs["gen_ai.client.cwd"] == args["path"]
-        assert "hook.tool_info.command_line" not in attrs  # canonical command needs no extra field
-    if not agent_capture or provider == "copilot":
+        if config_kind != "shared":
+            assert "hook.tool_info.command_line" not in attrs  # canonical command needs no extra field
+    if config_kind == "shared":
+        if provider != "copilot":
+            assert attrs["process.exit.code"] == (1 if provider == "opencode" else 0)
+            assert attrs["gen_ai.client.tool.input"] == args["command"]
+        else:
+            assert attrs["gen_ai.client.tool.output"] == "fixture output"
+        assert attrs["gen_ai.client.prompt"] == "fixture prompt"
+        assert attrs["gen_ai.client.output"] == "fixture response"
+        assert "hook.tool_args" not in attrs
+    elif not agent_capture or provider == "copilot":
         assert not any(key.startswith("hook.") for key in attrs)
     elif provider == "opencode":
         assert attrs["hook.exit_code"] == 1

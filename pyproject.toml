@@ -58,6 +58,7 @@ include = ["otel_hooks*"]
     "examples/opencode-plugin.example.ts",
     "examples/otel_config.gateway.example.json",
     "examples/otel_config.reflect.example.json",
+    "examples/otel_config.reflect.minimal.example.json",
 ]
 
 "share/opentelemetry-hooks/examples/capture" = [

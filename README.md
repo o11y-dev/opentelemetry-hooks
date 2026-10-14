@@ -100,9 +100,10 @@ Extraction has configurable count, depth, array, string and byte limits.
 
 Use `capture.span_include` to allowlist additional span fields while retaining
 full JSON logs. Canonical attributes remain available; `[]` disables recursive
-extras, and omitting the setting permits all captured fields. The shared examples
-use canonical span attributes; [agent capture examples](docs/configuration.md#agent-capture-examples)
-show optional fields based on the legacy tool/model selections. See the
+extras, and omitting the setting permits all captured fields. The main Reflect
+example selects shared evidence across agents with explicit limits and mappings;
+[agent capture examples](docs/configuration.md#agent-capture-examples) provide smaller
+selections. See the
 [span allowlist](docs/configuration.md#span-only-allowlist) and
 [Reflect configuration](examples/otel_config.reflect.example.json).
 

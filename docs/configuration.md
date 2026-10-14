@@ -90,15 +90,30 @@ content removed by that policy. Managed `span_include` replaces the local list,
 and changing it isolates pending state like any other capture policy change.
 
 The default and gateway examples use metadata-only capture with logs disabled.
-The [Reflect example](../examples/otel_config.reflect.example.json) enables full
-capture and full JSON logs with `span_include: []`: canonical span attributes
-only. Canonical command, tool file/path, model and ID attributes do not need
-extraction mappings. The example requires the local Reflect gateway and updated
-hook package; it does not update Reflect's setup or semantic normalization.
+The main [Reflect example](../examples/otel_config.reflect.example.json) is one
+shared configuration for all eight parsers. It enables full JSON logs, selects
+workspace/tool/model/usage/relationship evidence for spans, maps known scalar
+previews and typed tool fields to names read by Reflect, and explicitly sets
+extraction limits. It does not attach the original JSON object to a span.
+`OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT: 256` gives the SDK room for the 96 additional
+fields plus canonical enrichment; backend limits can still differ.
+
+The [minimal Reflect example](../examples/otel_config.reflect.minimal.example.json)
+keeps `span_include: []`: canonical fields and full JSON logs only. Canonical
+command, tool file/path, model and ID attributes do not need extraction mappings.
+The main example selects additional callback evidence and legacy scalar aliases
+for existing Reflect readers, rather than requiring a complete config per agent.
+
+**A shared capture config is not complete backward compatibility with Reflect.**
+Current Reflect also needs setup/dependency and consumer changes for new tool
+hashes, previews, encoded Copilot arguments and legacy log assumptions. See the
+[Reflect compatibility review](reflect-compatibility.md) for tested behavior,
+remaining gaps and integration requirements. Neither example updates Reflect.
 
 ### Agent capture examples
 
-Start with the shared Reflect example, then optionally replace its entire
+For a smaller agent-specific selection, start with the minimal Reflect example
+and optionally replace its entire
 `capture` object with one of these small snippets. Keep its exporter, batch,
 local span and logging settings. These are copyable configuration sections,
 not automatically loaded profiles or a configuration inheritance mechanism.
@@ -122,16 +137,17 @@ source evidence alongside the canonical model. Copilot arguments are parsed for
 canonical command and file/path attributes without selecting the encoded string
 as a span attribute. Antigravity still requires a manual runner.
 
-All snippets keep full JSON logs when used with the Reflect example. Edit
+All snippets keep full JSON logs when used with either Reflect example. Edit
 `span_include`, limits and mappings for additional fields found in your logs;
 use `exclude` when a field must be removed from both signals. For multiple agents
 sharing one config, combine the needed paths and mappings, or use
 `IDE_OTEL_CONFIG` in each hook command to select separate complete config files.
 The snippet files alone do not configure an exporter or enable logs.
 
-Separate-process SDK replays check both the shared baseline and each agent's
-capture snippet against representative callbacks, preserving complete correlated
-logs. They do not verify a live agent installation or Reflect ingestion.
+Separate-process SDK replays check the shared profile, minimal baseline and each
+agent snippet, preserving complete correlated logs. The compatibility review
+also exercises current Reflect ingestion in temporary databases; these checks do
+not verify a live agent installation or a deployed Reflect upgrade.
 
 ### Attribute names and limits
 
