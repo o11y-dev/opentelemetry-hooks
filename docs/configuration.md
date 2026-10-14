@@ -72,8 +72,8 @@ patterns as `include`, before attribute mappings and extraction limits:
 }
 ```
 
-These examples select workspace, tool and model fields handled by the legacy
-hook, using the current single pipeline. Canonical IDs, model/usage, status,
+The selection above follows workspace, tool and model field groups handled by
+the legacy hook, using the current single pipeline. Canonical IDs, model/usage, status,
 duration and permitted conversation attributes remain available independently
 of this allowlist. Full original JSON logs are unchanged by `span_include`.
 
@@ -89,24 +89,49 @@ and `exclude` still govern content for both signals; an allowlist cannot restore
 content removed by that policy. Managed `span_include` replaces the local list,
 and changing it isolates pending state like any other capture policy change.
 
-The default and gateway examples retain metadata-only capture with logs disabled.
+The default and gateway examples use metadata-only capture with logs disabled.
 The [Reflect example](../examples/otel_config.reflect.example.json) enables full
-capture/logs with this allowlist and file-path mappings consumed by Reflect.
-It requires the local Reflect gateway and the updated hook package; it does not
-update Reflect's own setup or normalization code.
+capture and full JSON logs with `span_include: []`: canonical span attributes
+only. Canonical command, tool file/path, model and ID attributes do not need
+extraction mappings. The example requires the local Reflect gateway and updated
+hook package; it does not update Reflect's setup or semantic normalization.
 
-The Reflect example covers all eight parsers: Cursor, Windsurf, Claude Code,
-Codex, Gemini CLI, Copilot, OpenCode and the Antigravity compatibility runner.
-Source paths match the original callback structure: Windsurf uses `tool_info.*`,
-and Gemini model hooks use `llm_request.model`. Copilot's JSON-encoded `toolArgs`
-are parsed for canonical command and tool file/path attributes; the encoded
-string is not selected as a recursive span attribute. Canonical tool paths are
-available for other providers too, when capture policy permits their content.
-Antigravity still requires a manual runner; this config does not add native hooks.
+### Agent capture examples
 
-These checks replay representative callbacks through the actual SDK and verify
-span fields and complete correlated logs. They do not verify a live agent
-installation or Reflect ingestion.
+Start with the shared Reflect example, then optionally replace its entire
+`capture` object with one of these small snippets. Keep its exporter, batch,
+local span and logging settings. These are copyable configuration sections,
+not automatically loaded profiles or a configuration inheritance mechanism.
+
+| Agent | Capture example | Additional source evidence |
+|---|---|---|
+| Cursor | [cursor](../examples/capture/cursor.example.json) | Tool-response exit code |
+| Claude Code | [claude](../examples/capture/claude.example.json) | Tool-response exit code and batch tool-call IDs |
+| Codex | [codex](../examples/capture/codex.example.json) | Tool-response exit code |
+| Gemini CLI | [gemini](../examples/capture/gemini.example.json) | Tool-response exit code and original `llm_request.model` |
+| Windsurf | [windsurf](../examples/capture/windsurf.example.json) | Native `tool_info.mcp_result.exit_code`, mapped to `hook.tool_response.exit_code` |
+| Copilot | [copilot](../examples/capture/copilot.example.json) | Canonical fields only; JSON-encoded `toolArgs` stays in the log body |
+| OpenCode | [opencode](../examples/capture/opencode.example.json) | Top-level failure exit code emitted by the plugin |
+| Antigravity | [antigravity](../examples/capture/antigravity.example.json) | Tool-response exit code when supplied by a manual compatibility runner |
+
+These are starting selections based on the former tool/model field groups,
+not an exhaustive inventory or a promise that every callback supplies them.
+Cursor, Codex and the compatibility runner share the same tool-response shape,
+so their snippets deliberately match. Gemini's original model field is optional
+source evidence alongside the canonical model. Copilot arguments are parsed for
+canonical command and file/path attributes without selecting the encoded string
+as a span attribute. Antigravity still requires a manual runner.
+
+All snippets keep full JSON logs when used with the Reflect example. Edit
+`span_include`, limits and mappings for additional fields found in your logs;
+use `exclude` when a field must be removed from both signals. For multiple agents
+sharing one config, combine the needed paths and mappings, or use
+`IDE_OTEL_CONFIG` in each hook command to select separate complete config files.
+The snippet files alone do not configure an exporter or enable logs.
+
+Separate-process SDK replays check both the shared baseline and each agent's
+capture snippet against representative callbacks, preserving complete correlated
+logs. They do not verify a live agent installation or Reflect ingestion.
 
 ### Attribute names and limits
 

@@ -448,13 +448,16 @@ def test_managed_span_allowlist_overrides_local_and_isolates_pending_state(isola
 
 
 @pytest.mark.parametrize("provider", ["cursor", "windsurf", "claude", "codex", "gemini", "antigravity", "copilot", "opencode"])
-def test_reflect_config_replays_supported_harnesses(tmp_path, provider):
+@pytest.mark.parametrize("agent_capture", [False, True], ids=["canonical", "agent-extras"])
+def test_reflect_config_replays_supported_harnesses(tmp_path, provider, agent_capture):
     """Replay provider shapes through separate processes and real SDK signals."""
     example = next(path for path in (
         Path(hook.__file__).parent / "examples/otel_config.reflect.example.json",
         Path(sys.prefix) / "share/opentelemetry-hooks/examples/otel_config.reflect.example.json",
     ) if path.exists())
     config_data = json.loads(example.read_text())
+    if agent_capture:
+        config_data["capture"] = json.loads((example.parent / "capture" / f"{provider}.example.json").read_text())["capture"]
     # Substitute only the exporter transport; intercept SDK export, without a gateway.
     config_data.update(OTEL_EXPORTER_OTLP_ENDPOINT="http://collector.example.test:4318",
                        OTEL_EXPORTER_OTLP_PROTOCOL="http/protobuf")
@@ -516,6 +519,11 @@ def test_reflect_config_replays_supported_harnesses(tmp_path, provider):
         for event in events:
             if "tool_use_id" in event:
                 event["tool_id"] = event.pop("tool_use_id")
+        events[2].pop("tool_response")
+        events[2].update(hook_event_name="PostToolUseFailure", exit_code=1, error="exit 1", tool_output="fixture output")
+    elif provider == "claude":
+        events.insert(-1, {"hook_event_name": "PostToolBatch", "session_id": "fixture",
+                           "tool_calls": [{"tool_name": "read", "tool_use_id": "call"}]})
     for event in events:
         cli_args = [] if provider == "antigravity" else [f"--{provider}"]
         if provider == "antigravity":
@@ -541,9 +549,17 @@ def test_reflect_config_replays_supported_harnesses(tmp_path, provider):
     if provider == "windsurf":
         assert attrs["gen_ai.client.file_path"] == args["file_path"]
         assert attrs["gen_ai.client.cwd"] == args["path"]
-        assert "hook.tool_info.command_line" not in attrs  # mapped to canonical command
-    if provider == "gemini":
+        assert "hook.tool_info.command_line" not in attrs  # canonical command needs no extra field
+    if not agent_capture or provider == "copilot":
+        assert not any(key.startswith("hook.") for key in attrs)
+    elif provider == "opencode":
+        assert attrs["hook.exit_code"] == 1
+    else:
+        assert attrs["hook.tool_response.exit_code"] == 0
+    if agent_capture and provider == "gemini":
         assert attrs["hook.llm_request.model"] == "fixture-model"
+    if agent_capture and provider == "claude":
+        assert attrs["hook.tool_calls.0.tool_use_id"] == "call"
     if provider == "copilot":
         assert "hook.tool_args" not in attrs
     logs = [json.loads(line) for line in (tmp_path / "exported_logs.jsonl").read_text().splitlines()]

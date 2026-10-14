@@ -60,6 +60,17 @@ include = ["otel_hooks*"]
     "examples/otel_config.reflect.example.json",
 ]
 
+"share/opentelemetry-hooks/examples/capture" = [
+    "examples/capture/cursor.example.json",
+    "examples/capture/claude.example.json",
+    "examples/capture/codex.example.json",
+    "examples/capture/gemini.example.json",
+    "examples/capture/windsurf.example.json",
+    "examples/capture/copilot.example.json",
+    "examples/capture/opencode.example.json",
+    "examples/capture/antigravity.example.json",
+]
+
 [tool.ruff]
 line-length = 120
 target-version = "py312"

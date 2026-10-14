@@ -1,0 +1,9 @@
+{
+  "capture": {
+    "mode": "full",
+    "span_include": [
+      "tool_response.exit_code",
+      "llm_request.model"
+    ]
+  }
+}

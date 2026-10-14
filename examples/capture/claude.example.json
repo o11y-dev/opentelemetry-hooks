@@ -1,0 +1,9 @@
+{
+  "capture": {
+    "mode": "full",
+    "span_include": [
+      "tool_response.exit_code",
+      "tool_calls.*.tool_use_id"
+    ]
+  }
+}

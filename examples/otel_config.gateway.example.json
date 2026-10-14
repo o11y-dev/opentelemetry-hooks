@@ -7,29 +7,7 @@
   },
   "capture": {
     "mode": "metadata_only",
-    "span_include": [
-      "cwd",
-      "file_path",
-      "tool_input.command",
-      "tool_input.file_path",
-      "tool_input.path",
-      "tool_input.description",
-      "tool_response.exit_code",
-      "metadata.model",
-      "metadata.request_model",
-      "metadata.response_model",
-      "metadata.temperature",
-      "metadata.max_tokens",
-      "tool_info.cwd",
-      "tool_info.file_path",
-      "tool_info.command_line",
-      "tool_info.mcp_tool_arguments.command",
-      "tool_info.mcp_tool_arguments.file_path",
-      "tool_info.mcp_tool_arguments.path",
-      "tool_info.mcp_tool_arguments.description",
-      "tool_info.mcp_result.exit_code",
-      "llm_request.model"
-    ]
+    "span_include": []
   },
   "logs": {
     "enabled": false
