@@ -76,10 +76,8 @@ from otel_hooks.parsers.common import (
     _stringify as _stringify,
     _first_present as _first_present,
     _normalize_input_data as _normalize_input_data,
-    _bound_tool_response_payload as _bound_tool_response_payload,
     _hash_text as _hash_text,
     _mask_text as _mask_text,
-    _conversation_content_enabled as _conversation_content_enabled,
     _text_max_chars as _text_max_chars,
     _session_key as _session_key,
     _generation_key_from_data as _generation_key_from_data,
@@ -123,11 +121,14 @@ from otel_hooks.parsers.opencode import (
 from otel_hooks.parsers import (
     _DEFAULT_EVENT_ADAPTER as _DEFAULT_EVENT_ADAPTER,
     _PROVIDER_EVENT_ADAPTERS as _PROVIDER_EVENT_ADAPTERS,
-    _event_adapter_for as _event_adapter_for,
+    get_parser as _get_parser,
+)
+from otel_hooks.serialization import (
+    _JsonFormatter as _JsonFormatter,
+    _span_to_dict as _span_to_dict,
 )
 from enrichment_connectors import (
     aggregate_generation_memory,
-    extract_event_memory_facts,
     merge_memory_summaries,
     normalize_memory_summary,
 )
@@ -1216,7 +1217,7 @@ def _mcp_observability_attributes(event_name: str, data: dict) -> dict:
         error_text = _stringify(normalized["error"])
         attrs["gen_ai.client.error.length"] = len(error_text)
         attrs["gen_ai.client.error.sha256"] = _hash_text(error_text)
-        if _conversation_content_enabled():
+        if _CAPTURE_POLICY.content_enabled:
             if _safe_bool(os.getenv("IDE_OTEL_MASK_PROMPTS", "")):
                 error_text = _mask_text(error_text)
             attrs["gen_ai.client.error.text"] = error_text[:_text_max_chars()]
@@ -1435,73 +1436,6 @@ def _flush_stale_sessions(tracer) -> None:
 # Logging — JSON structured format with trace context & extra attributes
 # ---------------------------------------------------------------------------
 
-# Standard Python LogRecord fields to exclude from the JSON "attributes" bucket
-_LOG_RESERVED_ATTRS = frozenset({
-    "args", "created", "exc_info", "exc_text", "filename", "funcName",
-    "levelname", "levelno", "lineno", "module", "msecs", "message", "msg",
-    "name", "pathname", "process", "processName", "relativeCreated",
-    "stack_info", "taskName", "thread", "threadName",
-    # Our own top-level keys (already emitted explicitly)
-    "trace_id", "span_id",
-})
-
-
-class _JsonFormatter(logging.Formatter):
-    """Emit each log record as a single-line JSON object.
-
-    Schema::
-
-        {
-          "timestamp": "2026-02-10T09:56:42.546000+00:00",
-          "level": "INFO",
-          "logger": "otel_hook.mcp",
-          "message": "MCP call: gitlab-mcp/search_gitlab",
-          "trace_id": "795f9117681e7f5c010a851ada5c300a",
-          "span_id": "5b718186951f167f",
-          "attributes": {              // all extra= fields
-            "gen_ai.client.mcp_server": "gitlab-mcp",
-            "gen_ai.client.mcp_tool": "search_gitlab",
-            "gen_ai.client.mcp.input": "{...}",
-            ...
-          }
-        }
-    """
-
-    def format(self, record: logging.LogRecord) -> str:
-        # Build the base envelope
-        obj = {
-            "timestamp": datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat(),
-            "level": record.levelname,
-            "logger": record.name,
-            "message": record.getMessage(),
-            "trace_id": getattr(record, "trace_id", "0"),
-            "span_id": getattr(record, "span_id", "0"),
-        }
-
-        # Collect all extra attributes (anything not in the reserved set)
-        attrs = {}
-        for key, value in record.__dict__.items():
-            if key.startswith("_") or key in _LOG_RESERVED_ATTRS:
-                continue
-            # Skip None values and internal callables
-            if value is None or callable(value):
-                continue
-            try:
-                # Ensure JSON-serializable
-                json.dumps(value)
-                attrs[key] = value
-            except (TypeError, ValueError):
-                attrs[key] = str(value)
-        if attrs:
-            obj["attributes"] = attrs
-
-        # Include exception info if present
-        if record.exc_info and record.exc_info[1] is not None:
-            obj["exception"] = self.formatException(record.exc_info)
-
-        return json.dumps(obj, ensure_ascii=False, default=str)
-
-
 def _resolve_log_level() -> int:
     for key in ("IDE_OTEL_LOG_LEVEL", "LOG_LEVEL", "LOGLEVEL"):
         value = os.getenv(key)
@@ -1686,8 +1620,6 @@ def _apply_config_env(config: dict) -> None:
         os.environ[key] = _coerce_env_value(key, value)
     effective = merge_settings(config, restrictions)
     _CAPTURE_POLICY = CapturePolicy.from_config(effective)
-    for suffix in ("CAPTURE_TEXT", "CAPTURE_CONVERSATION_CONTENT", "CAPTURE_TOOL_INPUT_CONTENT", "CAPTURE_TOOL_DEFINITIONS"):
-        os.environ[f"IDE_OTEL_{suffix}"] = str(_CAPTURE_POLICY.mode != "metadata_only")
     # Keep old queues separate so stricter policy never replays old content.
     # Local span paths stay stable for Reflect's existing watcher.
     global _SESSION_DIR, _BATCH_DIR, _LOCK_DIR
@@ -1965,39 +1897,6 @@ def _enable_console_log_exporter() -> None:
         provider.add_log_record_processor(SimpleLogRecordProcessor(ConsoleExporter()))
 
 
-def _span_to_dict(span) -> dict:
-    """Serialize an OTel ReadableSpan to a JSON-compatible dict."""
-    ctx = span.context
-    resource = getattr(span, "resource", None)
-    resource_attributes = dict(getattr(resource, "attributes", {}) or {})
-    parent_id = None
-    parent_ctx = span.parent
-    if parent_ctx is not None and getattr(parent_ctx, "span_id", 0) != 0:
-        parent_id = format(parent_ctx.span_id, "016x")
-    links = []
-    for link in getattr(span, "links", ()) or ():
-        link_context = getattr(link, "context", None)
-        if link_context is None or not getattr(link_context, "is_valid", False):
-            continue
-        links.append({
-            "trace_id": format(link_context.trace_id, "032x"),
-            "span_id": format(link_context.span_id, "016x"),
-            "attributes": dict(getattr(link, "attributes", {}) or {}),
-        })
-    return {
-        "name": span.name,
-        "trace_id": format(ctx.trace_id, "032x") if ctx else None,
-        "span_id": format(ctx.span_id, "016x") if ctx else None,
-        "parent_span_id": parent_id,
-        "start_time_ns": span.start_time,
-        "end_time_ns": span.end_time,
-        "attributes": dict(span.attributes or {}),
-        "resource": resource_attributes,
-        "links": links,
-        "status": span.status.status_code.name if span.status else None,
-    }
-
-
 class _FileSpanExporter:
     """OTel SpanExporter that appends spans as JSONL to a file."""
 
@@ -2179,6 +2078,10 @@ def _init_tracing(
 # ---------------------------------------------------------------------------
 
 
+def _event_adapter_for(ide: str) -> ProviderEventAdapter:
+    return _get_parser(ide, capture_policy=_CAPTURE_POLICY)
+
+
 def _attach_content_fact(span, label: str, text: str, *, capture: bool) -> None:
     if not text:
         return
@@ -2204,7 +2107,7 @@ def _conversation_records_from_data(data: dict) -> tuple[ConversationRecord, ...
         if not isinstance(kind, str) or not isinstance(role, str):
             continue
         if isinstance(text, str) and text:
-            records.append(ConversationRecord.from_text(kind, role, text))
+            records.append(ConversationRecord.from_text(kind, role, text, capture=_CAPTURE_POLICY.content_enabled))
         elif isinstance(length, int) and length >= 0 and isinstance(sha256, str) and sha256:
             records.append(ConversationRecord(kind, role, None, length, sha256))
     return tuple(records)
@@ -2213,14 +2116,14 @@ def _conversation_records_from_data(data: dict) -> tuple[ConversationRecord, ...
 def _apply_conversation_attributes(span, event_name: str, data: dict) -> None:
     records = _conversation_records_from_data(data)
     if not records:
-        records = tuple(ProviderEventAdapter()._conversation_records(event_name, data))
+        records = tuple(ProviderEventAdapter(capture_policy=_CAPTURE_POLICY)._conversation_records(event_name, data))
     if records:
         span.set_attribute("gen_ai.client.message.types", [record.kind for record in records])
         span.set_attribute("gen_ai.client.message.roles", [record.role for record in records])
     for record in records:
         span.set_attribute(f"gen_ai.client.{record.kind}.length", record.length)
         span.set_attribute(f"gen_ai.client.{record.kind}.sha256", record.sha256)
-        if _conversation_content_enabled() and record.text is not None:
+        if _CAPTURE_POLICY.content_enabled and record.text is not None:
             _attach_content_fact(span, record.kind, record.text, capture=True)
 
     error = data.get("error")
@@ -2255,7 +2158,7 @@ def _maybe_attach_text(span, label: str, text: str) -> None:
         span,
         label,
         text,
-        capture=_safe_bool(os.getenv("IDE_OTEL_CAPTURE_TEXT", "")),
+        capture=_CAPTURE_POLICY.content_enabled,
     )
 
 
@@ -2618,17 +2521,6 @@ def _new_generation_key(session_key: str, session_ctx: dict) -> str:
     return gen_key
 
 
-def _advance_generation(session_key: str, session_ctx: dict) -> str:
-    """Atomically start a new generation within the session."""
-    _ctx, gen_key = _update_session_context(
-        session_key,
-        lambda latest: _new_generation_key(session_key, latest),
-    )
-    if gen_key:
-        return gen_key
-    return _new_generation_key(session_key, session_ctx)
-
-
 def _resolve_generation_key(data: dict, session_ctx: Optional[dict]) -> Optional[str]:
     """Resolve the generation key for this event.
 
@@ -2798,42 +2690,6 @@ def _local_span_path(session_key: Optional[str]) -> str:
     key = session_key or "unscoped"
     safe_key = re.sub(r"[^A-Za-z0-9_.-]+", "_", key)
     return os.path.join(_LOCAL_SPANS_DIR, f"{safe_key}.jsonl")
-
-
-def _save_local_span_event(event_name: str, ide: str, data: dict) -> None:
-    if not _local_spans_enabled():
-        return
-    session_key = _session_key(data)
-    record = {
-        "timestamp_ns": time.time_ns(),
-        "event": event_name,
-        "ide": ide,
-        "session_key": session_key,
-        "generation_key": _generation_key_from_data(data),
-        "data": data,
-    }
-    lock_key = session_key or "unscoped"
-    lock_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", lock_key)
-    lock_path = os.path.join(_LOCK_DIR, f"local_spans_{lock_name}.lock")
-    try:
-        os.makedirs(_LOCAL_SPANS_DIR, exist_ok=True)
-        with _acquire_lock(lock_path):
-            with open(_local_span_path(session_key), "a", encoding="utf-8") as fh:
-                fh.write(json.dumps(record, ensure_ascii=True, default=str) + "\n")
-    except OSError as exc:
-        _LOGGER.debug("local spans save failed: %s", exc)
-
-
-def _local_trace_saving_configured() -> bool:
-    return _local_spans_configured()
-
-
-def _local_trace_saving_enabled() -> bool:
-    return _local_spans_enabled()
-
-
-def _save_local_trace_event(event_name: str, ide: str, data: dict) -> None:
-    _save_local_span_event(event_name, ide, data)
 
 
 def _batch_path(key: str) -> str:
@@ -3125,7 +2981,7 @@ def _store_mcp_result(invocation: dict, data: dict) -> None:
         error_text = _stringify(data.get("error"))
         invocation["error_length"] = len(error_text)
         invocation["error_sha256"] = _hash_text(error_text)
-        if _conversation_content_enabled():
+        if _CAPTURE_POLICY.content_enabled:
             invocation["error"] = error_text
         invocation["mcp_status"] = "error"
     result = _first_present(data, ("result_json", "mcp_output", "tool_output", "output"))
@@ -3907,11 +3763,11 @@ def _apply_genai_semconv(span, event_name: str, data: dict, ide: str, session_ct
 
     # Tool definitions (opt-in)
     tool_defs = _first_present(data, ("tool_definitions", "tools", "tool_schema"))
-    if tool_defs is not None and _safe_bool(os.getenv("IDE_OTEL_CAPTURE_TOOL_DEFINITIONS", "")):
+    if tool_defs is not None and _CAPTURE_POLICY.content_enabled:
         span.set_attribute("gen_ai.tool.definitions", _stringify(tool_defs))
 
     # GenAI messages (opt-in)
-    if _conversation_content_enabled():
+    if _CAPTURE_POLICY.content_enabled:
         records = _conversation_records_from_data(data)
         prompt = next((record.text for record in records if record.kind == "prompt"), None)
         response = next((record.text for record in records if record.kind == "response"), None)
@@ -3926,7 +3782,7 @@ def _apply_genai_semconv(span, event_name: str, data: dict, ide: str, session_ct
         inp_msg, out_msg = _genai_messages(prompt, response)
         _set_if_present(span, "gen_ai.input.messages", inp_msg)
         _set_if_present(span, "gen_ai.output.messages", out_msg)
-    if _safe_bool(os.getenv("IDE_OTEL_CAPTURE_TEXT", "")):
+    if _CAPTURE_POLICY.content_enabled:
         system_instructions = _first_present(data, ("system_instructions", "system_prompt"))
         if system_instructions is not None:
             _set_if_present(span, "gen_ai.system_instructions", _stringify(system_instructions))
@@ -3944,10 +3800,6 @@ def _populate_span(span, event_name: str, data: dict, ide: str, session_ctx: Opt
         span.set_attribute(key, value)
     _set_client_identity_attributes(span, ide, data=data, session_ctx=session_ctx)
     _apply_enrichment_attributes(span, data, session_ctx=session_ctx)
-    for key, value in _workspace_observability_attributes(data, session_ctx).items():
-        _set_if_present(span, key, value)
-    for key, value in _native_telemetry_attributes(data).items():
-        _set_if_present(span, key, value)
 
     # Optionally attach OS / host attributes on every span.
     # These are already present as resource attributes via OTEL_RESOURCE_ATTRIBUTES,
@@ -4032,11 +3884,6 @@ def _set_tool_payload_attributes(span, event_name: str, data: dict) -> None:
 # ---------------------------------------------------------------------------
 # Memory enrichment (generation/session summaries)
 # ---------------------------------------------------------------------------
-def _extract_event_memory_facts(event_name: str, data: dict) -> dict:
-    """Backward-compatible wrapper for connector-based enrichment."""
-    return extract_event_memory_facts(event_name, data)
-
-
 def _aggregate_generation_memory(batch: list, repo_root: Optional[str] = None) -> dict:
     """Backward-compatible wrapper for connector-based enrichment."""
     return aggregate_generation_memory(batch, repo_root=repo_root)
@@ -5277,8 +5124,8 @@ def _doctor_report(agents: tuple, global_: bool, cwd: str) -> tuple[dict, int]:
             "hook_log_body": (
                 _CAPTURE_POLICY.mode if logs_enabled else "disabled"
             ),
-            "conversation_content": _conversation_content_enabled(),
-            "tool_input_content": _safe_bool(os.getenv("IDE_OTEL_CAPTURE_TOOL_INPUT_CONTENT", "")),
+            "conversation_content": _CAPTURE_POLICY.content_enabled,
+            "tool_input_content": _CAPTURE_POLICY.content_enabled,
             "user_identity": _safe_bool(os.getenv("IDE_OTEL_CAPTURE_USER_IDENTITY", "")),
             "masking": _safe_bool(os.getenv("IDE_OTEL_MASK_PROMPTS", "")),
         },

@@ -35,9 +35,16 @@ Edit the source checkout, never an installed copy in another tool's environment.
 - `otel_hooks/config.py`: structured settings, managed configuration and legacy key translation.
 - `otel_hooks/capture.py`: payload filtering and bounded typed attribute extraction.
 - `otel_hooks/attributes.py`: canonical field mappings.
+- `otel_hooks/serialization.py`: diagnostic JSON formatting and span serialization.
 - `otel_hooks/bootstrap.py`: source-checkout dependency provisioning.
 - `enrichment_connectors.py`: memory enrichment.
 - `plugin/opencode.ts`: OpenCode callback bridge.
+
+The runtime filters incoming payloads with the effective `CapturePolicy` before
+passing them to a parser. Standalone parsers default to hash-only conversation
+facts; pass `get_parser(provider, capture_policy=policy)` explicitly to retain
+permitted content. Apply `policy.filter(payload)` first when using parsers outside
+the runtime. Capture decisions do not read or write legacy content flags.
 
 For provider changes, verify payloads and hook behavior against first-party
 documentation and add sanitized fixtures under `tests/fixtures/contracts/`.

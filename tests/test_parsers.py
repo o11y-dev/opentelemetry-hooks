@@ -57,3 +57,19 @@ def test_legacy_adapter_imports_and_unknown_provider():
     assert otel_hook.ClaudeEventAdapter is type(get_parser("claude"))
     parser = get_parser("custom-runner")
     assert parser.parse("CustomEvent", {}) == parser.normalize("CustomEvent", None, {})
+
+
+@pytest.mark.parametrize("provider", ["cursor", "windsurf", "claude", "codex", "gemini", "antigravity", "copilot", "opencode"])
+def test_explicit_capture_policy_is_isolated_from_other_parsers_and_environment(monkeypatch, provider):
+    from otel_hooks.capture import CapturePolicy
+    for flag in ("TEXT", "CONVERSATION_CONTENT", "TOOL_INPUT_CONTENT", "TOOL_DEFINITIONS"):
+        monkeypatch.setenv(f"IDE_OTEL_CAPTURE_{flag}", "true")
+    full = get_parser(provider, capture_policy=CapturePolicy(mode="full"))
+    default = get_parser(provider)
+    raw = {"response": "fixture response", "last_assistant_message": "fixture response",
+           "prompt_response": "fixture response"}
+    assert full.parse("Stop", raw).conversation[0].text == "fixture response"
+    private = default.parse("Stop", raw).conversation[0]
+    assert private.text is None
+    assert private.length == len("fixture response")
+    assert private.sha256 == full.parse("Stop", raw).conversation[0].sha256

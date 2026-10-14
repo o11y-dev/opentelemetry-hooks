@@ -3,7 +3,6 @@ from dataclasses import dataclass
 from typing import Optional
 from .common import (
     _hash_text,
-    _conversation_content_enabled,
 )
 
 
@@ -18,12 +17,12 @@ class ConversationRecord:
     sha256: str = ""
 
     @classmethod
-    def from_text(cls, kind: str, role: str, text: str) -> "ConversationRecord":
+    def from_text(cls, kind: str, role: str, text: str, *, capture: bool = False) -> "ConversationRecord":
         """Build a content fact without retaining raw text unless capture is enabled."""
         return cls(
             kind=kind,
             role=role,
-            text=text if _conversation_content_enabled() else None,
+            text=text if capture else None,
             length=len(text),
             sha256=_hash_text(text),
         )

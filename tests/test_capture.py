@@ -551,3 +551,29 @@ def test_reflect_config_replays_supported_harnesses(tmp_path, provider):
     assert len(logs) == len(events)
     assert all(body in [record["body"] for record in logs] for body in expected)
     assert all(record["trace_id"] and record["span_id"] for record in logs)
+
+
+def test_config_does_not_translate_capture_policy_into_process_flags(isolated_runtime):
+    for flag in ("TEXT", "CONVERSATION_CONTENT", "TOOL_INPUT_CONTENT", "TOOL_DEFINITIONS"):
+        os.environ[f"IDE_OTEL_CAPTURE_{flag}"] = "legacy-value"
+    before = dict(os.environ)
+    hook._apply_config_env({"capture": {"mode": "full"}})
+    assert hook._CAPTURE_POLICY.content_enabled
+    for key, value in before.items():
+        assert os.environ[key] == value
+    hook._apply_config_env({"capture": {"mode": "metadata_only"}})
+    assert not hook._CAPTURE_POLICY.content_enabled
+
+
+def test_span_workspace_and_native_enrichment_is_computed_once(isolated_runtime, monkeypatch):
+    workspace = Mock(return_value={"gen_ai.client.workspace_path": "/fixture"})
+    native = Mock(return_value={"gen_ai.client.native.source": "fixture"})
+    monkeypatch.setattr(hook, "_workspace_observability_attributes", workspace)
+    monkeypatch.setattr(hook, "_native_telemetry_attributes", native)
+    span = Mock()
+    hook._populate_span(span, "SessionStart", {}, "claude")
+    workspace.assert_called_once()
+    native.assert_called_once()
+    attrs = {call.args[0]: call.args[1] for call in span.set_attribute.call_args_list}
+    assert attrs["gen_ai.client.workspace_path"] == "/fixture"
+    assert attrs["gen_ai.client.native.source"] == "fixture"

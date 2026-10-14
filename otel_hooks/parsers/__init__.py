@@ -1,4 +1,5 @@
 """Provider parser registry; imports no SDK and performs no runtime setup."""
+from ..capture import CapturePolicy
 from .models import (
     ConversationRecord as ConversationRecord,
     AgentRelationship as AgentRelationship,
@@ -33,8 +34,9 @@ _PROVIDER_EVENT_ADAPTERS = {
 }
 
 
-def get_parser(ide: str) -> BaseParser:
-    return _PROVIDER_EVENT_ADAPTERS.get(ide, _DEFAULT_EVENT_ADAPTER)
+def get_parser(ide: str, *, capture_policy: CapturePolicy | None = None) -> BaseParser:
+    parser = _PROVIDER_EVENT_ADAPTERS.get(ide, _DEFAULT_EVENT_ADAPTER)
+    return type(parser)(capture_policy=capture_policy) if capture_policy is not None else parser
 
 
 # Public parser lookup; the private spelling remains available in otel_hook.

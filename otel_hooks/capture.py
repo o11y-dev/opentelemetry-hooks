@@ -70,6 +70,11 @@ class CapturePolicy:
     max_array_length: int = 128
     max_attribute_bytes: int = 32768
 
+    @property
+    def content_enabled(self) -> bool:
+        """Content must still pass filter(); this only controls retention afterward."""
+        return self.mode != "metadata_only"
+
     @classmethod
     def from_config(cls, settings: dict):
         config = settings.get("capture", {})

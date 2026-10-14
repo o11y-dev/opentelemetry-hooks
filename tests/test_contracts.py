@@ -110,23 +110,16 @@ def test_conversation_content_is_hash_only_by_default(monkeypatch):
     assert "text" not in lifecycle_data["_conversation_records"][0]
 
 
-def test_conversation_content_new_gate_and_legacy_gate(monkeypatch):
-    for env_name in ("IDE_OTEL_CAPTURE_CONVERSATION_CONTENT", "IDE_OTEL_CAPTURE_TEXT"):
-        monkeypatch.delenv("IDE_OTEL_CAPTURE_CONVERSATION_CONTENT", raising=False)
-        monkeypatch.delenv("IDE_OTEL_CAPTURE_TEXT", raising=False)
-        monkeypatch.setenv(env_name, "true")
-        event = otel_hook.ClaudeEventAdapter().normalize(
-            "Stop",
-            "Stop",
-            {"session_id": "session-1", "last_assistant_message": "fixture response"},
-        )
-        span = RecordingSpan()
-        otel_hook._apply_conversation_attributes(
-            span,
-            event.event_name,
-            event.to_lifecycle_data(),
-        )
-        assert span.attributes["gen_ai.client.response.text"] == "fixture response"
+@pytest.mark.parametrize("mode", ["selected_content", "full"])
+def test_conversation_content_uses_explicit_policy(monkeypatch, mode):
+    policy = otel_hook.CapturePolicy(mode=mode)
+    monkeypatch.setattr(otel_hook, "_CAPTURE_POLICY", policy)
+    event = otel_hook.ClaudeEventAdapter(capture_policy=policy).normalize(
+        "Stop", "Stop", {"session_id": "session-1", "last_assistant_message": "fixture response"},
+    )
+    span = RecordingSpan()
+    otel_hook._apply_conversation_attributes(span, event.event_name, event.to_lifecycle_data())
+    assert span.attributes["gen_ai.client.response.text"] == "fixture response"
 
 
 def test_hook_logs_require_enabled_logging_and_a_captured_body(monkeypatch):
@@ -474,11 +467,11 @@ def test_claude_batch_and_compaction_content_not_persisted(monkeypatch, isolated
 
 
 def test_claude_batch_capture_is_explicit_masked_and_bounded(monkeypatch):
-    monkeypatch.setenv("IDE_OTEL_CAPTURE_TOOL_INPUT_CONTENT", "true")
+    policy = otel_hook.CapturePolicy(mode="full")
     monkeypatch.setenv("IDE_OTEL_MASK_PROMPTS", "true")
     monkeypatch.setenv("IDE_OTEL_TEXT_MAX_CHARS", "32")
     original = "fixture@example.test " + "x" * 100
-    event = otel_hook.ClaudeEventAdapter().normalize("PostToolBatch", None, {
+    event = otel_hook.ClaudeEventAdapter(capture_policy=policy).normalize("PostToolBatch", None, {
         "tool_calls": [{"tool_response": original}],
     })
     call = event.to_lifecycle_data()["tool_calls"][0]
@@ -490,8 +483,8 @@ def test_claude_batch_capture_is_explicit_masked_and_bounded(monkeypatch):
 
 @pytest.mark.parametrize("name,field", [("PreCompact", "custom_instructions"), ("PostCompact", "compact_summary")])
 def test_compaction_content_can_be_enabled(monkeypatch, name, field):
-    monkeypatch.setenv("IDE_OTEL_CAPTURE_CONVERSATION_CONTENT", "true")
-    event = otel_hook.ClaudeEventAdapter().normalize(name, None, {field: "fixture content"})
+    policy = otel_hook.CapturePolicy(mode="full")
+    event = otel_hook.ClaudeEventAdapter(capture_policy=policy).normalize(name, None, {field: "fixture content"})
     assert event.conversation[0].text == "fixture content"
 
 

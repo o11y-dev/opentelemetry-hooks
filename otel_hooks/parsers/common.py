@@ -50,7 +50,7 @@ def _normalize_input_data(data: dict) -> dict:
     return normalized or data
 
 
-def _bound_tool_response_payload(data: dict) -> None:
+def _bound_tool_response_payload(data: dict, *, retain_content: bool = False) -> None:
     """Keep buffered tool responses small while preserving exact size evidence."""
     value = data.get("tool_response")
     if value is None:
@@ -69,8 +69,7 @@ def _bound_tool_response_payload(data: dict) -> None:
         return
 
     data["tool_response_truncated"] = True
-    retain_preview = _safe_bool(os.getenv("IDE_OTEL_CAPTURE_TOOL_INPUT_CONTENT", ""))
-    if retain_preview and max_chars > 0:
+    if retain_content and max_chars > 0:
         data["tool_response"] = text[:max_chars]
     else:
         data.pop("tool_response", None)
@@ -86,13 +85,6 @@ def _mask_text(text: str) -> str:
     text = _HOME_RE.sub("/Users/[REDACTED]", text)
     text = _WINDOWS_HOME_RE.sub(lambda match: match[1] + "[REDACTED]", text)
     return text
-
-
-def _conversation_content_enabled() -> bool:
-    """Return whether raw conversation/delegation content was explicitly enabled."""
-    return _safe_bool(os.getenv("IDE_OTEL_CAPTURE_CONVERSATION_CONTENT", "")) or _safe_bool(
-        os.getenv("IDE_OTEL_CAPTURE_TEXT", "")
-    )
 
 
 def _text_max_chars() -> int:

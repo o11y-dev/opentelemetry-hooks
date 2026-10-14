@@ -117,7 +117,8 @@ class TestFloatOrNone:
 
 class TestMemoryAggregation:
     def test_extract_event_memory_facts(self):
-        facts = otel_hook._extract_event_memory_facts("AfterFileEdit", {
+        from enrichment_connectors import extract_event_memory_facts
+        facts = extract_event_memory_facts("AfterFileEdit", {
             "file_path": "src/main.py",
             "tool_name": "edit",
             "agent_name": "planner",
@@ -820,7 +821,7 @@ class TestGenAISemconv:
         }
 
     def test_infers_provider_and_sets_v137_attributes(self, monkeypatch):
-        monkeypatch.setenv("IDE_OTEL_CAPTURE_TEXT", "true")
+        monkeypatch.setattr(otel_hook, "_CAPTURE_POLICY", otel_hook.CapturePolicy(mode="full"))
         span = mock.MagicMock()
 
         otel_hook._apply_genai_semconv(span, "SubagentStart", {
@@ -1980,15 +1981,19 @@ class TestTraceContextSelection:
 # ── Generation advance ────────────────────────────────────────────────────
 
 
-class TestAdvanceGeneration:
+class TestGenerationContext:
     def test_increments_counter(self, tmp_path):
         with mock.patch.object(otel_hook, "_SESSION_DIR", str(tmp_path)):
             with mock.patch.object(otel_hook, "_LOCK_DIR", str(tmp_path / "locks")):
                 ctx = otel_hook._create_session_context("sess-adv", {}, "copilot")
-                gen1 = otel_hook._advance_generation("sess-adv", ctx)
+                ctx, gen1 = otel_hook._update_session_context(
+                    "sess-adv", lambda latest: otel_hook._new_generation_key("sess-adv", latest),
+                )
                 assert gen1 == "sess-adv_gen_1"
                 ctx = otel_hook._load_session_context("sess-adv")
-                gen2 = otel_hook._advance_generation("sess-adv", ctx)
+                ctx, gen2 = otel_hook._update_session_context(
+                    "sess-adv", lambda latest: otel_hook._new_generation_key("sess-adv", latest),
+                )
                 assert gen2 == "sess-adv_gen_2"
 
 
@@ -2718,7 +2723,7 @@ class _FakeSpan:
 class TestToolPayloadAttributes:
     def test_large_response_is_bounded_before_buffering(self, monkeypatch):
         monkeypatch.setenv("IDE_OTEL_TEXT_MAX_CHARS", "64")
-        monkeypatch.setenv("IDE_OTEL_CAPTURE_TOOL_INPUT_CONTENT", "true")
+        monkeypatch.setattr(otel_hook, "_CAPTURE_POLICY", otel_hook.CapturePolicy(mode="full"))
         original = {"output": "x" * 10_000}
         event = otel_hook._event_adapter_for("codex").normalize(
             "PostToolUse",

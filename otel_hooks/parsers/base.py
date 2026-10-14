@@ -14,11 +14,11 @@ from .common import (
     _normalize_input_data,
     _bound_tool_response_payload,
     _hash_text,
-    _conversation_content_enabled,
     _session_key,
     _generation_key_from_data,
     _normalize_mcp_event_data,
 )
+from ..capture import CapturePolicy
 from .models import (
     ConversationRecord,
     AgentRelationship,
@@ -50,6 +50,11 @@ class BaseParser:
         "PreCompact": ("compaction.instructions", "user", ("custom_instructions",)),
         "PostCompact": ("compaction.summary", "system", ("compact_summary",)),
     }
+
+    def __init__(self, capture_policy: Optional[CapturePolicy] = None) -> None:
+        # Runtime supplies the effective policy after filtering. Standalone
+        # parsers retain hashes only unless explicitly configured otherwise.
+        self.capture_policy = capture_policy or CapturePolicy()
 
     def parse(self, event_name: str, data: dict, session_ctx: Optional[dict] = None) -> CanonicalHookEvent:
         """Parse one callback without initializing telemetry or writing state."""
@@ -84,7 +89,7 @@ class BaseParser:
         relationship = AgentRelationship(
             agent_id=self._text_value(normalized.get("agent_id")),
             parent_agent_id=self._text_value(normalized.get("parent_agent_id")),
-            task=task_text if task_text and _conversation_content_enabled() else None,
+            task=task_text if task_text and self.capture_policy.content_enabled else None,
             task_length=len(task_text) if task_text else 0,
             task_sha256=_hash_text(task_text) if task_text else "",
             status=self._text_value(normalized.get("status")),
@@ -102,11 +107,11 @@ class BaseParser:
             parent_span_id=self._native_span_id(normalized.get("native_parent_span_id")),
         )
         self._store_privacy_safe_conversation(event_name, normalized, conversation)
-        if not _conversation_content_enabled():
+        if not self.capture_policy.content_enabled:
             for source, target in _INPUT_ALIASES.items():
                 if target not in normalized:
                     normalized.pop(source, None)
-        _bound_tool_response_payload(normalized)
+        _bound_tool_response_payload(normalized, retain_content=self.capture_policy.content_enabled)
         return CanonicalHookEvent(
             provider=self.provider,
             original_event_name=original_event_name,
@@ -133,26 +138,26 @@ class BaseParser:
             kind, role, fields = self.event_text_fields[event_name]
             text = self._first_text(data, fields)
             if text:
-                yield ConversationRecord.from_text(kind, role, text)
+                yield ConversationRecord.from_text(kind, role, text, capture=self.capture_policy.content_enabled)
         if event_name == "UserPromptSubmit":
             prompt = self._first_text(data, ("prompt", "user_prompt", "input"))
             if prompt:
-                yield ConversationRecord.from_text("prompt", "user", prompt)
+                yield ConversationRecord.from_text("prompt", "user", prompt, capture=self.capture_policy.content_enabled)
         if event_name == "Stop":
             response = self._first_text(data, self.response_fields)
             if response:
-                yield ConversationRecord.from_text("response", "assistant", response)
+                yield ConversationRecord.from_text("response", "assistant", response, capture=self.capture_policy.content_enabled)
             stop_message = self._first_text(data, self.stop_message_fields)
             if stop_message and stop_message != response:
-                yield ConversationRecord.from_text("stop_message", "system", stop_message)
+                yield ConversationRecord.from_text("stop_message", "system", stop_message, capture=self.capture_policy.content_enabled)
         if event_name in {"ErrorOccurred", "PostToolUseFailure"} or data.get("error") is not None:
             error = self._first_text(data, ("error_message", "error"))
             if error:
-                yield ConversationRecord.from_text("error", "error", error)
+                yield ConversationRecord.from_text("error", "error", error, capture=self.capture_policy.content_enabled)
         if event_name in {"SubagentStart", "SubagentStop"}:
             task = self._first_text(data, ("delegation_task", "subagent_task", "task"))
             if task:
-                yield ConversationRecord.from_text("delegation.task", "system", task)
+                yield ConversationRecord.from_text("delegation.task", "system", task, capture=self.capture_policy.content_enabled)
 
     def _store_privacy_safe_conversation(
         self,
@@ -161,7 +166,7 @@ class BaseParser:
         conversation: tuple[ConversationRecord, ...],
     ) -> None:
         if conversation:
-            capture = _conversation_content_enabled()
+            capture = self.capture_policy.content_enabled
             data["_conversation_records"] = [
                 {
                     "kind": record.kind,
@@ -172,7 +177,7 @@ class BaseParser:
                 }
                 for record in conversation
             ]
-        if _conversation_content_enabled():
+        if self.capture_policy.content_enabled:
             return
 
         if event_name in self.event_text_fields:

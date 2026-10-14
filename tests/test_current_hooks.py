@@ -11,6 +11,7 @@ from tests.test_contracts import isolated_state, RecordingSpan  # noqa: F401
 
 @pytest.fixture(autouse=True)
 def default_content_privacy(monkeypatch):
+    monkeypatch.setattr(hook, "_CAPTURE_POLICY", hook.CapturePolicy())
     monkeypatch.delenv("IDE_OTEL_CAPTURE_TEXT", raising=False)
     monkeypatch.delenv("IDE_OTEL_CAPTURE_CONVERSATION_CONTENT", raising=False)
 
@@ -89,7 +90,7 @@ def test_new_content_facts_are_private_by_default(monkeypatch, provider, name, p
 
 
 def test_new_response_text_capture_opt_in(monkeypatch):
-    monkeypatch.setenv("IDE_OTEL_CAPTURE_CONVERSATION_CONTENT", "true")
+    monkeypatch.setattr(hook, "_CAPTURE_POLICY", hook.CapturePolicy(mode="full"))
     item = event("cursor", "afterAgentResponse", text="fixture response")
     span = RecordingSpan()
     hook._apply_conversation_attributes(span, item.event_name, item.to_lifecycle_data())

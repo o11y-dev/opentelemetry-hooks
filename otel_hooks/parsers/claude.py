@@ -19,7 +19,7 @@ class ClaudeEventAdapter(BaseParser):
             # Batch results duplicate individual tool callbacks. Retain only
             # identity and content facts unless tool-content capture is enabled.
             calls = []
-            capture = _safe_bool(os.getenv("IDE_OTEL_CAPTURE_TOOL_INPUT_CONTENT", ""))
+            capture = self.capture_policy.content_enabled
             for call in data.get("tool_calls") or []:
                 if not isinstance(call, dict):
                     continue

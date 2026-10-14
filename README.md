@@ -213,7 +213,8 @@ bun test tests/opencode.test.ts
 ```
 
 Runtime orchestration lives in `otel_hook.py`; pure provider parsers,
-configuration, capture policy and canonical field mappings live in `otel_hooks/`.
+configuration, capture policy, canonical field mappings and JSON serialization
+live in `otel_hooks/`.
 See [contribution guide](CONTRIBUTING.md), [telemetry reference](docs/telemetry-reference.md),
 and [CHANGELOG.md](CHANGELOG.md).
 
