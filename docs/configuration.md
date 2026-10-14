@@ -50,6 +50,53 @@ Paths use normalized lowercase snake case: `toolInput.Command` becomes
 selected parent path covers its descendants. Exclusions win. The filter preserves
 original key spelling and JSON value types in the log body.
 
+### Span-only allowlist
+
+`capture.span_include` selects additional recursively extracted span fields from
+the already permitted payload. It uses the same normalized source paths and
+patterns as `include`, before attribute mappings and extraction limits:
+
+```json
+{
+  "capture": {
+    "mode": "full",
+    "span_include": [
+      "cwd", "file_path", "tool_input.command", "tool_input.file_path",
+      "tool_input.path", "tool_input.description", "tool_response.exit_code",
+      "metadata.model", "metadata.request_model", "metadata.response_model",
+      "metadata.temperature", "metadata.max_tokens"
+    ],
+    "max_attributes": 64
+  },
+  "logs": {"enabled": true}
+}
+```
+
+These examples select workspace, tool and model fields handled by the legacy
+hook, using the current single pipeline. Canonical IDs, model/usage, status,
+duration and permitted conversation attributes remain available independently
+of this allowlist. Full original JSON logs are unchanged by `span_include`.
+
+- Omit `span_include` to extract all fields permitted by the capture policy.
+- Use `[]` for canonical span attributes only, without recursive extras.
+- Use a parent path or wildcard to include its descendants. Arrays support
+  numeric paths, such as `tool_calls.*.id` or `flags.0`.
+- Nonmatching fields do not consume extraction limits or increment
+  `hook.capture.dropped_fields`. Limits still apply to the selected fields.
+
+This is a span-size control, not a privacy boundary. `capture.mode`, `include`
+and `exclude` still govern content for both signals; an allowlist cannot restore
+content removed by that policy. Managed `span_include` replaces the local list,
+and changing it isolates pending state like any other capture policy change.
+
+The default and gateway examples retain metadata-only capture with logs disabled.
+The [Reflect example](../examples/otel_config.reflect.example.json) enables full
+capture/logs with this allowlist and file-path mappings consumed by Reflect.
+It requires the local Reflect gateway and the updated hook package; it does not
+update Reflect's own setup or normalization code.
+
+### Attribute names and limits
+
 Span extraction uses a `hook.` prefix by default, such as `hook.model_params.0.id`.
 Homogeneous scalar arrays remain arrays. Mixed/nested arrays use numeric path
 components. Null leaves are omitted because span attributes cannot represent

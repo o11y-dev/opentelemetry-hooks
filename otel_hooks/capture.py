@@ -62,6 +62,7 @@ class CapturePolicy:
     mode: str = "metadata_only"
     include: tuple[str, ...] = ()
     exclude: tuple[str, ...] = ()
+    span_include: tuple[str, ...] | None = None
     mappings: dict[str, str] = field(default_factory=dict)
     max_attributes: int = 64
     max_string_length: int = 4000
@@ -81,7 +82,9 @@ class CapturePolicy:
         if mode not in {"metadata_only", "selected_content", "full"}:
             raise ValueError(f"invalid capture.mode: {mode!r}")
         kwargs = {"mode": mode}
-        for key in ("include", "exclude"):
+        for key in ("include", "exclude", "span_include"):
+            if key == "span_include" and key not in config:
+                continue
             value = config.get(key, [])
             if not isinstance(value, list) or not all(isinstance(p, str) and p for p in value):
                 raise ValueError(f"capture.{key} must be an array of field paths")
@@ -105,14 +108,16 @@ class CapturePolicy:
     def fingerprint(self) -> str:
         return hashlib.sha256(json.dumps(self.__dict__, sort_keys=True).encode()).hexdigest()[:16]
 
-    def filter(self, payload: dict) -> dict:
+    def filter(self, payload: dict, *, span_only: bool = False) -> dict:
+        """Select permitted payload fields, or strictly select extra span fields."""
         def visit(value, path: str):
             if _matches(path, self.exclude):
                 return _MISSING
             # Full logs are deliberately lossless, including deeply nested JSON.
             # Depth and size limits apply to span extraction, not log bodies.
-            selected = self.mode == "full" or (
-                self.mode == "selected_content" and _matches(path, self.include)
+            selected = (
+                _matches(path, self.span_include or ()) if span_only else
+                self.mode == "full" or (self.mode == "selected_content" and _matches(path, self.include))
             )
             if isinstance(value, dict):
                 result = {}
@@ -133,6 +138,8 @@ class CapturePolicy:
                 return _MISSING
             if selected:
                 return value
+            if span_only:
+                return _MISSING
             parts = path.split(".")
             # Known usage/request metadata containers have the same scalar schema.
             permitted = len(parts) == 1 or (len(parts) == 2 and parts[0] in {"usage", "metadata", "model_params"})
@@ -155,6 +162,8 @@ class CapturePolicy:
         numeric path components. Null leaves are omitted (unsupported on spans).
         Colliding normalized paths are all omitted, never silently overwritten.
         """
+        if self.span_include is not None:
+            payload = self.filter(payload, span_only=True)
         result, collisions = {}, set()
         used_bytes = 0
         dropped = 0

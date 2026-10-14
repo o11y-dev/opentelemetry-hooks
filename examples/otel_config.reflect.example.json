@@ -1,0 +1,37 @@
+{
+  "OTEL_EXPORTER_OTLP_ENDPOINT": "http://localhost:4317",
+  "OTEL_EXPORTER_OTLP_PROTOCOL": "grpc",
+  "OTEL_SERVICE_NAME": "coding-agent",
+  "batch": {
+    "on_stop": true
+  },
+  "local_spans": true,
+  "capture": {
+    "mode": "full",
+    "span_include": [
+      "cwd",
+      "file_path",
+      "tool_input.command",
+      "tool_input.file_path",
+      "tool_input.path",
+      "tool_input.description",
+      "tool_response.exit_code",
+      "metadata.model",
+      "metadata.request_model",
+      "metadata.response_model",
+      "metadata.temperature",
+      "metadata.max_tokens"
+    ],
+    "max_attributes": 64,
+    "mappings": {
+      "tool_input.file_path": "gen_ai.client.tool.input.file_path",
+      "tool_input.path": "gen_ai.client.tool.input.path"
+    }
+  },
+  "logs": {
+    "enabled": true
+  },
+  "diagnostics": {
+    "level": "WARNING"
+  }
+}

@@ -98,6 +98,13 @@ attributes. Generated names use lowercase snake case. Values stay typed;
 objects become dotted paths. **The full hook JSON is never a span attribute.**
 Extraction has configurable count, depth, array, string and byte limits.
 
+Use `capture.span_include` to allowlist additional span fields while retaining
+full JSON logs. Canonical attributes remain available; `[]` disables recursive
+extras, and omitting the setting permits all captured fields. The examples select
+workspace, tool and model fields handled by the legacy hook. See the
+[span allowlist](docs/configuration.md#span-only-allowlist) and
+[Reflect configuration](examples/otel_config.reflect.example.json).
+
 For selected content:
 
 ```json

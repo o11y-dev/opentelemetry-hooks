@@ -178,8 +178,12 @@ def test_sdk_exports_raw_json_body_with_active_span_context(monkeypatch):
     provider.shutdown()
 
 
-@pytest.mark.parametrize("mode,logs_enabled", [("full", True), ("full", False), ("metadata_only", True)])
-def test_batched_lifecycle_replay_with_real_sdk(tmp_path, mode, logs_enabled):
+@pytest.mark.parametrize("mode,logs_enabled,selection", [
+    ("full", True, {}), ("full", False, {}), ("metadata_only", True, {}),
+    ("full", True, {"span_include": ["tool_input.command"]}),
+    ("full", False, {"span_include": []}),
+])
+def test_batched_lifecycle_replay_with_real_sdk(tmp_path, mode, logs_enabled, selection):
     """Separate hook processes, actual SDK export, no collector/network required."""
     runner = '''
 import json, os
@@ -203,7 +207,7 @@ otel_hook.cli()
 '''
     config = tmp_path / "config.json"
     config.write_text(json.dumps({
-        "capture": {"mode": mode}, "logs": {"enabled": logs_enabled},
+        "capture": {"mode": mode, **selection}, "logs": {"enabled": logs_enabled},
         "batch": {"on_stop": True, "disable_sdk_batch": True}, "local_spans": True,
         "OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector.example.test:4318",
         "OTEL_EXPORTER_OTLP_PROTOCOL": "http/protobuf",
@@ -233,6 +237,11 @@ otel_hook.cli()
     serialized = json.dumps(spans)
     if mode == "metadata_only":
         assert "SECRET" not in serialized
+    elif selection:
+        assert "hook.tool_input.nested.2.camel_case" not in serialized
+        assert "gen_ai.client.command" in serialized
+        assert "gen_ai.client.tool_use_id" in serialized
+        assert ("hook.tool_input.command" in serialized) == bool(selection["span_include"])
     else:
         assert "hook.tool_input.nested.2.camel_case" in serialized
     assert "_hook_log_body" not in serialized
@@ -377,3 +386,60 @@ def test_selected_array_fields_preserve_indices_without_retaining_siblings():
 def test_parent_relationship_ids_are_metadata():
     data = {"parentConversationId": "session-parent", "parentToolCallId": "call-parent", "subagentId": "agent"}
     assert policy().filter(data) == data
+
+
+@pytest.mark.parametrize("selection,expected", [
+    ({}, {"hook.tool_input.command": "pwd", "hook.tool_input.other": 2, "hook.model": "example"}),
+    ({"span_include": []}, {}),
+    ({"span_include": ["tool_input.command"]}, {"hook.tool_input.command": "pwd"}),
+    ({"span_include": ["tool_input"]}, {"hook.tool_input.command": "pwd", "hook.tool_input.other": 2}),
+    ({"span_include": ["tool_input.*"]}, {"hook.tool_input.command": "pwd", "hook.tool_input.other": 2}),
+])
+def test_span_allowlist_only_selects_extra_attributes(selection, expected):
+    capture = policy("full", **selection)
+    payload = {"toolInput": {"Command": "pwd", "other": 2}, "model": "example"}
+    assert capture.filter(payload) == payload
+    assert capture.attributes(capture.filter(payload)) == expected
+
+
+def test_span_allowlist_precedes_limits_and_mappings():
+    capture = policy("full", span_include=["tool_input.command"], max_attributes=1,
+                     mappings={"tool_input.command": "command.observed"})
+    data = {"a": {str(i): "x" * 5000 for i in range(100)}, "tool_input": {"command": "pwd"}}
+    assert capture.attributes(capture.filter(data)) == {"command.observed": "pwd"}
+
+
+def test_span_allowlist_respects_shared_privacy_exclusions():
+    capture = policy("full", span_include=["tool_input"], exclude=["tool_input.secret"])
+    payload = {"tool_input": {"command": "pwd", "secret": "PRIVATE"}, "extra": "log-only"}
+    permitted = capture.filter(payload)
+    assert permitted == {"tool_input": {"command": "pwd"}, "extra": "log-only"}
+    assert capture.attributes(permitted) == {"hook.tool_input.command": "pwd"}
+
+
+def test_span_allowlist_cannot_enable_content_removed_by_capture_mode():
+    capture = policy("metadata_only", span_include=["tool_input.command"])
+    assert capture.attributes(capture.filter({"tool_input": {"command": "PRIVATE"}})) == {}
+
+
+def test_span_allowlist_selects_array_leaves_without_changing_log_body():
+    capture = policy("full", span_include=["results.*.id", "flags.1"])
+    payload = {"results": [{"id": "a", "text": "one"}, {"id": "b", "text": "two"}], "flags": [True, False]}
+    assert capture.filter(payload) == payload
+    assert capture.attributes(payload) == {"hook.results.0.id": "a", "hook.results.1.id": "b", "hook.flags.1": False}
+
+
+@pytest.mark.parametrize("value", [None, "*", [1], [""]])
+def test_span_allowlist_rejects_invalid_configuration(value):
+    with pytest.raises(ValueError, match="capture.span_include"):
+        policy("full", span_include=value)
+
+
+def test_managed_span_allowlist_overrides_local_and_isolates_pending_state(isolated_runtime):
+    hook._apply_config_env({"capture": {"mode": "full", "span_include": ["*"]}})
+    old_batches = hook._BATCH_DIR
+    hook._apply_config_env({"capture": {"mode": "full", "span_include": ["*"]},
+                           "_managed": {"capture": {"span_include": []}}})
+    assert hook._BATCH_DIR != old_batches
+    assert hook._CAPTURE_POLICY.attributes({"field": 42}) == {}
+    assert hook._CAPTURE_POLICY.filter({"field": 42}) == {"field": 42}

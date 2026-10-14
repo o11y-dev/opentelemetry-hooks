@@ -7,7 +7,21 @@
   },
   "local_spans": true,
   "capture": {
-    "mode": "metadata_only"
+    "mode": "metadata_only",
+    "span_include": [
+      "cwd",
+      "file_path",
+      "tool_input.command",
+      "tool_input.file_path",
+      "tool_input.path",
+      "tool_input.description",
+      "tool_response.exit_code",
+      "metadata.model",
+      "metadata.request_model",
+      "metadata.response_model",
+      "metadata.temperature",
+      "metadata.max_tokens"
+    ]
   },
   "logs": {
     "enabled": false

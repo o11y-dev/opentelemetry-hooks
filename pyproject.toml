@@ -56,6 +56,8 @@ include = ["otel_hooks*"]
     "examples/cursor-hooks.example.json",
     "examples/hooks.example.json",
     "examples/opencode-plugin.example.ts",
+    "examples/otel_config.gateway.example.json",
+    "examples/otel_config.reflect.example.json",
 ]
 
 [tool.ruff]
