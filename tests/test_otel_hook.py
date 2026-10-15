@@ -17,6 +17,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import enrichment_connectors
 import otel_hook
+from otel_hooks import cli as hook_cli
 
 
 @pytest.fixture(autouse=True)
@@ -3059,14 +3060,14 @@ class TestSetupOpencode:
         """Return the path to the real plugin/opencode.ts source file."""
         return os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            "plugin", otel_hook._OPENCODE_PLUGIN_SOURCE_FILENAME,
+            "plugin", hook_cli._OPENCODE_PLUGIN_SOURCE_FILENAME,
         )
 
     def test_global_install_creates_plugin_file(self, tmp_path, monkeypatch):
         config_dir = tmp_path / ".config" / "opencode" / "plugins"
         monkeypatch.setenv("HOME", str(tmp_path))
-        monkeypatch.setattr(otel_hook, "_find_opencode_plugin_source", self._plugin_source)
-        otel_hook.setup_opencode(global_=True)
+        monkeypatch.setattr(hook_cli, "_find_opencode_plugin_source", self._plugin_source)
+        hook_cli.setup_opencode(global_=True)
         dest = config_dir / "otel-hook.ts"
         assert dest.is_file()
         assert dest.read_text() == Path(self._plugin_source()).read_text()
@@ -3075,8 +3076,8 @@ class TestSetupOpencode:
         # Set up a fake git repo root
         (tmp_path / ".git").mkdir()
         plugins_dir = tmp_path / ".opencode" / "plugins"
-        monkeypatch.setattr(otel_hook, "_find_opencode_plugin_source", self._plugin_source)
-        otel_hook.setup_opencode(global_=False, cwd=str(tmp_path))
+        monkeypatch.setattr(hook_cli, "_find_opencode_plugin_source", self._plugin_source)
+        hook_cli.setup_opencode(global_=False, cwd=str(tmp_path))
         dest = plugins_dir / "otel-hook.ts"
         assert dest.is_file()
 
@@ -3088,8 +3089,8 @@ class TestSetupOpencode:
         import shutil as _shutil
         _shutil.copy2(src, dest)
         monkeypatch.setenv("HOME", str(tmp_path))
-        monkeypatch.setattr(otel_hook, "_find_opencode_plugin_source", lambda: src)
-        otel_hook.setup_opencode(global_=True)
+        monkeypatch.setattr(hook_cli, "_find_opencode_plugin_source", lambda: src)
+        hook_cli.setup_opencode(global_=True)
         captured = capsys.readouterr()
         assert "Already up to date" in captured.out
 
@@ -3099,36 +3100,36 @@ class TestSetupOpencode:
         dest = config_dir / "otel-hook.ts"
         dest.write_text("// old content")
         monkeypatch.setenv("HOME", str(tmp_path))
-        monkeypatch.setattr(otel_hook, "_find_opencode_plugin_source", self._plugin_source)
-        otel_hook.setup_opencode(global_=True)
+        monkeypatch.setattr(hook_cli, "_find_opencode_plugin_source", self._plugin_source)
+        hook_cli.setup_opencode(global_=True)
         assert dest.read_text() == Path(self._plugin_source()).read_text()
         captured = capsys.readouterr()
         assert "Updated" in captured.out
 
     def test_raises_when_source_not_found(self, monkeypatch):
-        monkeypatch.setattr(otel_hook, "_find_opencode_plugin_source", lambda: None)
+        monkeypatch.setattr(hook_cli, "_find_opencode_plugin_source", lambda: None)
         import click
         with pytest.raises(click.ClickException, match="plugin/opencode.ts"):
-            otel_hook.setup_opencode(global_=True)
+            hook_cli.setup_opencode(global_=True)
 
     def test_detect_available_agents_includes_opencode_when_config_exists(self, tmp_path, monkeypatch):
         config_dir = tmp_path / ".config" / "opencode"
         config_dir.mkdir(parents=True)
         monkeypatch.setenv("HOME", str(tmp_path))
-        monkeypatch.setattr(otel_hook.shutil, "which", lambda cmd: None)
-        found = otel_hook._detect_available_agents()
+        monkeypatch.setattr(hook_cli.shutil, "which", lambda cmd: None)
+        found = hook_cli._detect_available_agents()
         assert "opencode" in found
 
     def test_detect_available_agents_includes_opencode_when_binary_exists(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HOME", str(tmp_path))
-        monkeypatch.setattr(otel_hook.shutil, "which", lambda cmd: "/usr/local/bin/opencode" if cmd == "opencode" else None)
-        found = otel_hook._detect_available_agents()
+        monkeypatch.setattr(hook_cli.shutil, "which", lambda cmd: "/usr/local/bin/opencode" if cmd == "opencode" else None)
+        found = hook_cli._detect_available_agents()
         assert "opencode" in found
 
     def test_setup_agent_dispatches_to_opencode(self, tmp_path, monkeypatch):
         called = []
-        monkeypatch.setattr(otel_hook, "setup_opencode", lambda global_, cwd: called.append((global_, cwd)))
-        otel_hook.setup_agent("opencode", global_=True, cwd="/tmp")
+        monkeypatch.setattr(hook_cli, "setup_opencode", lambda global_, cwd: called.append((global_, cwd)))
+        hook_cli.setup_agent("opencode", global_=True, cwd="/tmp")
         assert called == [(True, "/tmp")]
 
 
@@ -3139,8 +3140,8 @@ class TestSetupOpencode:
 class TestSetupCodex:
     def test_project_install_creates_hooks_and_config(self, tmp_path, monkeypatch):
         (tmp_path / ".git").mkdir()
-        monkeypatch.setattr(otel_hook, "_resolve_hook_cmd", lambda: "otel-hook")
-        otel_hook.setup_codex(global_=False, cwd=str(tmp_path))
+        monkeypatch.setattr(hook_cli, "_resolve_hook_cmd", lambda: "otel-hook")
+        hook_cli.setup_codex(global_=False, cwd=str(tmp_path))
         hooks_path = tmp_path / ".codex" / "hooks.json"
         config_path = tmp_path / ".codex" / "config.toml"
         assert hooks_path.is_file()
@@ -3156,19 +3157,19 @@ class TestSetupCodex:
 
     def test_global_install_uses_home(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HOME", str(tmp_path))
-        monkeypatch.setattr(otel_hook, "_resolve_hook_cmd", lambda: "otel-hook")
-        otel_hook.setup_codex(global_=True)
+        monkeypatch.setattr(hook_cli, "_resolve_hook_cmd", lambda: "otel-hook")
+        hook_cli.setup_codex(global_=True)
         assert (tmp_path / ".codex" / "hooks.json").is_file()
 
     def test_detect_available_agents_includes_codex_when_config_exists(self, tmp_path, monkeypatch):
         (tmp_path / ".codex").mkdir()
         monkeypatch.setenv("HOME", str(tmp_path))
-        monkeypatch.setattr(otel_hook.shutil, "which", lambda cmd: None)
-        found = otel_hook._detect_available_agents()
+        monkeypatch.setattr(hook_cli.shutil, "which", lambda cmd: None)
+        found = hook_cli._detect_available_agents()
         assert "codex" in found
 
     def test_setup_agent_dispatches_to_codex(self, monkeypatch):
         called = []
-        monkeypatch.setattr(otel_hook, "setup_codex", lambda global_, cwd: called.append((global_, cwd)))
-        otel_hook.setup_agent("codex", global_=False, cwd="/tmp/project")
+        monkeypatch.setattr(hook_cli, "setup_codex", lambda global_, cwd: called.append((global_, cwd)))
+        hook_cli.setup_agent("codex", global_=False, cwd="/tmp/project")
         assert called == [(False, "/tmp/project")]

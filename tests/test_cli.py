@@ -6,7 +6,8 @@ import pytest
 from click.testing import CliRunner
 
 import otel_hook
-from otel_hook import cli, setup_cursor, setup_windsurf, setup_claude, setup_copilot, setup_gemini, setup_codex
+from otel_hooks import cli as hook_cli
+from otel_hooks.cli import cli, setup_cursor, setup_windsurf, setup_claude, setup_copilot, setup_gemini, setup_codex
 
 
 # ---------------------------------------------------------------------------
@@ -81,7 +82,7 @@ class TestDoctor:
         def fail_report(*_args, **_kwargs):
             raise RuntimeError("private diagnostic detail")
 
-        monkeypatch.setattr(otel_hook, "_doctor_report", fail_report)
+        monkeypatch.setattr(hook_cli, "_doctor_report", fail_report)
         args = ["doctor"] + (["--json"] if json_output else [])
 
         result = CliRunner().invoke(cli, args)
@@ -105,15 +106,15 @@ class TestDoctor:
         config = tmp_path / "hooks.json"
         _write(str(config), {"hooks": {"SessionStart": [{"command": "otel-hook --claude"}]}})
         monkeypatch.setattr(
-            otel_hook,
+            hook_cli,
             "_agent_config_paths",
-            lambda _global, _cwd: {agent: str(config) for agent in otel_hook._SUPPORTED_AGENTS},
+            lambda _global, _cwd: {agent: str(config) for agent in hook_cli._SUPPORTED_AGENTS},
         )
         monkeypatch.setattr(otel_hook, "_detect_ide", lambda _data: "claude")
         monkeypatch.setattr(
-            otel_hook,
+            hook_cli,
             "_pending_state_summary",
-            lambda: {
+            lambda _runtime: {
                 "sessions": 0,
                 "batches": 0,
                 "locks": 0,
@@ -144,9 +145,9 @@ class TestDoctor:
         config = tmp_path / "windsurf.json"
         _write(str(config), {"hooks": {"sessionStart": [{"command": "otel-hook --windsurf"}]}})
         monkeypatch.setattr(
-            otel_hook,
+            hook_cli,
             "_agent_config_paths",
-            lambda _global, _cwd: {agent: str(config) for agent in otel_hook._SUPPORTED_AGENTS},
+            lambda _global, _cwd: {agent: str(config) for agent in hook_cli._SUPPORTED_AGENTS},
         )
         result = CliRunner().invoke(cli, ["diagnose", "--agent", "windsurf"])
         assert result.exit_code == 0
@@ -159,7 +160,7 @@ class TestDoctor:
 
 class TestSetupCursor:
     def test_creates_new_file(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(otel_hook, "_resolve_hook_cmd", lambda: "otel-hook")
+        monkeypatch.setattr(hook_cli, "_resolve_hook_cmd", lambda: "otel-hook")
         setup_cursor(global_=False, cwd=str(tmp_path))
         hooks_path = tmp_path / ".cursor" / "hooks.json"
         assert hooks_path.exists()
@@ -169,7 +170,7 @@ class TestSetupCursor:
         assert doc["hooks"]["sessionStart"] == [{"command": "otel-hook --cursor"}]
 
     def test_idempotent(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(otel_hook, "_resolve_hook_cmd", lambda: "otel-hook")
+        monkeypatch.setattr(hook_cli, "_resolve_hook_cmd", lambda: "otel-hook")
         setup_cursor(global_=False, cwd=str(tmp_path))
         content_before = _read(str(tmp_path / ".cursor" / "hooks.json"))
         setup_cursor(global_=False, cwd=str(tmp_path))
@@ -177,7 +178,7 @@ class TestSetupCursor:
         assert content_before == content_after
 
     def test_merges_existing_file(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(otel_hook, "_resolve_hook_cmd", lambda: "otel-hook")
+        monkeypatch.setattr(hook_cli, "_resolve_hook_cmd", lambda: "otel-hook")
         hooks_path = tmp_path / ".cursor" / "hooks.json"
         os.makedirs(str(hooks_path.parent))
         _write(str(hooks_path), {"version": 1, "hooks": {"sessionStart": [{"command": "some-other-hook"}]}})
@@ -189,7 +190,7 @@ class TestSetupCursor:
         assert "some-other-hook" in cmds
 
     def test_migrates_legacy_env_to_source_flag(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(otel_hook, "_resolve_hook_cmd", lambda: "otel-hook")
+        monkeypatch.setattr(hook_cli, "_resolve_hook_cmd", lambda: "otel-hook")
         hooks_path = tmp_path / ".cursor" / "hooks.json"
         os.makedirs(str(hooks_path.parent))
         _write(str(hooks_path), {
@@ -205,7 +206,7 @@ class TestSetupCursor:
         assert "env" not in entry
 
     def test_global_uses_home(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(otel_hook, "_resolve_hook_cmd", lambda: "otel-hook")
+        monkeypatch.setattr(hook_cli, "_resolve_hook_cmd", lambda: "otel-hook")
         monkeypatch.setenv("HOME", str(tmp_path))
         setup_cursor(global_=True)
         hooks_path = tmp_path / ".cursor" / "hooks.json"
@@ -218,7 +219,7 @@ class TestSetupCursor:
 
 class TestSetupWindsurf:
     def test_creates_new_file_with_source_flag(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(otel_hook, "_resolve_hook_cmd", lambda: "otel-hook")
+        monkeypatch.setattr(hook_cli, "_resolve_hook_cmd", lambda: "otel-hook")
         setup_windsurf(global_=False, cwd=str(tmp_path))
         hooks_path = tmp_path / ".windsurf" / "hooks.json"
         assert hooks_path.exists()
@@ -227,7 +228,7 @@ class TestSetupWindsurf:
         assert doc["hooks"]["pre_user_prompt"] == [{"command": "otel-hook --windsurf"}]
 
     def test_idempotent(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(otel_hook, "_resolve_hook_cmd", lambda: "otel-hook")
+        monkeypatch.setattr(hook_cli, "_resolve_hook_cmd", lambda: "otel-hook")
         setup_windsurf(global_=False, cwd=str(tmp_path))
         before = _read(str(tmp_path / ".windsurf" / "hooks.json"))
         setup_windsurf(global_=False, cwd=str(tmp_path))
@@ -241,7 +242,7 @@ class TestSetupWindsurf:
 
 class TestSetupClaude:
     def test_creates_new_file(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(otel_hook, "_resolve_hook_cmd", lambda: "otel-hook")
+        monkeypatch.setattr(hook_cli, "_resolve_hook_cmd", lambda: "otel-hook")
         setup_claude(global_=False, cwd=str(tmp_path))
         settings_path = tmp_path / ".claude" / "settings.json"
         assert settings_path.exists()
@@ -252,7 +253,7 @@ class TestSetupClaude:
         assert "PostCompact" in doc["hooks"]
 
     def test_preserves_existing_keys(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(otel_hook, "_resolve_hook_cmd", lambda: "otel-hook")
+        monkeypatch.setattr(hook_cli, "_resolve_hook_cmd", lambda: "otel-hook")
         settings_path = tmp_path / ".claude" / "settings.json"
         os.makedirs(str(settings_path.parent))
         _write(str(settings_path), {"allowedTools": ["Bash"], "hooks": {}})
@@ -261,7 +262,7 @@ class TestSetupClaude:
         assert doc["allowedTools"] == ["Bash"]
 
     def test_matcher_events_get_matcher(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(otel_hook, "_resolve_hook_cmd", lambda: "otel-hook")
+        monkeypatch.setattr(hook_cli, "_resolve_hook_cmd", lambda: "otel-hook")
         setup_claude(global_=False, cwd=str(tmp_path))
         doc = _read(str(tmp_path / ".claude" / "settings.json"))
         for event in ["PreToolUse", "PostToolUse", "PostToolUseFailure"]:
@@ -269,7 +270,7 @@ class TestSetupClaude:
             assert any(e.get("matcher") == "*" for e in entries)
 
     def test_non_matcher_events_no_matcher(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(otel_hook, "_resolve_hook_cmd", lambda: "otel-hook")
+        monkeypatch.setattr(hook_cli, "_resolve_hook_cmd", lambda: "otel-hook")
         setup_claude(global_=False, cwd=str(tmp_path))
         doc = _read(str(tmp_path / ".claude" / "settings.json"))
         for event in ["SessionStart", "SessionEnd", "PreCompact", "PostCompact", "Stop"]:
@@ -277,7 +278,7 @@ class TestSetupClaude:
             assert all("matcher" not in e for e in entries)
 
     def test_idempotent(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(otel_hook, "_resolve_hook_cmd", lambda: "otel-hook")
+        monkeypatch.setattr(hook_cli, "_resolve_hook_cmd", lambda: "otel-hook")
         setup_claude(global_=False, cwd=str(tmp_path))
         before = _read(str(tmp_path / ".claude" / "settings.json"))
         setup_claude(global_=False, cwd=str(tmp_path))
@@ -285,7 +286,7 @@ class TestSetupClaude:
         assert before == after
 
     def test_migrates_legacy_env_to_source_flag(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(otel_hook, "_resolve_hook_cmd", lambda: "otel-hook")
+        monkeypatch.setattr(hook_cli, "_resolve_hook_cmd", lambda: "otel-hook")
         settings_path = tmp_path / ".claude" / "settings.json"
         os.makedirs(str(settings_path.parent))
         _write(str(settings_path), {
@@ -306,7 +307,7 @@ class TestSetupClaude:
 
 class TestSetupCopilot:
     def test_creates_new_file(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(otel_hook, "_resolve_hook_cmd", lambda: "otel-hook")
+        monkeypatch.setattr(hook_cli, "_resolve_hook_cmd", lambda: "otel-hook")
         setup_copilot(cwd=str(tmp_path))
         hooks_path = tmp_path / ".github" / "hooks" / "otel-hooks.json"
         assert hooks_path.exists()
@@ -315,7 +316,7 @@ class TestSetupCopilot:
         assert "sessionStart" in doc["hooks"]
 
     def test_uses_bash_key(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(otel_hook, "_resolve_hook_cmd", lambda: "otel-hook")
+        monkeypatch.setattr(hook_cli, "_resolve_hook_cmd", lambda: "otel-hook")
         setup_copilot(cwd=str(tmp_path))
         doc = _read(str(tmp_path / ".github" / "hooks" / "otel-hooks.json"))
         for event, entries in doc["hooks"].items():
@@ -324,7 +325,7 @@ class TestSetupCopilot:
                 assert h["bash"] == f"otel-hook --copilot --event {event}"
 
     def test_idempotent(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(otel_hook, "_resolve_hook_cmd", lambda: "otel-hook")
+        monkeypatch.setattr(hook_cli, "_resolve_hook_cmd", lambda: "otel-hook")
         setup_copilot(cwd=str(tmp_path))
         before = _read(str(tmp_path / ".github" / "hooks" / "otel-hooks.json"))
         setup_copilot(cwd=str(tmp_path))
@@ -338,13 +339,13 @@ class TestSetupCopilot:
 
 class TestSetupGemini:
     def test_creates_new_file(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(otel_hook, "_resolve_hook_cmd", lambda: "otel-hook")
+        monkeypatch.setattr(hook_cli, "_resolve_hook_cmd", lambda: "otel-hook")
         setup_gemini(global_=False, cwd=str(tmp_path))
         settings_path = tmp_path / ".gemini" / "settings.json"
         assert settings_path.exists()
 
     def test_matcher_events(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(otel_hook, "_resolve_hook_cmd", lambda: "otel-hook")
+        monkeypatch.setattr(hook_cli, "_resolve_hook_cmd", lambda: "otel-hook")
         setup_gemini(global_=False, cwd=str(tmp_path))
         doc = _read(str(tmp_path / ".gemini" / "settings.json"))
         for event in ["BeforeTool", "AfterTool", "BeforeModel", "AfterModel"]:
@@ -352,14 +353,14 @@ class TestSetupGemini:
             assert any(e.get("matcher") == "*" for e in entries)
 
     def test_uses_source_flag(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(otel_hook, "_resolve_hook_cmd", lambda: "otel-hook")
+        monkeypatch.setattr(hook_cli, "_resolve_hook_cmd", lambda: "otel-hook")
         setup_gemini(global_=False, cwd=str(tmp_path))
         doc = _read(str(tmp_path / ".gemini" / "settings.json"))
         hook = doc["hooks"]["BeforeTool"][0]["hooks"][0]
         assert hook["command"] == "otel-hook --gemini"
 
     def test_preserves_existing_settings(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(otel_hook, "_resolve_hook_cmd", lambda: "otel-hook")
+        monkeypatch.setattr(hook_cli, "_resolve_hook_cmd", lambda: "otel-hook")
         settings_path = tmp_path / ".gemini" / "settings.json"
         os.makedirs(str(settings_path.parent))
         _write(str(settings_path), {"theme": "dark", "hooks": {}})
@@ -374,7 +375,7 @@ class TestSetupGemini:
 
 class TestSetupCodex:
     def test_creates_hooks_and_config(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(otel_hook, "_resolve_hook_cmd", lambda: "otel-hook")
+        monkeypatch.setattr(hook_cli, "_resolve_hook_cmd", lambda: "otel-hook")
         setup_codex(global_=False, cwd=str(tmp_path))
         hooks_path = tmp_path / ".codex" / "hooks.json"
         config_path = tmp_path / ".codex" / "config.toml"
@@ -387,7 +388,7 @@ class TestSetupCodex:
         assert "codex_hooks" not in text
 
     def test_matchers_only_where_supported(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(otel_hook, "_resolve_hook_cmd", lambda: "otel-hook")
+        monkeypatch.setattr(hook_cli, "_resolve_hook_cmd", lambda: "otel-hook")
         setup_codex(global_=False, cwd=str(tmp_path))
         doc = _read(str(tmp_path / ".codex" / "hooks.json"))
         assert doc["hooks"]["SessionStart"][0]["matcher"] == "startup|resume|clear|compact"
@@ -396,7 +397,7 @@ class TestSetupCodex:
         assert "matcher" not in doc["hooks"]["Stop"][0]
 
     def test_preserves_existing_config(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(otel_hook, "_resolve_hook_cmd", lambda: "otel-hook")
+        monkeypatch.setattr(hook_cli, "_resolve_hook_cmd", lambda: "otel-hook")
         config_path = tmp_path / ".codex" / "config.toml"
         os.makedirs(str(config_path.parent))
         config_path.write_text('model = "gpt-5.5"\n\n[features]\nmemories = true\n')
@@ -408,7 +409,7 @@ class TestSetupCodex:
         assert "codex_hooks" not in text
 
     def test_migrates_deprecated_codex_hooks_flag(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(otel_hook, "_resolve_hook_cmd", lambda: "otel-hook")
+        monkeypatch.setattr(hook_cli, "_resolve_hook_cmd", lambda: "otel-hook")
         config_path = tmp_path / ".codex" / "config.toml"
         os.makedirs(str(config_path.parent))
         config_path.write_text('[features]\ncodex_hooks = true\nmemories = true\n')
@@ -425,14 +426,14 @@ class TestSetupCodex:
 
 class TestSetupCmd:
     def test_setup_cursor_via_cli(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(otel_hook, "_resolve_hook_cmd", lambda: "otel-hook")
+        monkeypatch.setattr(hook_cli, "_resolve_hook_cmd", lambda: "otel-hook")
         runner = CliRunner()
         result = runner.invoke(cli, ["setup", "--agent", "cursor", "--no-global", "--cwd", str(tmp_path)])
         assert result.exit_code == 0
         assert (tmp_path / ".cursor" / "hooks.json").exists()
 
     def test_setup_multiple_agents(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(otel_hook, "_resolve_hook_cmd", lambda: "otel-hook")
+        monkeypatch.setattr(hook_cli, "_resolve_hook_cmd", lambda: "otel-hook")
         runner = CliRunner()
         result = runner.invoke(cli, [
             "setup", "--agent", "cursor", "--agent", "claude",
@@ -444,14 +445,14 @@ class TestSetupCmd:
 
     def test_copilot_user_hooks_with_global(self, tmp_path, monkeypatch):
         monkeypatch.setenv("COPILOT_HOME", str(tmp_path / "copilot-user"))
-        monkeypatch.setattr(otel_hook, "_resolve_hook_cmd", lambda: "otel-hook")
+        monkeypatch.setattr(hook_cli, "_resolve_hook_cmd", lambda: "otel-hook")
         runner = CliRunner()
         result = runner.invoke(cli, ["setup", "--agent", "copilot", "--global", "--cwd", str(tmp_path)])
         assert result.exit_code == 0
         assert (tmp_path / "copilot-user" / "hooks" / "otel-hooks.json").exists()
 
     def test_no_agents_detected_exits_1(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(otel_hook, "_detect_available_agents", lambda: [])
+        monkeypatch.setattr(hook_cli, "_detect_available_agents", lambda: [])
         runner = CliRunner()
         result = runner.invoke(cli, ["setup", "--cwd", str(tmp_path)])
         assert result.exit_code == 1
@@ -469,7 +470,7 @@ class TestDiagnoseCmd:
         assert "Not found" in result.output
 
     def test_registered(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(otel_hook, "_resolve_hook_cmd", lambda: "otel-hook")
+        monkeypatch.setattr(hook_cli, "_resolve_hook_cmd", lambda: "otel-hook")
         setup_cursor(global_=False, cwd=str(tmp_path))
         runner = CliRunner()
         result = runner.invoke(cli, ["diagnose", "--agent", "cursor", "--no-global", "--cwd", str(tmp_path)])
@@ -477,7 +478,7 @@ class TestDiagnoseCmd:
         assert "events registered" in result.output
 
     def test_codex_registered(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(otel_hook, "_resolve_hook_cmd", lambda: "otel-hook")
+        monkeypatch.setattr(hook_cli, "_resolve_hook_cmd", lambda: "otel-hook")
         setup_codex(global_=False, cwd=str(tmp_path))
         runner = CliRunner()
         result = runner.invoke(cli, ["diagnose", "--agent", "codex", "--no-global", "--cwd", str(tmp_path)])
@@ -491,7 +492,7 @@ class TestDiagnoseCmd:
 
 class TestUninstallCmd:
     def test_uninstall_cursor(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(otel_hook, "_resolve_hook_cmd", lambda: "otel-hook")
+        monkeypatch.setattr(hook_cli, "_resolve_hook_cmd", lambda: "otel-hook")
         setup_cursor(global_=False, cwd=str(tmp_path))
         runner = CliRunner()
         result = runner.invoke(cli, ["uninstall", "--agent", "cursor", "--no-global", "--cwd", str(tmp_path)])
@@ -507,7 +508,7 @@ class TestUninstallCmd:
         assert result.exit_code == 0
 
     def test_uninstall_codex(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(otel_hook, "_resolve_hook_cmd", lambda: "otel-hook")
+        monkeypatch.setattr(hook_cli, "_resolve_hook_cmd", lambda: "otel-hook")
         setup_codex(global_=False, cwd=str(tmp_path))
         runner = CliRunner()
         result = runner.invoke(cli, ["uninstall", "--agent", "codex", "--no-global", "--cwd", str(tmp_path)])

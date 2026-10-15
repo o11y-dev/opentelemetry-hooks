@@ -12,6 +12,7 @@ from unittest import mock
 import pytest
 
 import otel_hook
+from otel_hooks import cli as hook_cli
 
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "contracts"
@@ -388,16 +389,16 @@ def test_doctor_reports_enabled_log_exporter_failure(monkeypatch, isolated_state
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "https://collector.example.test:4318")
     monkeypatch.setenv("IDE_OTEL_ENABLE_LOGS", "true")
     monkeypatch.setattr(
-        otel_hook,
+        hook_cli,
         "_agent_config_paths",
-        lambda _global, _cwd: {agent: "/fixture" for agent in otel_hook._SUPPORTED_AGENTS},
+        lambda _global, _cwd: {agent: "/fixture" for agent in hook_cli._SUPPORTED_AGENTS},
     )
-    monkeypatch.setattr(otel_hook, "_registered_hook_events", lambda _agent, _path: ["Stop"])
+    monkeypatch.setattr(hook_cli, "_registered_hook_events", lambda _agent, _path: ["Stop"])
     monkeypatch.setattr(otel_hook, "_detect_ide", lambda _data: "codex")
     otel_hook._record_delivery_health("traces", True)
     otel_hook._record_delivery_health("logs", False)
 
-    report, exit_code = otel_hook._doctor_report(("codex",), True, ".")
+    report, exit_code = hook_cli._doctor_report(otel_hook, ("codex",), True, ".")
     assert exit_code == 1
     assert report["exporter"]["status"] == "failing_recent"
     assert {failure["signal"] for failure in report["recent_delivery_failures"]} == {"logs"}
@@ -496,6 +497,7 @@ def test_codex_short_hook_bounds_sdk_export_and_preserves_failed_batches(tmp_pat
     runner = '''
 import os, time
 import otel_hook
+from otel_hooks import cli as hook_cli
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
 from opentelemetry.sdk.trace.export import SpanExportResult
@@ -509,7 +511,7 @@ def export(signal, success, failure):
     return send
 OTLPSpanExporter.export = export('traces', SpanExportResult.SUCCESS, SpanExportResult.FAILURE)
 OTLPLogExporter.export = export('logs', LogExportResult.SUCCESS, LogExportResult.FAILURE)
-otel_hook.cli()
+hook_cli.cli()
 '''
     config = tmp_path / "config.json"
     config.write_text("{}")

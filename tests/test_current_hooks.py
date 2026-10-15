@@ -6,6 +6,7 @@ import pytest
 from click.testing import CliRunner
 
 import otel_hook as hook
+from otel_hooks import cli as hook_cli
 from tests.test_contracts import isolated_state, RecordingSpan  # noqa: F401
 
 
@@ -109,7 +110,7 @@ def test_copilot_payload_without_event_name_uses_registration(monkeypatch):
     runner = CliRunner()
     for name, payload in [("sessionStart", {}), ("userPromptSubmitted", {"prompt": "fixture"}),
                           ("preToolUse", {"toolName": "bash", "toolArgs": '{"command":"pwd"}'})]:
-        result = runner.invoke(hook.cli, ["--copilot", "--event", name], input=json.dumps({"sessionId": "copilot-fixture", **payload}))
+        result = runner.invoke(hook_cli.cli, ["--copilot", "--event", name], input=json.dumps({"sessionId": "copilot-fixture", **payload}))
         assert result.exit_code == 0, result.output
     ctx = hook._load_session_context("copilot-fixture")
     batch = hook._load_batch_events(ctx["current_generation"])
@@ -186,7 +187,7 @@ def test_cursor_conversation_join_preserves_native_identifier_without_inventing_
 
 @pytest.mark.parametrize("already_registered", [False, True])
 def test_codex_upgrade_preserves_unrelated_matchers(tmp_path, monkeypatch, already_registered):
-    monkeypatch.setattr(hook, "_resolve_hook_cmd", lambda: "otel-hook")
+    monkeypatch.setattr(hook_cli, "_resolve_hook_cmd", lambda: "otel-hook")
     path = tmp_path / ".codex" / "hooks.json"
     path.parent.mkdir()
     entries = [{"matcher": "startup|resume|clear", "hooks": [
@@ -194,9 +195,9 @@ def test_codex_upgrade_preserves_unrelated_matchers(tmp_path, monkeypatch, alrea
     if already_registered:
         entries.append({"matcher": "startup|resume|clear|compact", "hooks": [{"type": "command", "command": "otel-hook"}]})
     path.write_text(json.dumps({"hooks": {"SessionStart": entries}}))
-    hook.setup_codex(global_=False, cwd=str(tmp_path))
+    hook_cli.setup_codex(global_=False, cwd=str(tmp_path))
     first = path.read_text()
-    hook.setup_codex(global_=False, cwd=str(tmp_path))
+    hook_cli.setup_codex(global_=False, cwd=str(tmp_path))
     assert path.read_text() == first
     config = json.loads(first)["hooks"]
     assert config["SessionStart"][0]["hooks"] == [{"type": "command", "command": "echo custom"}]
@@ -207,24 +208,24 @@ def test_codex_upgrade_preserves_unrelated_matchers(tmp_path, monkeypatch, alrea
 
 
 def test_observers_do_not_take_over_worktrees_or_enable_transcripts(tmp_path, monkeypatch):
-    monkeypatch.setattr(hook, "_resolve_hook_cmd", lambda: "otel-hook")
-    hook.setup_claude(global_=False, cwd=str(tmp_path))
+    monkeypatch.setattr(hook_cli, "_resolve_hook_cmd", lambda: "otel-hook")
+    hook_cli.setup_claude(global_=False, cwd=str(tmp_path))
     config = json.loads((tmp_path / ".claude/settings.json").read_text())["hooks"]
     assert "StopFailure" in config and "InstructionsLoaded" in config
     assert "WorktreeCreate" not in config and "FileChanged" not in config
-    hook.setup_windsurf(global_=False, cwd=str(tmp_path))
+    hook_cli.setup_windsurf(global_=False, cwd=str(tmp_path))
     config = json.loads((tmp_path / ".windsurf/hooks.json").read_text())["hooks"]
     assert "post_cascade_response" in config
     assert "post_cascade_response_with_transcript" not in config
 
 
 def test_windsurf_uses_active_devin_config(tmp_path, monkeypatch):
-    monkeypatch.setattr(hook, "_resolve_hook_cmd", lambda: "otel-hook")
+    monkeypatch.setattr(hook_cli, "_resolve_hook_cmd", lambda: "otel-hook")
     path = tmp_path / ".devin/hooks.json"
     path.parent.mkdir()
     path.write_text(json.dumps({"hooks": {"pre_read_code": [{"command": "echo custom"}]}}))
-    hook.setup_windsurf(global_=False, cwd=str(tmp_path))
-    assert hook._agent_config_paths(False, str(tmp_path))["windsurf"] == str(path)
+    hook_cli.setup_windsurf(global_=False, cwd=str(tmp_path))
+    assert hook_cli._agent_config_paths(False, str(tmp_path))["windsurf"] == str(path)
     assert json.loads(path.read_text())["hooks"]["pre_read_code"][0]["command"] == "echo custom"
     assert not (tmp_path / ".windsurf/hooks.json").exists()
 
@@ -232,7 +233,7 @@ def test_windsurf_uses_active_devin_config(tmp_path, monkeypatch):
 @pytest.mark.parametrize("provider", ["cursor", "claude", "codex", "copilot"])
 def test_packaged_examples_match_setup_contract(provider):
     path = Path(__file__).parents[1] / "examples" / f"{provider}-hooks.example.json"
-    assert set(json.loads(path.read_text())["hooks"]) == set(getattr(hook, f"_{provider.upper()}_EVENTS"))
+    assert set(json.loads(path.read_text())["hooks"]) == set(getattr(hook_cli, f"_{provider.upper()}_EVENTS"))
 
 
 @pytest.mark.parametrize("legacy_command", [False, True])

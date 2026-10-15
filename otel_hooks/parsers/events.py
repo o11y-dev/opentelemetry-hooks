@@ -160,3 +160,10 @@ _SPAN_ID_RE = re.compile(r"^[0-9a-f]{16}$")
 
 
 _MCP_EVENTS = {"BeforeMCPExecution", "AfterMCPExecution"}
+
+
+_CODEX_EVENTS = [
+    "SessionStart", "PreToolUse", "PermissionRequest", "PostToolUse",
+    "UserPromptSubmit", "Stop",
+    "SessionEnd", "PreCompact", "PostCompact", "SubagentStart", "SubagentStop", "Interrupt",
+]

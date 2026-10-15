@@ -241,7 +241,7 @@ def test_sdk_exports_raw_json_body_with_active_span_context(monkeypatch):
 
 _SDK_REPLAY_RUNNER = '''
 import json, os
-import otel_hook
+from otel_hooks import cli as hook_cli
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
 from opentelemetry.sdk.trace.export import SpanExportResult
@@ -257,7 +257,7 @@ def logs(self, records):
     return LogExportResult.SUCCESS
 OTLPSpanExporter.export = traces
 OTLPLogExporter.export = logs
-otel_hook.cli()
+hook_cli.cli()
 '''
 
 

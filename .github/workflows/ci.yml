@@ -103,7 +103,16 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $tests = Join-Path $env:RUNNER_TEMP "hook-wheel-tests"
           New-Item -ItemType Directory -Force $tests | Out-Null
-          Copy-Item tests/test_parsers.py, tests/test_platform_support.py, tests/test_contracts.py, tests/test_capture.py $tests
+          $testFiles = @(
+            "tests/test_parsers.py",
+            "tests/test_platform_support.py",
+            "tests/test_contracts.py",
+            "tests/test_capture.py",
+            "tests/test_parser_reuse.py",
+            "tests/test_mcp_normalization.py",
+            "tests/test_cli_boundaries.py"
+          )
+          Copy-Item $testFiles $tests
           Copy-Item tests/fixtures $tests -Recurse
           $env:PATH = "$venv/Scripts;$env:PATH"
           Set-Location $tests

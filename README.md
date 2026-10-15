@@ -239,13 +239,13 @@ Edit the checkout, not installed package copies. Reinstall with the package
 manager that owns `otel-hook`, then replay hooks using a temporary hook home.
 
 ```bash
-uv run --no-project --python 3.12 --with-requirements requirements-dev.txt python -m pytest tests/ -q
+uv run --no-project --python 3.12 --with . --with-requirements requirements-dev.txt python -m pytest tests/ -q
 bun test tests/opencode.test.ts
 ```
 
-Runtime orchestration lives in `otel_hook.py`; pure provider parsers,
-configuration, capture policy, canonical field mappings and JSON serialization
-live in `otel_hooks/`.
+Runtime orchestration lives in `otel_hook.py`; setup, diagnostics and uninstall
+live in `otel_hooks/cli.py`. Pure provider parsers, configuration, capture policy,
+canonical field mappings and JSON serialization live in `otel_hooks/`.
 See [contribution guide](CONTRIBUTING.md), [telemetry reference](docs/telemetry-reference.md),
 and [CHANGELOG.md](CHANGELOG.md).
 

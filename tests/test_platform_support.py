@@ -12,6 +12,7 @@ import pytest
 from click.testing import CliRunner
 
 import otel_hook
+from otel_hooks import cli as hook_cli
 from otel_hooks import bootstrap
 
 
@@ -78,12 +79,12 @@ def test_partial_bootstrap_retries_then_reuses_success(monkeypatch, tmp_path):
 
 
 def test_doctor_detects_powershell_only_copilot_hooks(monkeypatch, tmp_path):
-    monkeypatch.setattr(otel_hook, "_find_repo_root", lambda _: str(tmp_path))
-    monkeypatch.setattr(otel_hook, "_resolve_hook_cmd", lambda: r"C:\fixture\otel-hook.exe")
+    monkeypatch.setattr(hook_cli, "_find_repo_root", lambda _: str(tmp_path))
+    monkeypatch.setattr(hook_cli, "_resolve_hook_cmd", lambda: r"C:\fixture\otel-hook.exe")
     with monkeypatch.context() as windows:
         windows.setattr(sys, "platform", "win32")
-        otel_hook.setup_copilot(str(tmp_path))
-    result = CliRunner().invoke(otel_hook.cli, [
+        hook_cli.setup_copilot(str(tmp_path))
+    result = CliRunner().invoke(hook_cli.cli, [
         "doctor", "--agent", "copilot", "--no-global", "--cwd", str(tmp_path), "--json",
     ])
     # Unconfigured exporters may report degraded health independently of hooks.
@@ -105,39 +106,39 @@ def test_windows_skips_unix_process_probe_and_reads_utf8(monkeypatch):
 def test_windows_registrations_upgrade_and_uninstall(monkeypatch, tmp_path):
     monkeypatch.setattr(sys, "platform", "win32")
     executable = r"C:\Users\Fixture O'Brien\Scripts\otel-hook.exe"
-    monkeypatch.setattr(otel_hook, "_resolve_hook_cmd", lambda: executable)
-    monkeypatch.setattr(otel_hook, "_find_repo_root", lambda _: str(tmp_path))
+    monkeypatch.setattr(hook_cli, "_resolve_hook_cmd", lambda: executable)
+    monkeypatch.setattr(hook_cli, "_find_repo_root", lambda _: str(tmp_path))
     copilot_path = tmp_path / ".github" / "hooks" / "otel-hooks.json"
-    otel_hook._write_json_file(str(copilot_path), {"hooks": {"sessionStart": [
+    hook_cli._write_json_file(str(copilot_path), {"hooks": {"sessionStart": [
         {"type": "command", "bash": "otel-hook --copilot"},
         {"type": "command", "powershell": "Write-Output unrelated"},
     ]}})
-    otel_hook.setup_copilot(str(tmp_path))
+    hook_cli.setup_copilot(str(tmp_path))
     first = copilot_path.read_bytes()
-    otel_hook.setup_copilot(str(tmp_path))
+    hook_cli.setup_copilot(str(tmp_path))
     assert copilot_path.read_bytes() == first
     entries = json.loads(first)["hooks"]["sessionStart"]
     assert len(entries) == 2
     assert entries[0]["powershell"] == "& 'C:\\Users\\Fixture O''Brien\\Scripts\\otel-hook.exe' --copilot --event sessionStart"
     assert entries[0]["bash"] == "otel-hook --copilot"
-    result = CliRunner().invoke(otel_hook.cli, ["diagnose", "--agent", "copilot", "--no-global", "--cwd", str(tmp_path)])
+    result = CliRunner().invoke(hook_cli.cli, ["diagnose", "--agent", "copilot", "--no-global", "--cwd", str(tmp_path)])
     assert result.exit_code == 0, result.output
     assert "events registered" in result.output
-    result = CliRunner().invoke(otel_hook.cli, ["uninstall", "--agent", "copilot", "--no-global", "--cwd", str(tmp_path)])
+    result = CliRunner().invoke(hook_cli.cli, ["uninstall", "--agent", "copilot", "--no-global", "--cwd", str(tmp_path)])
     assert result.exit_code == 0, result.output
     assert json.loads(copilot_path.read_bytes())["hooks"] == {"sessionStart": [entries[1]]}
 
-    otel_hook.setup_claude(global_=False, cwd=str(tmp_path))
+    hook_cli.setup_claude(global_=False, cwd=str(tmp_path))
     settings_path = tmp_path / ".claude" / "settings.json"
     first = settings_path.read_bytes()
-    otel_hook.setup_claude(global_=False, cwd=str(tmp_path))
+    hook_cli.setup_claude(global_=False, cwd=str(tmp_path))
     assert settings_path.read_bytes() == first
     for entries in json.loads(first)["hooks"].values():
         for entry in entries:
             for hook in entry["hooks"]:
                 assert hook["command"] == executable
                 assert hook["args"] == ["--claude"]
-    otel_hook.setup_codex(global_=False, cwd=str(tmp_path))
+    hook_cli.setup_codex(global_=False, cwd=str(tmp_path))
     config = json.loads((tmp_path / ".codex" / "hooks.json").read_bytes())
     for entries in config["hooks"].values():
         for entry in entries:
@@ -149,8 +150,8 @@ def test_posix_executable_is_shell_quoted(monkeypatch):
     import shlex
     monkeypatch.setattr(sys, "platform", "linux")
     path = "/fixture user's tools/otel-hook"
-    monkeypatch.setattr(otel_hook, "_resolve_hook_cmd", lambda: path)
-    assert shlex.split(otel_hook._hook_cmd_for_agent("cursor")) == [path, "--cursor"]
+    monkeypatch.setattr(hook_cli, "_resolve_hook_cmd", lambda: path)
+    assert shlex.split(hook_cli._hook_cmd_for_agent("cursor")) == [path, "--cursor"]
 
 
 @pytest.mark.parametrize("path", [r"C:\Users\Fixture User\repo\file.py", "C:/Users/Fixture User/repo/file.py"])
@@ -164,7 +165,7 @@ def test_windows_username_masking(path):
 def test_cli_entrypoint_handles_legacy_output_encoding():
     result = subprocess.run([
         sys.executable, "-c",
-        "import otel_hook, sys; sys.platform = 'win32'; otel_hook.run_cli()", "--help",
+        "from otel_hooks import cli as hook_cli; import sys; sys.platform = 'win32'; hook_cli.run_cli()", "--help",
     ], env={**os.environ, "PYTHONIOENCODING": "cp1252"}, capture_output=True, timeout=10)
     assert result.returncode == 0, result.stderr
     assert "→" in result.stdout.decode("utf-8")
@@ -201,7 +202,7 @@ def test_installed_cli_replays_unicode_session_outside_checkout(tmp_path):
 @pytest.mark.skipif(sys.platform != "win32", reason="Executes native Windows shells")
 @pytest.mark.parametrize("agent,shell", [("copilot", "powershell.exe"), ("codex", "cmd.exe")])
 def test_native_windows_shell_executes_registered_command(agent, shell, tmp_path):
-    command = otel_hook._hook_cmd_for_agent(agent) + " --help"
+    command = hook_cli._hook_cmd_for_agent(agent) + " --help"
     # cmd takes a raw command line; list2cmdline would backslash-escape its quotes.
     args = f'cmd.exe /d /s /c "{command}"' if shell == "cmd.exe" else [shell, "-NoProfile", "-Command", command]
     result = subprocess.run(args, cwd=tmp_path, capture_output=True, timeout=15)
