@@ -156,3 +156,10 @@ def _normalize_mcp_event_data(data: dict, event_name: str, ide: Optional[str] = 
     normalized = dict(data)
     normalized.update(updates)
     return normalized
+
+
+def _lower_or_none(value: Optional[str]) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    lowered = value.strip().lower()
+    return lowered or None

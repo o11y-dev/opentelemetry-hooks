@@ -150,6 +150,9 @@ _INPUT_ALIASES = {
 }
 
 
+_GENERATION_END_EVENTS = {"Stop", "StopFailure", "Interrupt"}
+
+
 _GENERATION_START_EVENTS = {"UserPromptSubmit"}
 
 

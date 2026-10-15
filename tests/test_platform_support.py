@@ -20,16 +20,16 @@ def test_windows_home_and_venv_layout(monkeypatch, tmp_path):
     import sysconfig
     monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.delenv("IDE_OTEL_HOOK_HOME", raising=False)
-    monkeypatch.setattr(otel_hook, "__file__", str(tmp_path / "site-packages" / "otel_hook.py"))
+    module_file = str(tmp_path / "site-packages" / "otel_hook.py")
     monkeypatch.setattr(sysconfig, "get_path", lambda *a, **kw: str(tmp_path / "site-packages"))
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "Local Data"))
-    assert otel_hook._resolve_hook_home() == str(tmp_path / "Local Data" / "opentelemetry-hooks")
+    assert bootstrap.resolve_hook_home(module_file) == str(tmp_path / "Local Data" / "opentelemetry-hooks")
     monkeypatch.delenv("LOCALAPPDATA")
-    assert otel_hook._resolve_hook_home() == os.path.join(os.path.expanduser("~"), "AppData", "Local", "opentelemetry-hooks")
-    assert otel_hook._venv_site_packages_path(str(tmp_path)) == str(tmp_path / "Lib" / "site-packages")
+    assert bootstrap.resolve_hook_home(module_file) == os.path.join(os.path.expanduser("~"), "AppData", "Local", "opentelemetry-hooks")
+    assert bootstrap.venv_site_packages_path(str(tmp_path)) == str(tmp_path / "Lib" / "site-packages")
     assert bootstrap.venv_python(str(tmp_path)) == str(tmp_path / "Scripts" / "python.exe")
     (tmp_path / ".venv" / "Lib" / "site-packages").mkdir(parents=True)
-    assert otel_hook._select_bootstrap_venv_dir(str(tmp_path)).endswith(
+    assert bootstrap.select_bootstrap_venv_dir(str(tmp_path)).endswith(
         f".venv-py{sys.version_info.major}.{sys.version_info.minor}"
     )
 
@@ -62,19 +62,18 @@ def test_partial_bootstrap_retries_then_reuses_success(monkeypatch, tmp_path):
     python.parent.mkdir(parents=True)
     python.touch()  # venv creation completed, but dependency installation did not.
     lock = tmp_path / "setup.lock"
-    monkeypatch.setattr(otel_hook, "_VENV_DIR", str(venv))
-    monkeypatch.setattr(otel_hook, "_SETUP_LOCK", str(lock))
     launch = Mock()
     monkeypatch.setattr(subprocess, "Popen", launch)
-    otel_hook._auto_provision_venv()
+    bootstrap.auto_provision_venv(str(venv), str(lock))
     launch.assert_called_once()
+    assert launch.call_args.args[0] == [sys.executable, bootstrap.__file__, str(venv), str(lock)]
     assert lock.exists()
-    otel_hook._auto_provision_venv()
+    bootstrap.auto_provision_venv(str(venv), str(lock))
     launch.assert_called_once()  # A second callback does not race the active worker.
     monkeypatch.setattr(subprocess, "run", Mock())
     bootstrap.provision(str(venv), str(lock))
     assert not lock.exists()
-    otel_hook._auto_provision_venv()
+    bootstrap.auto_provision_venv(str(venv), str(lock))
     launch.assert_called_once()  # Successful provisioning is reused.
 
 

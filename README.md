@@ -243,9 +243,11 @@ uv run --no-project --python 3.12 --with . --with-requirements requirements-dev.
 bun test tests/opencode.test.ts
 ```
 
-Runtime orchestration lives in `otel_hook.py`; setup, diagnostics and uninstall
-live in `otel_hooks/cli.py`. Pure provider parsers, configuration, capture policy,
-canonical field mappings and JSON serialization live in `otel_hooks/`.
+`otel_hook.py` coordinates hook execution, session storage and telemetry export.
+The `otel_hooks/` package separates provider parsing, span enrichment, lifecycle
+correlation, agent identity and workspace discovery. Capture policy is passed
+explicitly to enrichment and correlation. Setup, diagnostics and uninstall live
+in `otel_hooks/cli.py`; source-checkout provisioning lives in `bootstrap.py`.
 See [contribution guide](CONTRIBUTING.md), [telemetry reference](docs/telemetry-reference.md),
 and [CHANGELOG.md](CHANGELOG.md).
 

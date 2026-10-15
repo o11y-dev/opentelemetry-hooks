@@ -1,34 +1,24 @@
 #!/usr/bin/env python3
-"""IDE Agent OpenTelemetry Hook — pure OpenTelemetry SDK.
+"""Hook runtime for Cursor, Claude Code, Codex, Copilot, Gemini, Windsurf,
+OpenCode and Antigravity.
 
-Captures hook events from Cursor IDE, GitHub Copilot, Claude Code, and
-compatible hook runners as OpenTelemetry spans and logs using GenAI
-semantic conventions.
-
-Supports:
-- Multi-IDE detection (Cursor, GitHub Copilot, Claude Code, Antigravity)
-- Session-level trace hierarchy (session -> generation -> events)
-- Structured OTel Logs for MCP, shell, and tool events (trace-correlated)
-- Cross-process trace context via file-based state
-- Generation-based batching with flush on Stop
-- Privacy masking and opt-in text capture
-- Any OTLP-compatible backend
+Coordinates capture policy, cross-process session traces, generation batching,
+OpenTelemetry export and passive harness responses. Provider parsing, span
+attributes, identity, correlation, bootstrap and CLI setup live in otel_hooks.
+Optional correlated logs retain the capture-permitted original hook JSON.
 
 Usage:
     echo '{"hook_event_name":"sessionStart","session_id":"abc"}' | python3 otel_hook.py
 """
 import contextlib
-import hashlib
 import importlib
 import importlib.util
 import importlib.metadata
 import json
 import logging
 import os
-import platform
 import random
 import re
-import subprocess
 import sys
 import threading
 import time
@@ -36,11 +26,20 @@ import urllib.parse
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Optional, Tuple
+from typing import Optional
 
-from otel_hooks import bootstrap
-from otel_hooks.workspace import _find_repo_root, _REPO_MARKERS
-from otel_hooks.attributes import _EVENT_ATTR_MAP, _OBSERVATION_FIELDS as _OBSERVATION_FIELDS
+from otel_hooks import bootstrap, enrichment
+from otel_hooks.lifecycle import BufferedEventDecision, ToolInvocationCorrelator, enrich_buffered_event
+from otel_hooks.workspace import _collect_repository_attributes, _resolve_repository_context
+from otel_hooks.identity import (
+    _detect_payload_client_name, _get_event_name, _get_os_info, _normalize_ide_name,
+    _resolve_client_name, _resolved_agent_engine, _set_client_identity_attributes,
+)
+from otel_hooks.enrichment import (
+    _HOOK_SCHEMA_VERSION, _TELEMETRY_SOURCE, _apply_enrichment_attributes,
+    _apply_memory_summary_attrs, _set_if_present,
+)
+from otel_hooks.attributes import _OBSERVATION_FIELDS as _OBSERVATION_FIELDS
 from otel_hooks.capture import CapturePolicy
 from otel_hooks.config import (
     environment_settings, merge_settings,
@@ -61,6 +60,7 @@ from otel_hooks.parsers.events import (
     _WINDSURF_EVENT_ALIASES as _WINDSURF_EVENT_ALIASES,
     _INPUT_ALIASES as _INPUT_ALIASES,
     _GENERATION_START_EVENTS as _GENERATION_START_EVENTS,
+    _GENERATION_END_EVENTS as _GENERATION_END_EVENTS,
     _TRACE_ID_RE as _TRACE_ID_RE,
     _SPAN_ID_RE as _SPAN_ID_RE,
     _MCP_EVENTS as _MCP_EVENTS,
@@ -74,6 +74,7 @@ from otel_hooks.parsers.common import (
     _first_present as _first_present,
     _normalize_input_data as _normalize_input_data,
     _hash_text as _hash_text,
+    _lower_or_none,
     _mask_text as _mask_text,
     _text_max_chars as _text_max_chars,
     _session_key as _session_key,
@@ -132,154 +133,30 @@ from enrichment_connectors import (
 
 # Whether to attach OS/host attributes to every span in addition to resource attributes.
 # Defaults to False to avoid duplicate data and hot-path overhead.
-_CONSOLE_EXPORTER_REGISTERED = False
-
 _ATTACH_OS_ATTRIBUTES_PER_SPAN = os.getenv("IDE_HOOK_ATTACH_OS_PER_SPAN") == "1"
 
 # ---------------------------------------------------------------------------
 # Bootstrap: auto-provision .venv and add its site-packages to sys.path.
-# Works with any python3 — Cursor's system Python, Homebrew, pyenv, etc.
+# Source checkouts reuse installed SDK dependencies or provision a compatible venv.
 # First run: venv + pip install happens in background; tracing activates next
 # invocation.
 # ---------------------------------------------------------------------------
 
 
-def _resolve_hook_home() -> str:
-    """Return the writable directory used for hook state, config, and the bootstrap venv.
-
-    Resolution order:
-    1. ``IDE_OTEL_HOOK_HOME`` environment variable (explicit override).
-    2. ``%LOCALAPPDATA%/opentelemetry-hooks`` on Windows, or
-       ``$XDG_DATA_HOME/opentelemetry-hooks`` on POSIX (defaults to
-       ``~/.local/share/opentelemetry-hooks`` when ``XDG_DATA_HOME`` is unset)
-       when the hook is running from an installed package — i.e. ``__file__``
-       lives inside a *site-packages* directory.
-    3. The directory that contains ``__file__`` — legacy behaviour for a
-       source checkout (keep its companion modules).
-    """
-    explicit = os.environ.get("IDE_OTEL_HOOK_HOME", "").strip()
-    if explicit:
-        return os.path.abspath(explicit)
-
-    # Detect installed-package mode by comparing __file__ against the known
-    # site-packages directories reported by sysconfig / site.
-    this_file = os.path.abspath(__file__)
-    in_site_packages = False
-    try:
-        import sysconfig
-        purelib = sysconfig.get_path("purelib") or ""
-        platlib = sysconfig.get_path("platlib") or ""
-        for sp in (purelib, platlib):
-            if sp and this_file.startswith(os.path.abspath(sp) + os.sep):
-                in_site_packages = True
-                break
-    except Exception:
-        pass
-    if not in_site_packages:
-        try:
-            import site
-            for sp in (site.getsitepackages() if hasattr(site, "getsitepackages") else []):
-                if sp and this_file.startswith(os.path.abspath(sp) + os.sep):
-                    in_site_packages = True
-                    break
-        except Exception:
-            pass
-
-    if in_site_packages:
-        if sys.platform == "win32":
-            local_data = os.environ.get("LOCALAPPDATA", "").strip() or os.path.join(
-                os.path.expanduser("~"), "AppData", "Local",
-            )
-            return os.path.join(local_data, "opentelemetry-hooks")
-        xdg_data = os.environ.get("XDG_DATA_HOME", "").strip()
-        if not xdg_data:
-            xdg_data = os.path.join(os.path.expanduser("~"), ".local", "share")
-        return os.path.join(xdg_data, "opentelemetry-hooks")
-
-    return os.path.dirname(this_file)
-
-
-_HOOK_DIR = _resolve_hook_home()
-
-
-def _venv_site_packages_path(venv_dir: str) -> str:
-    """Return the site-packages path compatible with this Python runtime."""
-    if sys.platform == "win32":
-        return os.path.join(venv_dir, "Lib", "site-packages")
-    version = f"python{sys.version_info.major}.{sys.version_info.minor}"
-    return os.path.join(venv_dir, "lib", version, "site-packages")
-
-
-def _select_bootstrap_venv_dir(hook_dir: str) -> str:
-    """Reuse a compatible legacy venv or isolate bootstrap deps by Python ABI."""
-    legacy = os.path.join(hook_dir, ".venv")
-    # Windows venv layouts do not encode the Python ABI; use a versioned venv.
-    if sys.platform != "win32" and os.path.isdir(_venv_site_packages_path(legacy)):
-        return legacy
-    suffix = f".venv-py{sys.version_info.major}.{sys.version_info.minor}"
-    return os.path.join(hook_dir, suffix)
-
-
-def _runtime_has_otel_dependencies() -> bool:
-    """Return whether the invoking environment already owns the hook SDK deps."""
-    required = (
-        "opentelemetry.sdk.trace.export",
-        "opentelemetry.exporter.otlp.proto.grpc.trace_exporter",
-        "opentelemetry.exporter.otlp.proto.http.trace_exporter",
-    )
-    try:
-        for module in required:
-            importlib.import_module(module)
-        return True
-    except (ImportError, AttributeError, ValueError):
-        return False
-
-
-_VENV_DIR = _select_bootstrap_venv_dir(_HOOK_DIR)
+_HOOK_DIR = bootstrap.resolve_hook_home(__file__)
+_VENV_DIR = bootstrap.select_bootstrap_venv_dir(_HOOK_DIR)
 _SETUP_LOCK = os.path.join(
     _HOOK_DIR,
     ".state",
     f"setup-py{sys.version_info.major}.{sys.version_info.minor}.lock",
 )
-
-
-def _auto_provision_venv() -> None:
-    """Create .venv and install opentelemetry-sdk + exporter in the background if missing."""
-    venv_python = bootstrap.venv_python(_VENV_DIR)
-    if os.path.isfile(venv_python) and os.path.isfile(os.path.join(_VENV_DIR, bootstrap.READY_MARKER)):
-        return
-    lock_dir = os.path.dirname(_SETUP_LOCK)
-    os.makedirs(lock_dir, exist_ok=True)
-    if os.path.exists(_SETUP_LOCK):
-        return
-    try:
-        with open(_SETUP_LOCK, "x") as f:
-            f.write(str(os.getpid()))
-        process_options = (
-            {"creationflags": subprocess.CREATE_NO_WINDOW}
-            if sys.platform == "win32" else {"start_new_session": True}
-        )
-        subprocess.Popen(
-            [sys.executable, bootstrap.__file__, _VENV_DIR, _SETUP_LOCK],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            **process_options,
-        )
-    except FileExistsError:
-        # Another invocation owns provisioning; do not remove its lock.
-        return
-    except Exception:
-        try:
-            os.remove(_SETUP_LOCK)
-        except OSError:
-            pass
-
-
-_RUNTIME_HAS_OTEL_DEPENDENCIES = _runtime_has_otel_dependencies()
+_RUNTIME_HAS_OTEL_DEPENDENCIES = bootstrap.runtime_has_otel_dependencies()
 if not _RUNTIME_HAS_OTEL_DEPENDENCIES:
-    _auto_provision_venv()
-    _venv_site_packages = _venv_site_packages_path(_VENV_DIR)
+    bootstrap.auto_provision_venv(_VENV_DIR, _SETUP_LOCK)
+    _venv_site_packages = bootstrap.venv_site_packages_path(_VENV_DIR)
     if os.path.isdir(_venv_site_packages) and _venv_site_packages not in sys.path:
         sys.path.insert(0, _venv_site_packages)
+
 
 class _TraceShim:
     """Small shim so tests can monkeypatch trace methods before lazy load."""
@@ -388,11 +265,6 @@ _LOCAL_SPANS_DIR = os.path.join(_STATE_DIR, "local_spans")
 _LOCK_DIR = os.path.join(_STATE_DIR, "locks")
 _CLEANUP_MARKER = os.path.join(_STATE_DIR, "last_cleanup")
 _DELIVERY_HEALTH_PATH = os.path.join(_STATE_DIR, "delivery_health.json")
-_SESSION_EVENT_LIMIT = 512
-_SESSION_INVOCATION_LIMIT = 128
-_AGENT_INVOCATION_LIMIT = 128
-_HOOK_SCHEMA_VERSION = "1"
-_TELEMETRY_SOURCE = "hook"
 
 # MDM (Managed Device Management) configuration
 _MDM_DOMAIN = "dev.o11y.opentelemetry-hook"  # macOS managed preferences domain
@@ -413,29 +285,6 @@ _HEX_DIGITS = frozenset("0123456789abcdef")
 
 # Canonical gen_ai.client.name values accepted directly from IDE_OTEL_IDE_NAME or
 # self-reported payload metadata before alias fallback.
-_CANONICAL_IDE_NAMES = {"cursor", "copilot", "claude", "antigravity", "opencode", "windsurf", "zed", "vscode", "gemini", "codex"}
-_IDE_NAME_ALIASES = {
-    "openai codex": "codex",
-    "codex cli": "codex",
-    "github copilot": "copilot",
-    "github copilot chat": "copilot",
-    "copilot chat": "copilot",
-    "claude code": "claude",
-    "anthropic claude code": "claude",
-    "claude cli": "claude",
-    "cursor ide": "cursor",
-    "cursor cli": "cursor",
-    "anti gravity": "antigravity",
-    "windsurf ide": "windsurf",
-    "codeium windsurf": "windsurf",
-    "visual studio code": "vscode",
-    "vs code": "vscode",
-    "zed editor": "zed",
-    "open code": "opencode",
-    "gemini cli": "gemini",
-    "google gemini": "gemini",
-}
-_IDE_NAME_NORM_PATTERN = re.compile(r"[-_\s]+")
 _MANAGED_HOOK_SOURCE_ENV = "IDE_OTEL_HOOK_SOURCE"
 _CLI_HOOK_SOURCE: Optional[str] = None
 _CLI_HOOK_EVENT: Optional[str] = None
@@ -443,21 +292,8 @@ _CLI_HOOK_EVENT: Optional[str] = None
 # Session boundary events
 _SESSION_START_EVENTS = {"SessionStart"}
 _SESSION_END_EVENTS = {"SessionEnd"}
-_GENERATION_END_EVENTS = {"Stop", "StopFailure", "Interrupt"}
 
 # GenAI operation mapping (canonical PascalCase)
-_OP_TOOL_EVENTS = {
-    "PreToolUse", "PostToolUse", "PostToolUseFailure",
-    "PermissionRequest",
-    "BeforeShellExecution", "AfterShellExecution",
-    "BeforeMCPExecution", "AfterMCPExecution",
-    "BeforeReadFile", "AfterFileEdit", "AfterReadFile", "BeforeFileEdit",
-}
-_OP_AGENT_EVENTS = {
-    "SessionStart", "SessionEnd",
-    "SubagentStart", "SubagentStop",
-    "PreCompact", "PostCompact",
-}
 
 # ---------------------------------------------------------------------------
 # I/O helpers
@@ -490,718 +326,11 @@ def _fast_json_loads(raw: str):
         return {}
 
 
-def _set_if_present(span, attr: str, value) -> None:
-    if value is not None:
-        span.set_attribute(attr, value)
-
-
 def _first_env(keys: tuple[str, ...]) -> Optional[str]:
     for key in keys:
         value = os.getenv(key)
         if value:
             return value
-    return None
-
-
-def _int_or_none(value):
-    try:
-        return int(value) if value is not None else None
-    except (TypeError, ValueError):
-        return None
-
-
-def _float_or_none(value):
-    try:
-        return float(value) if value is not None else None
-    except (TypeError, ValueError):
-        return None
-
-
-def _lower_or_none(value: Optional[str]) -> Optional[str]:
-    if not isinstance(value, str):
-        return None
-    lowered = value.strip().lower()
-    return lowered or None
-
-
-def _iter_enrichment_sources(data: Optional[dict], include_tool_payloads: bool = False):
-    if not isinstance(data, dict):
-        return
-    yield data
-    metadata = data.get("metadata")
-    if isinstance(metadata, dict):
-        yield metadata
-    user = data.get("user")
-    if isinstance(user, dict):
-        yield user
-    if include_tool_payloads:
-        for key in ("tool_input", "tool_response"):
-            value = data.get(key)
-            if isinstance(value, dict):
-                yield value
-
-
-def _coerce_attribute_value(value):
-    if isinstance(value, str):
-        stripped = value.strip()
-        return stripped or None
-    return value
-
-
-def _path_search_root(path: str) -> Optional[str]:
-    if not isinstance(path, str) or not path.strip():
-        return None
-    expanded = os.path.abspath(path.strip())
-    if os.path.isdir(expanded):
-        return expanded
-    return os.path.dirname(expanded) or expanded
-
-
-def _candidate_repo_paths(data: Optional[dict]) -> list[str]:
-    if not isinstance(data, dict):
-        return []
-    candidates: list[str] = []
-    cwd = data.get("cwd") or data.get("workspace_path")
-    if isinstance(cwd, str) and cwd.strip():
-        candidates.append(cwd.strip())
-
-    def _append_path(value) -> None:
-        if not isinstance(value, str) or not value.strip():
-            return
-        raw = value.strip()
-        if os.path.isabs(raw):
-            candidates.append(raw)
-            return
-        if isinstance(cwd, str) and cwd.strip() and os.path.isabs(cwd.strip()):
-            candidates.append(os.path.join(cwd.strip(), raw))
-
-    _append_path(data.get("file_path"))
-    edits = data.get("edits")
-    if isinstance(edits, list):
-        for entry in edits:
-            if isinstance(entry, dict):
-                _append_path(entry.get("file_path") or entry.get("path"))
-    elif isinstance(edits, dict):
-        _append_path(edits.get("file_path") or edits.get("path"))
-    return candidates
-
-
-def _git_command_output(args: list[str], cwd: str) -> Optional[str]:
-    try:
-        result = subprocess.run(
-            args,
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            timeout=2,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        return None
-    if result.returncode != 0:
-        return None
-    output = result.stdout.strip()
-    return output or None
-
-
-def _parse_repository_remote(remote_url: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
-    if not isinstance(remote_url, str) or not remote_url.strip():
-        return None, None
-    normalized = remote_url.strip()
-    is_network_remote = False
-    if "://" in normalized:
-        is_network_remote = True
-        path = urllib.parse.urlparse(normalized).path or ""
-    elif "@" in normalized and ":" in normalized.split("@", 1)[1]:
-        is_network_remote = True
-        path = normalized.split(":", 1)[1]
-    else:
-        path = normalized
-    path = path.strip().strip("/")
-    if path.endswith(".git"):
-        path = path[:-4]
-    parts = [part for part in path.split("/") if part]
-    if not parts:
-        return None, None
-    owner = parts[-2] if is_network_remote and len(parts) >= 2 else None
-    return owner, parts[-1]
-
-
-def _normalize_repository_remote(remote_url: Optional[str]) -> Optional[str]:
-    """Return a credential-free host/path identity suitable for deterministic hashing."""
-    if not isinstance(remote_url, str) or not remote_url.strip():
-        return None
-    value = remote_url.strip()
-    host = ""
-    path = ""
-    if "://" in value:
-        parsed = urllib.parse.urlsplit(value)
-        host = (parsed.hostname or "").lower()
-        try:
-            if parsed.port:
-                host = f"{host}:{parsed.port}"
-        except ValueError:
-            return None
-        path = parsed.path
-    elif "@" in value and ":" in value.split("@", 1)[1]:
-        host_path = value.split("@", 1)[1]
-        host, path = host_path.split(":", 1)
-        host = host.lower()
-    else:
-        return None
-    path = "/".join(part for part in path.strip().strip("/").split("/") if part)
-    if path.endswith(".git"):
-        path = path[:-4]
-    if not host or not path:
-        return None
-    return f"{host}/{path}"
-
-
-def _resolve_repository_context(data: Optional[dict] = None, session_ctx: Optional[dict] = None) -> dict:
-    repo_ctx: dict[str, str] = {}
-    if session_ctx:
-        for key in (
-            "repo_root",
-            "workspace_path",
-            "vcs.repository.owner",
-            "vcs.repository.name",
-            "vcs.ref.head.name",
-            "vcs.ref.head.type",
-            "gen_ai.client.repository.remote.sha256",
-        ):
-            value = session_ctx.get(key)
-            if isinstance(value, str) and value.strip():
-                repo_ctx[key] = value.strip()
-    explicit_workspace = _first_present(data or {}, ("workspace_path",))
-    if isinstance(explicit_workspace, str) and explicit_workspace.strip():
-        repo_ctx["workspace_path"] = os.path.abspath(os.path.expanduser(explicit_workspace.strip()))
-    if session_ctx and session_ctx.get("repository_context_resolved") and repo_ctx.get("repo_root"):
-        return repo_ctx
-    if "repo_root" not in repo_ctx:
-        for candidate in _candidate_repo_paths(data):
-            search_root = _path_search_root(candidate)
-            if not search_root:
-                continue
-            repo_root = _find_repo_root(search_root)
-            if repo_root and any(os.path.exists(os.path.join(repo_root, marker)) for marker in _REPO_MARKERS):
-                repo_ctx["repo_root"] = repo_root
-                break
-    repo_root = repo_ctx.get("repo_root")
-    if not repo_root:
-        return repo_ctx
-    if not os.path.exists(os.path.join(repo_root, ".git")):
-        return repo_ctx
-    git_root = _git_command_output(["git", "rev-parse", "--show-toplevel"], cwd=repo_root)
-    if git_root:
-        repo_ctx["repo_root"] = git_root
-        repo_ctx.setdefault("workspace_path", git_root)
-        remote_url = None
-        if (
-            "vcs.repository.name" not in repo_ctx
-            or "vcs.repository.owner" not in repo_ctx
-            or "gen_ai.client.repository.remote.sha256" not in repo_ctx
-        ):
-            remote_url = _git_command_output(
-                ["git", "config", "--get", "remote.origin.url"],
-                cwd=git_root,
-            )
-            owner, name = _parse_repository_remote(remote_url)
-            if owner and "vcs.repository.owner" not in repo_ctx:
-                repo_ctx["vcs.repository.owner"] = owner
-            if name and "vcs.repository.name" not in repo_ctx:
-                repo_ctx["vcs.repository.name"] = name
-            normalized_remote = _normalize_repository_remote(remote_url)
-            if normalized_remote:
-                repo_ctx["gen_ai.client.repository.remote.sha256"] = _hash_text(normalized_remote)
-        if "vcs.repository.name" not in repo_ctx:
-            repo_name = os.path.basename(git_root.rstrip(os.sep))
-            if repo_name:
-                repo_ctx["vcs.repository.name"] = repo_name
-        if "vcs.ref.head.name" not in repo_ctx:
-            head_name = _git_command_output(
-                ["git", "symbolic-ref", "--quiet", "--short", "HEAD"],
-                cwd=git_root,
-            )
-            if head_name:
-                repo_ctx["vcs.ref.head.name"] = head_name
-                repo_ctx["vcs.ref.head.type"] = "branch"
-    return repo_ctx
-
-
-def _collect_repository_attributes(data: Optional[dict] = None, session_ctx: Optional[dict] = None) -> dict:
-    attrs: dict[str, str] = {}
-    repo_ctx = _resolve_repository_context(data, session_ctx=session_ctx)
-    for key in (
-        "vcs.repository.owner",
-        "vcs.repository.name",
-        "vcs.ref.head.name",
-        "vcs.ref.head.type",
-        "gen_ai.client.repository.remote.sha256",
-    ):
-        value = repo_ctx.get(key)
-        if value:
-            attrs[key] = value
-    return attrs
-
-
-def _workspace_observability_attributes(data: Optional[dict], session_ctx: Optional[dict]) -> dict:
-    data = data or {}
-    repo_ctx = _resolve_repository_context(data, session_ctx=session_ctx)
-    cwd = _first_present(data, ("cwd",))
-    if not isinstance(cwd, str) or not cwd.strip():
-        cwd = None
-    workspace = _first_present(data, ("workspace_path",)) or repo_ctx.get("workspace_path")
-    workspace = workspace or repo_ctx.get("repo_root") or cwd
-    attrs = {}
-    if workspace:
-        attrs["gen_ai.client.workspace"] = os.path.abspath(os.path.expanduser(str(workspace)))
-    if cwd:
-        attrs["gen_ai.client.cwd"] = os.path.abspath(os.path.expanduser(cwd))
-    if repo_ctx.get("repo_root"):
-        attrs["gen_ai.client.repository_root"] = repo_ctx["repo_root"]
-    for key in (
-        "vcs.repository.owner",
-        "vcs.repository.name",
-        "vcs.ref.head.name",
-        "vcs.ref.head.type",
-        "gen_ai.client.repository.remote.sha256",
-    ):
-        if repo_ctx.get(key):
-            attrs[key] = repo_ctx[key]
-    return attrs
-
-
-def _collect_user_identity_attributes(data: Optional[dict]) -> dict:
-    if not _safe_bool(os.getenv("IDE_OTEL_CAPTURE_USER_IDENTITY", "")):
-        return {}
-    attrs = {}
-    user_id = None
-    user_email = None
-    user = data.get("user") if isinstance(data, dict) else None
-    if isinstance(user, dict):
-        user_id = _first_present(user, ("user_id", "id", "login", "username", "user_name", "actor_id"))
-        user_email = _first_present(user, ("user_email", "email"))
-    sources = []
-    if isinstance(data, dict):
-        sources.append(data)
-        metadata = data.get("metadata")
-        if isinstance(metadata, dict):
-            sources.append(metadata)
-    for source in sources:
-        if user_id is None:
-            user_id = _first_present(source, ("user_id", "login", "username", "user_name", "actor_id"))
-        if user_email is None:
-            user_email = _first_present(source, ("user_email", "email"))
-        if user_id is not None and user_email is not None:
-            break
-    user_id = _coerce_attribute_value(user_id)
-    if user_id is not None:
-        attrs["user.id"] = str(user_id)
-    user_email = _coerce_attribute_value(user_email)
-    if isinstance(user_email, str):
-        if _safe_bool(os.getenv("IDE_OTEL_MASK_PROMPTS", "")):
-            user_email = _mask_text(user_email)
-        attrs["user.email"] = user_email
-    return attrs
-
-
-def _collect_governance_attributes(data: Optional[dict]) -> dict:
-    if not isinstance(data, dict):
-        return {}
-    attrs = {}
-    attr_map = (
-        (("permission_mode",), "gen_ai.client.permission_mode"),
-        (("permission_decision", "approval_decision"), "gen_ai.client.approval.decision"),
-        (("approval_policy",), "gen_ai.client.approval.policy"),
-        (("approval_required", "requires_approval"), "gen_ai.client.approval.required"),
-        (("sandbox_mode",), "gen_ai.client.sandbox.mode"),
-        (("sandbox_policy",), "gen_ai.client.sandbox.policy"),
-        (("sandbox_enabled", "is_sandboxed", "sandboxed"), "gen_ai.client.sandbox.enabled"),
-        (("tool_choice",), "gen_ai.client.tool_choice"),
-        (("tool_decision",), "gen_ai.client.tool_decision"),
-    )
-    for source in _iter_enrichment_sources(data, include_tool_payloads=True):
-        for keys, attr_name in attr_map:
-            if attr_name in attrs:
-                continue
-            value = _coerce_attribute_value(_first_present(source, keys))
-            if value is not None:
-                attrs[attr_name] = value
-    return attrs
-
-
-def _collect_event_enrichment_attributes(data: Optional[dict] = None, session_ctx: Optional[dict] = None) -> dict:
-    data = data or {}
-    attrs = _workspace_observability_attributes(data, session_ctx=session_ctx)
-    attrs.update(_collect_user_identity_attributes(data))
-    attrs.update(_collect_governance_attributes(data))
-    attrs.update(_native_telemetry_attributes(data))
-    attrs["gen_ai.client.telemetry_source"] = _TELEMETRY_SOURCE
-    attrs["gen_ai.client.hook_schema_version"] = _HOOK_SCHEMA_VERSION
-    if data.get("_hook_event_id"):
-        attrs["gen_ai.client.hook.event_id"] = data["_hook_event_id"]
-    if _session_key(data):
-        attrs["gen_ai.client.session_id"] = _session_key(data)
-    if _generation_key_from_data(data):
-        attrs["gen_ai.client.generation_id"] = _generation_key_from_data(data)
-    if data.get("turn_id"):
-        attrs["gen_ai.client.turn_id"] = data["turn_id"]
-    return attrs
-
-
-def _apply_enrichment_attributes(span, data: Optional[dict] = None, session_ctx: Optional[dict] = None) -> None:
-    for key, value in _collect_event_enrichment_attributes(data, session_ctx=session_ctx).items():
-        _set_if_present(span, key, value)
-
-
-def _normalize_genai_output_type(value) -> Optional[str]:
-    normalized = _lower_or_none(value)
-    if normalized in {"json_object", "json_schema"}:
-        return "json"
-    if normalized in {"text", "json", "image", "speech"}:
-        return normalized
-    return None
-
-
-def _infer_genai_provider(data: dict) -> Optional[str]:
-    explicit = _lower_or_none(_first_present(data, ("provider_name", "provider", "model_provider", "vendor")))
-    if explicit is not None:
-        if explicit == "xai":
-            return "x_ai"
-        return explicit
-
-    model = _lower_or_none(_first_present(data, ("response_model", "request_model", "model", "model_name")))
-    if not model:
-        return None
-    if model.startswith("claude"):
-        return "anthropic"
-    if model.startswith(("gpt", "o1", "o3", "o4", "chatgpt", "text-embedding", "dall-e", "whisper")):
-        return "openai"
-    if model.startswith("gemini"):
-        return "gcp.gemini"
-    if model.startswith("mistral"):
-        return "mistral_ai"
-    if model.startswith("deepseek"):
-        return "deepseek"
-    if model.startswith("command") or model.startswith(("embed-", "rerank-")):
-        return "cohere"
-    if model.startswith("grok"):
-        return "x_ai"
-    if model.startswith("groq"):
-        return "groq"
-    return None
-
-
-# ---------------------------------------------------------------------------
-# OS / host detection (cached)
-# ---------------------------------------------------------------------------
-_OS_INFO: Optional[dict] = None
-
-
-def _get_os_info() -> dict:
-    """Detect operating system, version, and architecture. Cached after first call."""
-    global _OS_INFO
-    if _OS_INFO is not None:
-        return _OS_INFO
-    sys_name = platform.system().lower()  # darwin, linux, windows
-    os_type = {"darwin": "darwin", "linux": "linux", "windows": "windows"}.get(sys_name, sys_name)
-    os_name = platform.system()  # Darwin, Linux, Windows
-    if os_type == "darwin":
-        os_name = "macOS"
-    os_version = platform.release()  # e.g. "25.3.0", "6.5.0-44-generic"
-    arch = platform.machine()  # arm64, x86_64, aarch64
-    _OS_INFO = {
-        "os.type": os_type,
-        "os.name": os_name,
-        "os.version": os_version,
-        "host.arch": arch,
-    }
-    return _OS_INFO
-
-
-# ---------------------------------------------------------------------------
-# Client (IDE) version detection
-# ---------------------------------------------------------------------------
-_CODEX_VERSION_CACHE: Optional[str] = None  # cached result; None means not yet detected or not found
-_CODEX_VERSION_DETECTED: bool = False  # True once detection has been attempted
-
-
-def _detect_client_version(data: dict, ide: str) -> Optional[str]:
-    """Extract client/IDE version from environment variables or input payload."""
-    global _CODEX_VERSION_CACHE, _CODEX_VERSION_DETECTED
-    # Check input payload first
-    version = _first_present(data, ("client_version", "ide_version", "app_version"))
-    if version:
-        return str(version)
-    # IDE-specific env vars
-    if ide == "claude":
-        v = os.getenv("CLAUDE_CODE_VERSION")
-        if v:
-            return v
-    if ide == "cursor":
-        v = os.getenv("CURSOR_VERSION")
-        if v:
-            return v
-    if ide == "copilot":
-        v = os.getenv("COPILOT_VERSION")
-        if v:
-            return v
-    if ide == "codex":
-        v = os.getenv("CODEX_VERSION")
-        if v:
-            return v
-        if not _CODEX_VERSION_DETECTED:
-            _CODEX_VERSION_DETECTED = True
-            try:
-                result = subprocess.run(
-                    ["codex", "--version"],
-                    capture_output=True,
-                    text=True,
-                    timeout=2,
-                )
-                if result.returncode == 0:
-                    _CODEX_VERSION_CACHE = result.stdout.strip()
-            except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-                pass
-        if _CODEX_VERSION_CACHE:
-            return _CODEX_VERSION_CACHE
-    # Generic fallback
-    v = os.getenv("IDE_OTEL_CLIENT_VERSION")
-    if v:
-        return v
-    return None
-
-
-def _detect_payload_client_name(data: dict, include_session_fallback: bool = False) -> Optional[str]:
-    """Infer client identity from payload fields only, without wrapper env hints."""
-    reported = _normalize_ide_name(_first_present(data, ("ide_name", "ide", "client", "source_app")))
-    if reported:
-        return reported
-
-    semantic_signals = [
-        _normalize_ide_name(_first_present(data, ("gen_ai.client.name",))),
-        _normalize_ide_name(_first_present(data, ("gen_ai.system",))),
-        _normalize_ide_name(_first_present(data, ("service.name", "service_name"))),
-    ]
-    semantic_counts: dict[str, int] = {}
-    for signal in semantic_signals:
-        if signal:
-            semantic_counts[signal] = semantic_counts.get(signal, 0) + 1
-    corroborated = [name for name, count in semantic_counts.items() if count >= 2]
-    if len(corroborated) == 1:
-        return corroborated[0]
-
-    # Native Cascade IDs become session_id/generation_id in the adapter. Keep
-    # that provenance ahead of Cursor's generation_id heuristic.
-    if isinstance(data.get("agent_action_name"), str) and data["agent_action_name"] in _WINDSURF_EVENT_ALIASES and data.get("trajectory_id"):
-        return "windsurf"
-
-    if data.get("conversation_id") or data.get("generation_id"):
-        return "cursor"
-
-    if data.get("transcript_path") or data.get("permission_mode") or data.get("notification_type"):
-        return "claude"
-
-    if data.get("turn_id") or data.get("last_assistant_message") is not None or data.get("tool_response") is not None:
-        return "codex"
-
-    raw_event = _first_present(data, ("hook_event_name", "hook_event_type", "event"))
-    if isinstance(raw_event, str) and raw_event and raw_event[0].isupper():
-        return "claude"
-
-    cursor_indicators = ("composer_mode", "agent_type", "cwd", "workspace", "workspace_path")
-    if any(data.get(key) for key in cursor_indicators):
-        return "cursor"
-
-    if include_session_fallback and data.get("session_id"):
-        return "copilot"
-
-    return None
-
-
-def _detect_agent_engine(data: dict) -> Optional[str]:
-    """Detect an inner agent engine without consulting IDE_OTEL_IDE_NAME."""
-    explicit = _normalize_ide_name(_first_present(
-        data,
-        (
-            "agent_engine",
-            "agentEngine",
-            "engine",
-            "engine_name",
-        ),
-    ))
-    if explicit:
-        return explicit
-
-    payload_client = _detect_payload_client_name(data, include_session_fallback=False)
-    if payload_client:
-        return payload_client
-
-    if os.getenv("CLAUDE_CODE_ENTRYPOINT"):
-        return "claude"
-
-    return None
-
-
-def _has_strong_engine_signal(data: dict, resolved_engine: str) -> bool:
-    """True when payload has high-confidence evidence for the resolved engine."""
-    explicit = _normalize_ide_name(_first_present(
-        data,
-        ("agent_engine", "agentEngine", "engine", "engine_name"),
-    ))
-    if explicit == resolved_engine:
-        return True
-    reported = _normalize_ide_name(_first_present(data, ("ide_name", "ide", "client", "source_app")))
-    if reported == resolved_engine:
-        return True
-    semantic_signals = [
-        _normalize_ide_name(_first_present(data, ("gen_ai.client.name",))),
-        _normalize_ide_name(_first_present(data, ("gen_ai.system",))),
-        _normalize_ide_name(_first_present(data, ("service.name", "service_name"))),
-    ]
-    if sum(1 for signal in semantic_signals if signal == resolved_engine) >= 2:
-        return True
-    if resolved_engine == "cursor" and (data.get("conversation_id") or data.get("generation_id")):
-        return True
-    if resolved_engine == "windsurf" and isinstance(data.get("agent_action_name"), str) and data["agent_action_name"] in _WINDSURF_EVENT_ALIASES and data.get("trajectory_id"):
-        return True
-    if resolved_engine == "codex" and (
-        data.get("turn_id")
-        or data.get("last_assistant_message") is not None
-        or data.get("tool_response") is not None
-        or _get_event_name(data) in _CODEX_EVENTS
-    ):
-        return True
-    return False
-
-
-def _resolved_agent_engine(
-    data: Optional[dict] = None,
-    session_ctx: Optional[dict] = None,
-    ide: Optional[str] = None,
-) -> Optional[str]:
-    payload = data or {}
-    resolved = _detect_agent_engine(payload)
-    if resolved and ide and resolved != ide and not _has_strong_engine_signal(payload, resolved):
-        resolved = None
-    if resolved:
-        return resolved
-    if ide and _has_strong_engine_signal(payload, ide):
-        return None
-    if session_ctx:
-        session_engine = _normalize_ide_name(session_ctx.get("agent_engine"))
-        if session_engine and session_ctx.get("agent_engine_confirmed", True):
-            return session_engine
-    return None
-
-def _resolve_client_name(
-    ide: str,
-    data: Optional[dict] = None,
-    agent_engine: Optional[str] = None,
-    session_ctx: Optional[dict] = None,
-) -> str:
-    resolved_engine = agent_engine if agent_engine is not None else _resolved_agent_engine(data, session_ctx, ide=ide)
-    if resolved_engine and resolved_engine != ide:
-        return resolved_engine
-    return ide
-
-
-def _set_client_identity_attributes(
-    span, ide: str, data: Optional[dict] = None, agent_engine: Optional[str] = None, session_ctx: Optional[dict] = None,
-) -> Optional[str]:
-    """Attach canonical client identity and preserve wrapper identity when nested.
-
-    Returns the resolved inner engine when one is detected and differs from the
-    outer IDE; otherwise returns ``None``.
-    """
-    resolved_engine = agent_engine if agent_engine is not None else _resolved_agent_engine(data, session_ctx, ide=ide)
-    client_name = _resolve_client_name(ide, data=data, agent_engine=resolved_engine, session_ctx=session_ctx)
-    span.set_attribute("gen_ai.client.name", client_name)
-    if resolved_engine and resolved_engine != ide:
-        span.set_attribute("gen_ai.client.wrapper", ide)
-        span.set_attribute("gen_ai.client.agent_engine", resolved_engine)
-        return resolved_engine
-    return None
-
-
-def _mcp_identity(data: dict) -> Tuple[Optional[str], Optional[str]]:
-    """Return the already-normalized MCP server and tool identity."""
-    return data.get("mcp_server"), data.get("mcp_tool")
-
-
-def _mcp_observability_attributes(event_name: str, data: dict) -> dict:
-    """Build content-safe MCP attributes from canonical lifecycle data."""
-    server, tool = _mcp_identity(data)
-    if not server and not tool:
-        return {}
-    attrs = {}
-    if server:
-        attrs["gen_ai.client.mcp_server"] = server
-    if tool:
-        attrs["gen_ai.client.mcp_tool"] = tool
-    invocation_id = data.get("tool_use_id")
-    if invocation_id:
-        attrs["gen_ai.client.tool_use_id"] = invocation_id
-    duration = _first_present(data, ("duration_ms", "duration"))
-    if duration is not None:
-        attrs["gen_ai.client.mcp.duration_ms"] = duration
-        attrs["gen_ai.client.duration_ms"] = duration
-    status = data.get("status") or data.get("mcp_status")
-    if event_name == "PostToolUseFailure" or data.get("error") is not None:
-        status = "error"
-    elif event_name in {"PostToolUse", "AfterMCPExecution"} and not status:
-        status = "success"
-    if status:
-        attrs["gen_ai.client.status"] = status
-    if data.get("error") is not None:
-        error_text = _stringify(data["error"])
-        attrs["gen_ai.client.error.length"] = len(error_text)
-        attrs["gen_ai.client.error.sha256"] = _hash_text(error_text)
-        if _CAPTURE_POLICY.content_enabled:
-            if _safe_bool(os.getenv("IDE_OTEL_MASK_PROMPTS", "")):
-                error_text = _mask_text(error_text)
-            attrs["gen_ai.client.error.text"] = error_text[:_text_max_chars()]
-    else:
-        if data.get("error_length") is not None:
-            attrs["gen_ai.client.error.length"] = data["error_length"]
-        if data.get("error_sha256") is not None:
-            attrs["gen_ai.client.error.sha256"] = data["error_sha256"]
-
-    result = _first_present(data, ("result_json", "mcp_output", "tool_output", "output"))
-    if result is not None:
-        text = _stringify(result)
-        attrs["gen_ai.client.mcp.output.length"] = len(text)
-        attrs["gen_ai.client.mcp.output.sha256"] = _hash_text(text)
-    else:
-        if data.get("mcp_result_length") is not None:
-            attrs["gen_ai.client.mcp.output.length"] = data["mcp_result_length"]
-        if data.get("mcp_result_sha256") is not None:
-            attrs["gen_ai.client.mcp.output.sha256"] = data["mcp_result_sha256"]
-    return attrs
-
-
-def _apply_mcp_attributes(span, event_name: str, data: dict) -> None:
-    for key, value in _mcp_observability_attributes(event_name, data).items():
-        _set_if_present(span, key, value)
-
-
-def _normalize_ide_name(value: Optional[str]) -> Optional[str]:
-    """Normalize IDE names to canonical identifiers using case-insensitive lookup."""
-    if not isinstance(value, str):
-        return None
-    normalized = _IDE_NAME_NORM_PATTERN.sub(" ", value.strip().lower())
-    if normalized in _CANONICAL_IDE_NAMES:
-        return normalized
-
-    alias = _IDE_NAME_ALIASES.get(normalized)
-    if alias:
-        return alias
-
-    if normalized.endswith((" cli", " ide")):
-        normalized = normalized.rsplit(" ", 1)[0]
-        if normalized in _CANONICAL_IDE_NAMES:
-            return normalized
-        return _IDE_NAME_ALIASES.get(normalized)
-
     return None
 
 
@@ -2021,84 +1150,6 @@ def _event_adapter_for(ide: str) -> ProviderEventAdapter:
     return _get_parser(ide, capture_policy=_CAPTURE_POLICY)
 
 
-def _attach_content_fact(span, label: str, text: str, *, capture: bool) -> None:
-    if not text:
-        return
-    span.set_attribute(f"gen_ai.client.{label}.length", len(text))
-    span.set_attribute(f"gen_ai.client.{label}.sha256", _hash_text(text))
-    if capture:
-        _attach_text(span, label, text)
-
-
-def _attach_text(span, label: str, text: str) -> None:
-    if _safe_bool(os.getenv("IDE_OTEL_MASK_PROMPTS", "")):
-        text = _mask_text(text)
-    span.set_attribute(f"gen_ai.client.{label}.text", text[:_text_max_chars()])
-
-
-def _conversation_records_from_data(data: dict) -> tuple[ConversationRecord, ...]:
-    records = []
-    for item in data.get("_conversation_records") or []:
-        if not isinstance(item, dict):
-            continue
-        kind = item.get("kind")
-        role = item.get("role")
-        text = item.get("text")
-        length = item.get("length")
-        sha256 = item.get("sha256")
-        if not isinstance(kind, str) or not isinstance(role, str):
-            continue
-        if isinstance(length, int) and length >= 0 and isinstance(sha256, str) and sha256:
-            retained_text = text if isinstance(text, str) and _CAPTURE_POLICY.content_enabled else None
-            records.append(ConversationRecord(kind, role, retained_text, length, sha256))
-        elif isinstance(text, str) and text:
-            records.append(ConversationRecord.from_text(kind, role, text, capture=_CAPTURE_POLICY.content_enabled))
-    return tuple(records)
-
-
-def _apply_conversation_attributes(span, event_name: str, data: dict) -> None:
-    records = _conversation_records_from_data(data)
-    if not records:
-        records = tuple(ProviderEventAdapter(capture_policy=_CAPTURE_POLICY)._conversation_records(event_name, data))
-    if records:
-        span.set_attribute("gen_ai.client.message.types", [record.kind for record in records])
-        span.set_attribute("gen_ai.client.message.roles", [record.role for record in records])
-    for record in records:
-        span.set_attribute(f"gen_ai.client.{record.kind}.length", record.length)
-        span.set_attribute(f"gen_ai.client.{record.kind}.sha256", record.sha256)
-        if _CAPTURE_POLICY.content_enabled and record.text is not None:
-            _attach_text(span, record.kind, record.text)
-
-    # Both message formats use the same records and preserve the original facts
-    # while masking and bounding only their captured text.
-    if _CAPTURE_POLICY.content_enabled:
-        prompt = next((record.text for record in records if record.kind == "prompt"), None)
-        response = next((record.text for record in records if record.kind == "response"), None)
-        prompt = prompt or (data.get("prompt") if isinstance(data.get("prompt"), str) else None)
-        response = response or (data.get("response") if isinstance(data.get("response"), str) else None)
-        if _safe_bool(os.getenv("IDE_OTEL_MASK_PROMPTS", "")):
-            prompt = _mask_text(prompt) if prompt else None
-            response = _mask_text(response) if response else None
-        max_chars = _text_max_chars()
-        prompt = prompt[:max_chars] if prompt else None
-        response = response[:max_chars] if response else None
-        inp_msg, out_msg = _genai_messages(prompt, response)
-        _set_if_present(span, "gen_ai.input.messages", inp_msg)
-        _set_if_present(span, "gen_ai.output.messages", out_msg)
-
-    error = data.get("error")
-    if isinstance(error, dict):
-        _set_if_present(span, "error.type", _first_present(error, ("type", "error_type", "name")))
-        _set_if_present(span, "error.code", _first_present(error, ("code", "error_code")))
-    _set_if_present(span, "error.type", data.get("error_type"))
-    _set_if_present(span, "error.code", data.get("error_code"))
-    if event_name in {"ErrorOccurred", "PostToolUseFailure"} or error is not None:
-        span.set_attribute(
-            "gen_ai.client.status",
-            "interrupted" if data.get("is_interrupt") else "error",
-        )
-
-
 def _apply_operation_status(span, event_name: str, data: dict) -> None:
     """Set OTel status for real failures without leaking error descriptions."""
     if data.get("is_interrupt"):
@@ -2275,19 +1326,6 @@ def _detect_ide(data: dict) -> str:
 
     # Default to cursor (most common case)
     return "cursor"
-
-
-def _get_event_name(data: dict) -> str:
-    """Extract raw event name from hook input."""
-    if _CLI_HOOK_EVENT:
-        return _CLI_HOOK_EVENT
-    for key in ("hook_event_name", "hook_event_type", "event", "hook", "agent_action_name"):
-        value = data.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    if "prompt" in data:
-        return "beforeSubmitPrompt"
-    return "stop"
 
 
 # ---------------------------------------------------------------------------
@@ -2680,480 +1718,13 @@ def _clear_batch_events(key: str) -> None:
         pass
 
 
-@dataclass(slots=True)
-class _BufferedEventDecision:
-    generation_key: Optional[str]
-    data: dict
-    duplicate: bool = False
-    correlated: bool = False
-
-
-def _event_tool_key(data: dict) -> Optional[str]:
-    _server, mcp_tool = _mcp_identity(data)
-    value = mcp_tool or data.get("tool_name")
-    if not isinstance(value, str) or not value:
-        return None
-    return value
-
-
-def _prune_session_event_state(session_ctx: dict, now_ns: int) -> None:
-    cutoff_ns = now_ns - max(1, _state_ttl_seconds()) * 1_000_000_000
-    seen = session_ctx.get("seen_events")
-    if isinstance(seen, list):
-        session_ctx["seen_events"] = [
-            entry for entry in seen[-_SESSION_EVENT_LIMIT:]
-            if isinstance(entry, dict) and entry.get("seen_at_ns", now_ns) >= cutoff_ns
-        ]
-    invocations = session_ctx.get("tool_invocations")
-    if isinstance(invocations, list):
-        session_ctx["tool_invocations"] = [
-            entry for entry in invocations[-_SESSION_INVOCATION_LIMIT:]
-            if isinstance(entry, dict) and entry.get("updated_at_ns", now_ns) >= cutoff_ns
-        ]
-    agents = session_ctx.get("agent_invocations")
-    if isinstance(agents, list):
-        session_ctx["agent_invocations"] = [
-            entry for entry in agents[-_AGENT_INVOCATION_LIMIT:]
-            if isinstance(entry, dict) and entry.get("updated_at_ns", now_ns) >= cutoff_ns
-        ]
-
-
-def _mark_event_seen(
-    session_ctx: dict,
-    key: str,
-    now_ns: int,
-    generation_key: Optional[str],
-    *,
-    window_seconds: Optional[float] = None,
-) -> bool:
-    """Return True for a duplicate and remember new observations in bounded state."""
-    _prune_session_event_state(session_ctx, now_ns)
-    seen = session_ctx.setdefault("seen_events", [])
-    for entry in reversed(seen):
-        if entry.get("key") != key:
-            continue
-        if window_seconds is None:
-            return True
-        age_ns = now_ns - entry.get("seen_at_ns", now_ns)
-        if age_ns <= int(window_seconds * 1_000_000_000):
-            return True
-        break
-    seen.append({"key": key, "seen_at_ns": now_ns, "generation_key": generation_key})
-    del seen[:-_SESSION_EVENT_LIMIT]
-    return False
-
-
-class SessionEventDeduplicator:
-    """Own bounded callback idempotency independently of invocation matching."""
-
-    def __init__(self, session_ctx: dict, generation_key: Optional[str], now_ns: int) -> None:
-        self.session_ctx = session_ctx
-        self.generation_key = generation_key
-        self.now_ns = now_ns
-
-    def seen(self, key: str, *, window_seconds: Optional[float] = None) -> bool:
-        return _mark_event_seen(
-            self.session_ctx,
-            key,
-            self.now_ns,
-            self.generation_key,
-            window_seconds=window_seconds,
-        )
-
-    def is_duplicate(
-        self,
-        event_name: str,
-        data: dict,
-        invocation_id: Optional[str],
-    ) -> bool:
-        """Apply event-specific keys without owning correlation state."""
-        if invocation_id:
-            return self.seen(f"tool:{event_name}:{invocation_id}")
-        if event_name in _GENERATION_END_EVENTS and self.generation_key:
-            return self.seen(f"generation-end:{event_name}:{self.generation_key}")
-        if event_name not in _MCP_EVENTS:
-            event_id = data.get("_hook_event_id")
-            if event_id and event_name in {
-                "ErrorOccurred",
-                "PostToolUseFailure",
-                "PreCompact",
-                "PostCompact",
-                "PermissionRequest",
-            }:
-                window = None if data.get("_hook_event_id_source") == "provider" else 1.0
-                return self.seen(
-                    f"event:{event_name}:{self.generation_key}:{event_id}",
-                    window_seconds=window,
-                )
-            return False
-        return self.seen(
-            _no_id_mcp_fingerprint(event_name, data, self.generation_key),
-            window_seconds=0.25,
-        )
-
-
-class SubagentInvocationCorrelator:
-    """Correlate concurrent subagent callbacks before applying deduplication."""
-
-    def __init__(
-        self,
-        session_ctx: dict,
-        generation_key: Optional[str],
-        now_ns: int,
-    ) -> None:
-        self.session_ctx = session_ctx
-        self.generation_key = generation_key
-        self.now_ns = now_ns
-        self.deduplicator = SessionEventDeduplicator(session_ctx, generation_key, now_ns)
-
-    @property
-    def invocations(self) -> list:
-        return self.session_ctx.setdefault("agent_invocations", [])
-
-    def prepare(self, event_name: str, data: dict) -> tuple[dict, bool]:
-        if event_name not in {"SubagentStart", "SubagentStop"}:
-            return data, False
-        prepared = dict(data)
-        callback_id = prepared.get("_hook_event_id")
-        if prepared.get("_hook_event_id_source") == "provider" and callback_id:
-            if self.deduplicator.seen(f"subagent-callback:{event_name}:{callback_id}"):
-                return prepared, True
-
-        agent_id = prepared.get("agent_id")
-        if agent_id and self.deduplicator.seen(f"subagent:{event_name}:{agent_id}"):
-            return prepared, True
-        if event_name == "SubagentStart":
-            return self._start(prepared, agent_id), False
-        return self._stop(prepared, agent_id)
-
-    def _start(self, prepared: dict, agent_id: Optional[str]) -> dict:
-        if not agent_id:
-            agent_id = f"hook:{uuid.uuid4()}"
-            prepared["agent_id"] = agent_id
-            prepared["agent_id_source"] = "hook"
-        else:
-            prepared["agent_id_source"] = "provider"
-        parent_id = prepared.get("parent_agent_id") or self.session_ctx.get("root_agent_id")
-        if parent_id:
-            prepared["parent_agent_id"] = parent_id
-        agent_type = _first_present(prepared, ("subagent_type", "agent_type", "agent_name"))
-        task = _first_present(prepared, ("delegation_task", "subagent_task", "task"))
-        self.invocations.append({
-            "agent_id": agent_id,
-            "agent_id_source": prepared.get("agent_id_source"),
-            "parent_agent_id": parent_id,
-            "agent_type": agent_type,
-            "task": _stringify(task) if task is not None else None,
-            "generation_key": self.generation_key,
-            "state": "open",
-            "started_at_ns": self.now_ns,
-            "updated_at_ns": self.now_ns,
-        })
-        del self.invocations[:-_AGENT_INVOCATION_LIMIT]
-        return prepared
-
-    def _matches(self, invocation: dict, agent_id: Optional[str], agent_type, task) -> bool:
-        return bool(
-            invocation.get("state") == "open"
-            and (not agent_id or invocation.get("agent_id") == agent_id)
-            and (not agent_type or invocation.get("agent_type") in (None, agent_type))
-            and (task is None or invocation.get("task") in (None, _stringify(task)))
-        )
-
-    def _stop(self, prepared: dict, agent_id: Optional[str]) -> tuple[dict, bool]:
-        agent_type = _first_present(prepared, ("subagent_type", "agent_type", "agent_name"))
-        task = _first_present(prepared, ("delegation_task", "subagent_task", "task"))
-        candidates = [
-            item for item in self.invocations if self._matches(item, agent_id, agent_type, task)
-        ]
-        if not candidates:
-            recent_cutoff = self.now_ns - 1_000_000_000
-            recently_closed = any(
-                item.get("state") == "closed"
-                and item.get("updated_at_ns", 0) >= recent_cutoff
-                and (not agent_id or item.get("agent_id") == agent_id)
-                and (not agent_type or item.get("agent_type") in (None, agent_type))
-                and (task is None or item.get("task") in (None, _stringify(task)))
-                for item in self.invocations
-            )
-            if recently_closed:
-                return prepared, True
-            event_id = prepared.get("_hook_event_id")
-            if event_id:
-                return prepared, self.deduplicator.seen(
-                    f"subagent-unmatched-stop:{self.generation_key}:{event_id}",
-                    window_seconds=1.0,
-                )
-            return prepared, False
-
-        invocation = candidates[0]
-        prepared.setdefault("agent_id", invocation.get("agent_id"))
-        prepared.setdefault("agent_id_source", invocation.get("agent_id_source"))
-        prepared.setdefault("parent_agent_id", invocation.get("parent_agent_id"))
-        if task is None and invocation.get("task") is not None:
-            prepared["delegation_task"] = invocation["task"]
-        invocation["state"] = "closed"
-        invocation["updated_at_ns"] = self.now_ns
-        invocation["status"] = prepared.get("status") or "success"
-        return prepared, False
-def _no_id_mcp_fingerprint(event_name: str, data: dict, generation_key: Optional[str]) -> str:
-    server, tool = _mcp_identity(data)
-    result = _first_present(data, ("result_json", "mcp_output", "tool_output", "output"))
-    result_hash = _hash_text(_stringify(result)) if result is not None else ""
-    error = data.get("error")
-    error_hash = _hash_text(str(error)) if error is not None else ""
-    supplied_time = _first_present(data, ("timestamp_ns", "timestamp", "event_time"))
-    payload = "|".join(str(value or "") for value in (
-        event_name,
-        server,
-        tool,
-        generation_key,
-        data.get("duration_ms") or data.get("duration"),
-        data.get("status"),
-        result_hash,
-        error_hash,
-        supplied_time,
-    ))
-    return f"mcp-fingerprint:{hashlib.sha256(payload.encode('utf-8')).hexdigest()}"
-
-
-def _store_mcp_result(invocation: dict, data: dict) -> None:
-    duration = _first_present(data, ("duration_ms", "duration"))
-    if duration is not None:
-        invocation["duration_ms"] = duration
-    if data.get("status") is not None:
-        invocation["mcp_status"] = data.get("status")
-    if data.get("error") is not None:
-        error_text = _stringify(data.get("error"))
-        invocation["error_length"] = len(error_text)
-        invocation["error_sha256"] = _hash_text(error_text)
-        if _CAPTURE_POLICY.content_enabled:
-            invocation["error"] = error_text
-        invocation["mcp_status"] = "error"
-    result = _first_present(data, ("result_json", "mcp_output", "tool_output", "output"))
-    if result is not None:
-        text = _stringify(result)
-        invocation["mcp_result_length"] = len(text)
-        invocation["mcp_result_sha256"] = _hash_text(text)
-        invocation["result_json"] = result
-
-
-def _merge_invocation_data(data: dict, invocation: dict) -> dict:
-    """Fill absent canonical fields without replacing callback evidence."""
-    merged = dict(data)
-    for key in (
-        "tool_use_id",
-        "mcp_server",
-        "mcp_tool",
-        "duration_ms",
-        "mcp_status",
-        "error",
-        "error_length",
-        "error_sha256",
-        "mcp_result_length",
-        "mcp_result_sha256",
-        "result_json",
-    ):
-        value = invocation.get(key)
-        if value is not None and merged.get(key) is None:
-            merged[key] = value
-    if merged.get("status") is None and invocation.get("mcp_status") is not None:
-        merged["status"] = invocation["mcp_status"]
-    return merged
-
-
-def _matching_open_tools(
-    session_ctx: dict,
-    data: dict,
-    generation_key: Optional[str],
-    *,
-    mcp_only: bool = False,
-    after_mcp: bool = False,
-) -> list:
-    tool_key = _event_tool_key(data)
-    server, _tool = _mcp_identity(data)
-    candidates = []
-    for invocation in session_ctx.get("tool_invocations", []):
-        if invocation.get("state") != "open":
-            continue
-        if mcp_only and not invocation.get("is_mcp"):
-            continue
-        if tool_key and invocation.get("tool_key") != tool_key:
-            continue
-        if generation_key and invocation.get("generation_key") != generation_key:
-            continue
-        if data.get("turn_id") and invocation.get("turn_id") != data.get("turn_id"):
-            continue
-        if server and invocation.get("mcp_server") not in (None, server):
-            continue
-        if after_mcp and not invocation.get("mcp_before_seen"):
-            continue
-        if after_mcp and invocation.get("mcp_after_seen"):
-            continue
-        if not after_mcp and invocation.get("mcp_before_seen"):
-            continue
-        candidates.append(invocation)
-    return candidates
-
-
-class ToolInvocationCorrelator:
-    """Own bounded, session-local tool, permission, and MCP correlation state."""
-
-    def __init__(
-        self,
-        session_ctx: dict,
-        ide: str,
-        generation_key: Optional[str],
-        now_ns: int,
-    ) -> None:
-        self.session_ctx = session_ctx
-        self.ide = ide
-        self.generation_key = generation_key
-        self.now_ns = now_ns
-        self.deduplicator = SessionEventDeduplicator(session_ctx, generation_key, now_ns)
-
-    @property
-    def invocations(self) -> list:
-        """Return the current session-owned list after any pruning replacement."""
-        return self.session_ctx.setdefault("tool_invocations", [])
-
-    def prepare(self, event_name: str, data: dict) -> _BufferedEventDecision:
-        # This boundary also accepts raw lifecycle events from direct callers.
-        prepared = _normalize_mcp_event_data(data, event_name, self.ide)
-        if event_name in {"SubagentStart", "SubagentStop"}:
-            prepared, duplicate = SubagentInvocationCorrelator(
-                self.session_ctx,
-                self.generation_key,
-                self.now_ns,
-            ).prepare(event_name, prepared)
-            return self._decision(prepared, duplicate=duplicate)
-
-        invocation_id = prepared.get("tool_use_id")
-        if self._is_duplicate(event_name, prepared, invocation_id):
-            return self._decision(prepared, duplicate=True)
-
-        if event_name == "PreToolUse" and invocation_id:
-            self._record_open_tool(prepared, invocation_id)
-        elif event_name == "PermissionRequest" and not invocation_id:
-            prepared, duplicate = self._correlate_permission(event_name, prepared)
-            if duplicate:
-                return self._decision(prepared, duplicate=True, correlated=True)
-        elif event_name in _MCP_EVENTS and self.ide == "cursor" and not invocation_id:
-            correlated = self._correlate_cursor_mcp(event_name, prepared)
-            if correlated is not None:
-                return self._decision(correlated, correlated=True)
-        elif event_name in {"PostToolUse", "PostToolUseFailure"} and invocation_id:
-            prepared = self._close_tool(event_name, prepared, invocation_id)
-
-        return self._decision(prepared)
-
-    def _decision(
-        self,
-        data: dict,
-        *,
-        duplicate: bool = False,
-        correlated: bool = False,
-    ) -> _BufferedEventDecision:
-        return _BufferedEventDecision(self.generation_key, data, duplicate=duplicate, correlated=correlated)
-
-    def _is_duplicate(self, event_name: str, data: dict, invocation_id: Optional[str]) -> bool:
-        return self.deduplicator.is_duplicate(event_name, data, invocation_id)
-
-    def _record_open_tool(self, data: dict, invocation_id: str) -> None:
-        if any(item.get("tool_use_id") == invocation_id for item in self.invocations):
-            return
-        server, tool = _mcp_identity(data)
-        self.invocations.append({
-            "tool_use_id": invocation_id,
-            "tool_name": data.get("tool_name"),
-            "tool_key": _event_tool_key(data),
-            "mcp_server": server,
-            "mcp_tool": tool,
-            "is_mcp": bool(server or tool),
-            "generation_key": self.generation_key,
-            "turn_id": data.get("turn_id"),
-            "state": "open",
-            "started_at_ns": self.now_ns,
-            "updated_at_ns": self.now_ns,
-        })
-        del self.invocations[:-_SESSION_INVOCATION_LIMIT]
-
-    def _correlate_permission(self, event_name: str, data: dict) -> Tuple[dict, bool]:
-        candidates = _matching_open_tools(self.session_ctx, data, self.generation_key)
-        if len(candidates) != 1:
-            return data, False
-        prepared = dict(data)
-        invocation_id = candidates[0]["tool_use_id"]
-        prepared["tool_use_id"] = invocation_id
-        duplicate = _mark_event_seen(
-            self.session_ctx,
-            f"tool:{event_name}:{invocation_id}",
-            self.now_ns,
-            self.generation_key,
-        )
-        return prepared, duplicate
-
-    def _correlate_cursor_mcp(self, event_name: str, data: dict) -> Optional[dict]:
-        candidates = _matching_open_tools(
-            self.session_ctx,
-            data,
-            self.generation_key,
-            mcp_only=True,
-            after_mcp=event_name == "AfterMCPExecution",
-        )
-        if event_name == "AfterMCPExecution" and not candidates:
-            candidates = _matching_open_tools(
-                self.session_ctx,
-                data,
-                self.generation_key,
-                mcp_only=True,
-            )
-        if not candidates:
-            return None
-
-        invocation = candidates[0]
-        prepared = dict(data)
-        prepared["tool_use_id"] = invocation["tool_use_id"]
-        server, tool = _mcp_identity(prepared)
-        invocation["mcp_server"] = server or invocation.get("mcp_server")
-        invocation["mcp_tool"] = tool or invocation.get("mcp_tool")
-        invocation["is_mcp"] = True
-        invocation["updated_at_ns"] = self.now_ns
-        if event_name == "BeforeMCPExecution":
-            invocation["mcp_before_seen"] = True
-        else:
-            invocation["mcp_after_seen"] = True
-            _store_mcp_result(invocation, prepared)
-            invocation.setdefault("mcp_status", "success")
-        return prepared
-    def _close_tool(self, event_name: str, data: dict, invocation_id: str) -> dict:
-        invocation = next(
-            (item for item in self.invocations if item.get("tool_use_id") == invocation_id),
-            None,
-        )
-        if invocation is None:
-            return data
-        prepared = _merge_invocation_data(data, invocation)
-        invocation["state"] = "closed"
-        invocation["updated_at_ns"] = self.now_ns
-        if event_name == "PostToolUseFailure":
-            invocation["mcp_status"] = "error"
-        else:
-            invocation.setdefault("mcp_status", "success")
-        return prepared
-
-
-# Backward-compatible name retained for callers that imported the original class.
-MCPInvocationCorrelator = ToolInvocationCorrelator
-
-
-def _buffer_session_event(session_key: str, event_name: str, data: dict, ide: str) -> _BufferedEventDecision:
+def _buffer_session_event(session_key: str, event_name: str, data: dict, ide: str) -> BufferedEventDecision:
     """Atomically prepare and append a generation-owned event."""
     now_ns = time.time_ns()
 
-    def mutate(session_ctx: dict) -> _BufferedEventDecision:
+    def mutate(session_ctx: dict) -> BufferedEventDecision:
         if session_ctx.get("finalizing"):
-            return _BufferedEventDecision(None, data, duplicate=True)
+            return BufferedEventDecision(None, data, duplicate=True)
         explicit_gen = _generation_key_from_data(data)
         if event_name in _GENERATION_START_EVENTS:
             event_id = data.get("_hook_event_id")
@@ -3162,7 +1733,7 @@ def _buffer_session_event(session_key: str, event_name: str, data: dict, ide: st
                 and event_id
                 and session_ctx.get("active_prompt_event_id") == event_id
             ):
-                return _BufferedEventDecision(
+                return BufferedEventDecision(
                     session_ctx.get("current_generation"),
                     data,
                     duplicate=True,
@@ -3180,7 +1751,10 @@ def _buffer_session_event(session_key: str, event_name: str, data: dict, ide: st
             if not gen_key:
                 gen_key = _new_generation_key(session_key, session_ctx)
 
-        decision = ToolInvocationCorrelator(session_ctx, ide, gen_key, now_ns).prepare(
+        decision = ToolInvocationCorrelator(
+            session_ctx, ide, gen_key, now_ns,
+            ttl_seconds=_state_ttl_seconds(), capture_content=_CAPTURE_POLICY.content_enabled,
+        ).prepare(
             event_name,
             data,
         )
@@ -3197,24 +1771,27 @@ def _buffer_session_event(session_key: str, event_name: str, data: dict, ide: st
         _ctx, decision = _update_session_context(session_key, mutate)
         if decision is None:
             gen_key = _resolve_generation_key(data, session_ctx)
-            return _BufferedEventDecision(gen_key, data)
+            return BufferedEventDecision(gen_key, data)
     return decision
 
 
-def _buffer_generation_end(session_key: str, event_name: str, data: dict, ide: str) -> _BufferedEventDecision:
+def _buffer_generation_end(session_key: str, event_name: str, data: dict, ide: str) -> BufferedEventDecision:
     """Append a terminal callback, creating an incomplete generation if needed."""
     now_ns = time.time_ns()
 
-    def mutate(session_ctx: dict) -> _BufferedEventDecision:
+    def mutate(session_ctx: dict) -> BufferedEventDecision:
         if session_ctx.get("finalizing"):
-            return _BufferedEventDecision(None, data, duplicate=True)
+            return BufferedEventDecision(None, data, duplicate=True)
         gen_key = _generation_key_from_data(data) or session_ctx.get("current_generation")
         if not gen_key:
             pending = session_ctx.get("pending_generations") or []
             gen_key = pending[-1] if pending else None
         if not gen_key:
             gen_key = _new_generation_key(session_key, session_ctx)
-        decision = ToolInvocationCorrelator(session_ctx, ide, gen_key, now_ns).prepare(
+        decision = ToolInvocationCorrelator(
+            session_ctx, ide, gen_key, now_ns,
+            ttl_seconds=_state_ttl_seconds(), capture_content=_CAPTURE_POLICY.content_enabled,
+        ).prepare(
             event_name,
             data,
         )
@@ -3224,7 +1801,7 @@ def _buffer_generation_end(session_key: str, event_name: str, data: dict, ide: s
         return decision
 
     _ctx, decision = _update_session_context(session_key, mutate)
-    return decision or _BufferedEventDecision(None, data)
+    return decision or BufferedEventDecision(None, data)
 
 
 def _prepare_streaming_session_event(
@@ -3232,13 +1809,13 @@ def _prepare_streaming_session_event(
     event_name: str,
     data: dict,
     ide: str,
-) -> _BufferedEventDecision:
+) -> BufferedEventDecision:
     """Apply the same persisted dedupe/correlation policy without writing a batch."""
     now_ns = time.time_ns()
 
-    def mutate(session_ctx: dict) -> _BufferedEventDecision:
+    def mutate(session_ctx: dict) -> BufferedEventDecision:
         if session_ctx.get("finalizing"):
-            return _BufferedEventDecision(None, data, duplicate=True)
+            return BufferedEventDecision(None, data, duplicate=True)
         explicit_gen = _generation_key_from_data(data)
         if event_name in _GENERATION_START_EVENTS:
             event_id = data.get("_hook_event_id")
@@ -3247,7 +1824,7 @@ def _prepare_streaming_session_event(
                 and event_id
                 and session_ctx.get("active_prompt_event_id") == event_id
             ):
-                return _BufferedEventDecision(
+                return BufferedEventDecision(
                     session_ctx.get("current_generation"),
                     data,
                     duplicate=True,
@@ -3268,7 +1845,10 @@ def _prepare_streaming_session_event(
             gen_key = session_ctx.get("current_generation")
             if not gen_key:
                 gen_key = _new_generation_key(session_key, session_ctx)
-        decision = ToolInvocationCorrelator(session_ctx, ide, gen_key, now_ns).prepare(
+        decision = ToolInvocationCorrelator(
+            session_ctx, ide, gen_key, now_ns,
+            ttl_seconds=_state_ttl_seconds(), capture_content=_CAPTURE_POLICY.content_enabled,
+        ).prepare(
             event_name,
             data,
         )
@@ -3276,7 +1856,7 @@ def _prepare_streaming_session_event(
         return decision
 
     _ctx, decision = _update_session_context(session_key, mutate)
-    return decision or _BufferedEventDecision(None, data)
+    return decision or BufferedEventDecision(None, data)
 
 
 def _complete_generation_state(session_key: str, gen_key: str, memory: Optional[dict] = None) -> None:
@@ -3332,21 +1912,6 @@ def _pending_batch_keys_for_session(session_key: str, session_ctx: Optional[dict
         if any(_session_key(entry.get("data") or {}) == session_key for entry in events):
             keys.append(key)
     return keys
-
-
-def _enrich_buffered_event(data: dict, session_ctx: Optional[dict]) -> dict:
-    """Merge invocation facts into events normalized before they were buffered."""
-    invocation_id = data.get("tool_use_id")
-    if not invocation_id or not session_ctx:
-        return data
-    invocation = next(
-        (
-            item for item in session_ctx.get("tool_invocations", [])
-            if item.get("tool_use_id") == invocation_id
-        ),
-        None,
-    )
-    return _merge_invocation_data(data, invocation) if invocation else data
 
 
 # ---------------------------------------------------------------------------
@@ -3484,25 +2049,6 @@ def _event_parent_trace_context(data: dict, session_ctx: Optional[dict]):
     return _session_trace_context(session_ctx)
 
 
-def _native_telemetry_attributes(data: dict) -> dict:
-    """Return native-agent identity only from the explicit native contract."""
-    trace_id = ProviderEventAdapter._native_trace_id(data.get("native_trace_id"))
-    span_id = ProviderEventAdapter._native_span_id(data.get("native_span_id"))
-    parent_span_id = ProviderEventAdapter._native_span_id(data.get("native_parent_span_id"))
-    attrs = {}
-    if trace_id:
-        attrs["gen_ai.client.native_trace_id"] = trace_id
-    if span_id:
-        attrs["gen_ai.client.native_span_id"] = span_id
-    if parent_span_id:
-        attrs["gen_ai.client.native_parent_span_id"] = parent_span_id
-    if attrs:
-        attrs["gen_ai.client.native_source"] = (
-            data.get("native_source") or data.get("_hook_provider_adapter", "unknown")
-        )
-    return attrs
-
-
 def _native_span_links(data: dict) -> list:
     """Create a link to a validated native span without inventing identifiers."""
     if SpanContext is None or Link is None or TraceFlags is None or TraceState is None:
@@ -3605,239 +2151,16 @@ def _remember_agent_span_context(
 
 
 # ---------------------------------------------------------------------------
-# GenAI semantic conventions
-# ---------------------------------------------------------------------------
-def _genai_operation(event_name: str) -> str:
-    if event_name in _OP_TOOL_EVENTS:
-        return "execute_tool"
-    if event_name in _OP_AGENT_EVENTS:
-        return "invoke_agent"
-    return "chat"
-
-
-def _genai_messages(
-    prompt: Optional[str], response: Optional[str],
-) -> Tuple[Optional[str], Optional[str]]:
-    inp = None
-    out = None
-    if prompt:
-        inp = json.dumps([{"role": "user", "parts": [{"type": "text", "content": prompt}]}], ensure_ascii=True)
-    if response:
-        out = json.dumps([{"role": "assistant", "parts": [{"type": "text", "content": response}]}], ensure_ascii=True)
-    return inp, out
-
-
-def _apply_genai_semconv(span, event_name: str, data: dict, ide: str, session_ctx: Optional[dict] = None, batch_model: Optional[str] = None) -> None:
-    provider = _infer_genai_provider(data)
-    if provider is not None:
-        span.set_attribute("gen_ai.provider.name", provider)
-    span.set_attribute("gen_ai.system", _resolve_client_name(ide, data=data, session_ctx=session_ctx))
-    span.set_attribute("gen_ai.operation.name", _genai_operation(event_name))
-    _set_if_present(span, "gen_ai.conversation.id", data.get("conversation_id") or data.get("session_id"))
-    _set_if_present(
-        span,
-        "gen_ai.agent.id",
-        _first_present(data, ("agent_id",)) or (session_ctx or {}).get("root_agent_id"),
-    )
-    _set_if_present(span, "gen_ai.agent.name", _first_present(data, ("agent_name", "subagent_type", "agent_type")))
-    _set_if_present(span, "gen_ai.agent.version", _first_present(data, ("agent_version",)))
-    _set_if_present(span, "gen_ai.agent.description", _first_present(data, ("agent_description",)))
-
-    # Model attribution with fallback chain (Fix A, B, C)
-    model = _first_present(data, ("request_model", "model", "model_name"))
-    if not model and session_ctx:
-        model = session_ctx.get("last_known_model")
-    if not model:
-        model = batch_model
-    if not model:
-        model = os.getenv("CLAUDE_MODEL") or os.getenv("ANTHROPIC_MODEL")
-
-    _set_if_present(span, "gen_ai.request.model", model)
-    _set_if_present(span, "gen_ai.response.model", _first_present(data, ("response_model",)))
-    _set_if_present(span, "gen_ai.request.choice.count", _int_or_none(_first_present(data, ("choice_count",))))
-    _set_if_present(
-        span,
-        "gen_ai.output.type",
-        _normalize_genai_output_type(_first_present(data, ("output_type", "response_format"))),
-    )
-
-    # Token usage (top-level)
-    _set_if_present(span, "gen_ai.usage.input_tokens", _int_or_none(_first_present(data, ("input_tokens", "prompt_tokens"))))
-    _set_if_present(span, "gen_ai.usage.output_tokens", _int_or_none(_first_present(data, ("output_tokens", "completion_tokens"))))
-    _set_if_present(
-        span,
-        "gen_ai.usage.cache_creation.input_tokens",
-        _int_or_none(_first_present(data, ("cache_creation_input_tokens",))),
-    )
-    _set_if_present(
-        span,
-        "gen_ai.usage.cache_read.input_tokens",
-        _int_or_none(_first_present(data, ("cache_read_input_tokens",))),
-    )
-
-    # Token usage (nested)
-    usage = data.get("usage")
-    if isinstance(usage, dict):
-        _set_if_present(span, "gen_ai.usage.input_tokens", _int_or_none(_first_present(usage, ("input_tokens", "prompt_tokens"))))
-        _set_if_present(span, "gen_ai.usage.output_tokens", _int_or_none(_first_present(usage, ("output_tokens", "completion_tokens"))))
-        _set_if_present(
-            span,
-            "gen_ai.usage.cache_creation.input_tokens",
-            _int_or_none(_first_present(usage, ("cache_creation_input_tokens", "cache_creation_tokens"))),
-        )
-        _set_if_present(
-            span,
-            "gen_ai.usage.cache_read.input_tokens",
-            _int_or_none(_first_present(usage, ("cache_read_input_tokens", "cached_input_tokens"))),
-        )
-        _set_if_present(span, "gen_ai.usage.total_tokens", _int_or_none(_first_present(usage, ("total_tokens",))))
-
-    # Request params
-    for source in (data, data.get("metadata") or {}):
-        _set_if_present(span, "gen_ai.request.temperature", _float_or_none(_first_present(source, ("temperature",))))
-        _set_if_present(span, "gen_ai.request.top_p", _float_or_none(_first_present(source, ("top_p",))))
-        _set_if_present(span, "gen_ai.request.top_k", _float_or_none(_first_present(source, ("top_k",))))
-        _set_if_present(span, "gen_ai.request.max_tokens", _int_or_none(_first_present(source, ("max_tokens",))))
-        _set_if_present(span, "gen_ai.request.frequency_penalty", _float_or_none(_first_present(source, ("frequency_penalty",))))
-        _set_if_present(span, "gen_ai.request.presence_penalty", _float_or_none(_first_present(source, ("presence_penalty",))))
-        _set_if_present(span, "gen_ai.request.seed", _int_or_none(_first_present(source, ("seed",))))
-        _set_if_present(span, "gen_ai.response.id", _first_present(source, ("response_id",)))
-        finish = _first_present(source, ("finish_reasons",))
-        if finish is not None:
-            span.set_attribute("gen_ai.response.finish_reasons", finish if isinstance(finish, list) else [str(finish)])
-        stop_seq = _first_present(source, ("stop_sequences",))
-        if stop_seq is not None:
-            span.set_attribute("gen_ai.request.stop_sequences", stop_seq if isinstance(stop_seq, list) else [str(stop_seq)])
-
-    # Tool definitions (opt-in)
-    tool_defs = _first_present(data, ("tool_definitions", "tools", "tool_schema"))
-    if tool_defs is not None and _CAPTURE_POLICY.content_enabled:
-        span.set_attribute("gen_ai.tool.definitions", _stringify(tool_defs))
-
-    if _CAPTURE_POLICY.content_enabled:
-        system_instructions = _first_present(data, ("system_instructions", "system_prompt"))
-        if system_instructions is not None:
-            _set_if_present(span, "gen_ai.system_instructions", _stringify(system_instructions))
-
-
-# ---------------------------------------------------------------------------
 # Span population
 # ---------------------------------------------------------------------------
 def _populate_span(span, event_name: str, data: dict, ide: str, session_ctx: Optional[dict] = None, batch_model: Optional[str] = None) -> None:
-    """Attach canonical lifecycle attributes to a span and emit OTel log records."""
-    # Add bounded provider fields first so canonical attributes retain priority
-    # when the SDK/backend imposes a smaller attribute count limit.
-    for key, value in (data.get("_hook_attributes") or {}).items():
-        span.set_attribute(key, value)
-    _set_client_identity_attributes(span, ide, data=data, session_ctx=session_ctx)
-    _apply_enrichment_attributes(span, data, session_ctx=session_ctx)
-
-    # Optionally attach OS / host attributes on every span.
-    # These are already present as resource attributes via OTEL_RESOURCE_ATTRIBUTES,
-    # so we gate per-span duplication behind a flag to avoid hot-path overhead.
-    if _ATTACH_OS_ATTRIBUTES_PER_SPAN:
-        os_info = _get_os_info()
-        for attr_key, attr_val in os_info.items():
-            span.set_attribute(attr_key, attr_val)
-
-    # Client version
-    client_version = _detect_client_version(data, ide)
-    _set_if_present(span, "gen_ai.client.version", client_version)
-
-    # Emit structured OTel log record (MCP, shell, tool — correlated with this span)
-    _emit_event_log(event_name, data)
-    span.set_attribute("gen_ai.client.timestamp", datetime.now(timezone.utc).isoformat())
-
-    # GenAI semantic conventions
-    _apply_genai_semconv(span, event_name, data, ide, session_ctx=session_ctx, batch_model=batch_model)
-
-    # Event-specific attributes
-    mapping = _EVENT_ATTR_MAP.get(event_name, {})
-    for key, attr in mapping.items():
-        _set_if_present(span, attr, data.get(key))
-    _apply_mcp_attributes(span, event_name, data)
-    _set_tool_payload_attributes(span, event_name, data)
-    _apply_conversation_attributes(span, event_name, data)
-    _apply_operation_status(span, event_name, data)
-
-    for label in ("tool_input", "tool_output", "mcp_input", "mcp_output"):
-        value = data.get(label)
-        if value is not None and not isinstance(value, dict):
-            _attach_content_fact(span, label, _stringify(value), capture=_CAPTURE_POLICY.content_enabled)
-
-    # Attach correlation last so large content cannot evict it from bounded
-    # SDK attribute storage. Explicit configured mappings still take precedence.
-    span.set_attribute("gen_ai.client.hook.event", event_name)
-    span.set_attribute("gen_ai.client.telemetry_source", _TELEMETRY_SOURCE)
-    span.set_attribute("gen_ai.client.hook_schema_version", _HOOK_SCHEMA_VERSION)
-    _set_if_present(span, "gen_ai.client.hook.event_id", data.get("_hook_event_id"))
-    _set_if_present(span, "gen_ai.client.hook.event_id_source", data.get("_hook_event_id_source"))
-    _set_if_present(span, "gen_ai.client.hook.original_event", data.get("_hook_original_event"))
-    _set_if_present(span, "gen_ai.client.hook.provider_adapter", data.get("_hook_provider_adapter"))
-    _set_if_present(
-        span,
-        "gen_ai.client.mcp.correlated_evidence",
-        data.get("_mcp_correlated_evidence"),
+    """Enrich the active span, emit its correlated hook log, then set status."""
+    enrichment.populate_span(
+        span, event_name, data, ide, session_ctx=session_ctx, batch_model=batch_model,
+        capture_policy=_CAPTURE_POLICY, attach_os_attributes=_ATTACH_OS_ATTRIBUTES_PER_SPAN,
     )
-    _set_if_present(span, "gen_ai.client.session_id", data.get("session_id") or data.get("conversation_id"))
-    _set_if_present(span, "gen_ai.client.generation_id", data.get("generation_id"))
-    _set_if_present(span, "gen_ai.client.turn_id", data.get("turn_id"))
-
-    # Explicit extraction mappings can override a canonical value. This lets
-    # consumers choose their field semantics without provider-specific switches.
-    for key in _CAPTURE_POLICY.mappings.values():
-        if key in (data.get("_hook_attributes") or {}):
-            span.set_attribute(key, data["_hook_attributes"][key])
-
-
-def _set_tool_payload_attributes(span, event_name: str, data: dict) -> None:
-    """Attach canonical facts from payloads already permitted by capture policy."""
-    if event_name not in _OP_TOOL_EVENTS:
-        return
-    tool_input = data.get("tool_input")
-    if isinstance(tool_input, dict):
-        for source, target in (("command", "command"), ("description", "approval.description"),
-                               ("file_path", "tool.input.file_path"), ("path", "tool.input.path")):
-            value = tool_input.get(source)
-            if isinstance(value, str):
-                span.set_attribute(f"gen_ai.client.{target}", value[:_text_max_chars()])
-    for source, target in (("tool_input", "input"), ("tool_response", "response")):
-        value = data.get(source)
-        length = _int_or_none(data.get(f"{source}_length"))
-        digest = data.get(f"{source}_sha256")
-        if value is not None and (length is None or not digest):
-            text = _stringify(value)
-            length, digest = len(text), _hash_text(text)
-        _set_if_present(span, f"gen_ai.client.tool.{target}.length", length)
-        _set_if_present(span, f"gen_ai.client.tool.{target}.sha256", digest)
-
-
-# ---------------------------------------------------------------------------
-# Memory enrichment (generation/session summaries)
-# ---------------------------------------------------------------------------
-def _apply_memory_summary_attrs(span, prefix: str, summary: dict) -> None:
-    """Attach memory summary attributes to a span."""
-    files = summary.get("files") or []
-    tools = summary.get("tools") or []
-    entities = summary.get("entities") or []
-    commands = summary.get("commands") or []
-    tool_counts = summary.get("tool_counts") or {}
-
-    span.set_attribute(f"{prefix}.files_touched_count", len(files))
-    span.set_attribute(f"{prefix}.tools_used_count", len(tools))
-    span.set_attribute(f"{prefix}.entities_count", len(entities))
-    span.set_attribute(f"{prefix}.commands_count", len(commands))
-
-    if files:
-        span.set_attribute(f"{prefix}.files_touched", files)
-    if tools:
-        span.set_attribute(f"{prefix}.tools_used", tools)
-    if entities:
-        span.set_attribute(f"{prefix}.entities", entities)
-    if commands:
-        span.set_attribute(f"{prefix}.commands", commands)
-    if tool_counts:
-        span.set_attribute(f"{prefix}.tool_counts", json.dumps(tool_counts, ensure_ascii=True, sort_keys=True))
+    _emit_event_log(event_name, data)
+    _apply_operation_status(span, event_name, data)
 
 
 # ---------------------------------------------------------------------------
@@ -3854,7 +2177,7 @@ def _flush_generation_unlocked(tracer, gen_key: str, session_ctx: Optional[dict]
         return True
 
     for entry in batch:
-        entry["data"] = _enrich_buffered_event(
+        entry["data"] = enrich_buffered_event(
             entry.get("data") or {},
             session_ctx,
         )
@@ -4038,7 +2361,7 @@ def main() -> int:
         _LOGGER.error("Hook telemetry disabled: %s", exc)
         data = _normalize_input_data(_load_input())
         ide = _detect_ide(data)
-        event = _event_adapter_for(ide).canonical_event_name(_get_event_name(data))
+        event = _event_adapter_for(ide).canonical_event_name(_get_event_name(data, override=_CLI_HOOK_EVENT))
         _emit_stdout_response(event, ide, data)
         return 0
     _configure_logging()
@@ -4047,7 +2370,7 @@ def main() -> int:
     if not isinstance(input_data, dict):
         input_data = {}
     original_data = data = _normalize_input_data(input_data)
-    raw_event = _get_event_name(data)
+    raw_event = _get_event_name(data, override=_CLI_HOOK_EVENT)
     ide = _detect_ide(data)
     captured_payload = _CAPTURE_POLICY.filter(input_data)
     # Never trust incoming private keys as runtime-generated state.

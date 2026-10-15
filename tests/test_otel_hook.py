@@ -18,6 +18,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import enrichment_connectors
 import otel_hook
 from otel_hooks import cli as hook_cli
+from otel_hooks import bootstrap
+from otel_hooks import enrichment, identity, workspace
 
 
 @pytest.fixture(autouse=True)
@@ -80,40 +82,40 @@ class TestFirstPresent:
 
 class TestRuntimeHasOtelDependencies:
     def test_returns_false_when_import_fails(self, monkeypatch):
-        real_import_module = otel_hook.importlib.import_module
+        real_import_module = bootstrap.importlib.import_module
 
         def fake_import_module(name):
             if name == "opentelemetry.sdk.trace.export":
                 raise ImportError("broken wheel")
             return real_import_module(name)
 
-        monkeypatch.setattr(otel_hook.importlib, "import_module", fake_import_module)
+        monkeypatch.setattr(bootstrap.importlib, "import_module", fake_import_module)
 
-        assert otel_hook._runtime_has_otel_dependencies() is False
+        assert bootstrap.runtime_has_otel_dependencies() is False
 
 
 class TestIntOrNone:
     def test_valid(self):
-        assert otel_hook._int_or_none(42) == 42
-        assert otel_hook._int_or_none("7") == 7
+        assert enrichment._int_or_none(42) == 42
+        assert enrichment._int_or_none("7") == 7
 
     def test_none(self):
-        assert otel_hook._int_or_none(None) is None
+        assert enrichment._int_or_none(None) is None
 
     def test_invalid(self):
-        assert otel_hook._int_or_none("abc") is None
+        assert enrichment._int_or_none("abc") is None
 
 
 class TestFloatOrNone:
     def test_valid(self):
-        assert otel_hook._float_or_none(3.14) == 3.14
-        assert otel_hook._float_or_none("2.5") == 2.5
+        assert enrichment._float_or_none(3.14) == 3.14
+        assert enrichment._float_or_none("2.5") == 2.5
 
     def test_none(self):
-        assert otel_hook._float_or_none(None) is None
+        assert enrichment._float_or_none(None) is None
 
     def test_invalid(self):
-        assert otel_hook._float_or_none("xyz") is None
+        assert enrichment._float_or_none("xyz") is None
 
 
 class TestMemoryAggregation:
@@ -399,19 +401,19 @@ class TestDetectIDE:
 
 class TestDetectAgentEngine:
     def test_detects_claude_from_self_reported_payload(self):
-        assert otel_hook._detect_agent_engine({"client": "Claude Code"}) == "claude"
+        assert identity._detect_agent_engine({"client": "Claude Code"}) == "claude"
 
     def test_detects_claude_from_heuristics(self, monkeypatch):
         monkeypatch.setenv("CLAUDE_CODE_ENTRYPOINT", "1")
-        assert otel_hook._detect_agent_engine({"session_id": "sess-1"}) == "claude"
+        assert identity._detect_agent_engine({"session_id": "sess-1"}) == "claude"
 
     def test_cursor_payload_beats_leaked_claude_env(self, monkeypatch):
         monkeypatch.setenv("CLAUDE_CODE_ENTRYPOINT", "1")
-        assert otel_hook._detect_agent_engine({"client": "Cursor IDE", "session_id": "sess-1"}) == "cursor"
+        assert identity._detect_agent_engine({"client": "Cursor IDE", "session_id": "sess-1"}) == "cursor"
 
     def test_cursor_payload_beats_weak_claude_hints(self, monkeypatch):
         monkeypatch.setenv("CLAUDE_CODE_ENTRYPOINT", "1")
-        assert otel_hook._detect_agent_engine({
+        assert identity._detect_agent_engine({
             "client": "Cursor IDE",
             "session_id": "sess-1",
             "transcript_path": "/tmp/transcript.jsonl",
@@ -422,16 +424,16 @@ class TestDetectAgentEngine:
             mock.patch("os.getcwd", side_effect=AssertionError("os.getcwd should not be consulted for engine detection")),
             mock.patch("os.path.exists", side_effect=AssertionError("os.path.exists should not be consulted for engine detection")),
         ):
-            assert otel_hook._detect_agent_engine({"session_id": "sess-1"}) is None
+            assert identity._detect_agent_engine({"session_id": "sess-1"}) is None
 
     def test_detects_gemini_from_corroborated_semantic_fields(self):
-        assert otel_hook._detect_agent_engine({
+        assert identity._detect_agent_engine({
             "gen_ai.client.name": "gemini",
             "service.name": "gemini-cli",
         }) == "gemini"
 
     def test_ignores_single_semantic_field_without_corroboration(self):
-        assert otel_hook._detect_agent_engine({
+        assert identity._detect_agent_engine({
             "gen_ai.system": "vscode",
             "session_id": "sess-1",
         }) is None
@@ -788,15 +790,15 @@ class TestGenerationKey:
 class TestGenAIOperation:
     def test_tool_events(self):
         for evt in ("PreToolUse", "PostToolUse", "BeforeShellExecution", "AfterMCPExecution"):
-            assert otel_hook._genai_operation(evt) == "execute_tool"
+            assert enrichment._genai_operation(evt) == "execute_tool"
 
     def test_agent_events(self):
         for evt in ("SessionStart", "SessionEnd", "SubagentStart", "PreCompact", "PostCompact"):
-            assert otel_hook._genai_operation(evt) == "invoke_agent"
+            assert enrichment._genai_operation(evt) == "invoke_agent"
 
     def test_chat_default(self):
-        assert otel_hook._genai_operation("UserPromptSubmit") == "chat"
-        assert otel_hook._genai_operation("Stop") == "chat"
+        assert enrichment._genai_operation("UserPromptSubmit") == "chat"
+        assert enrichment._genai_operation("Stop") == "chat"
 
 
 # ── GenAI messages ────────────────────────────────────────────────────────
@@ -804,12 +806,12 @@ class TestGenAIOperation:
 
 class TestGenAIMessages:
     def test_both_present(self):
-        inp, out = otel_hook._genai_messages("hi", "hello")
+        inp, out = enrichment._genai_messages("hi", "hello")
         assert json.loads(inp)[0]["role"] == "user"
         assert json.loads(out)[0]["role"] == "assistant"
 
     def test_none_inputs(self):
-        inp, out = otel_hook._genai_messages(None, None)
+        inp, out = enrichment._genai_messages(None, None)
         assert inp is None and out is None
 
 
@@ -825,7 +827,7 @@ class TestGenAISemconv:
         monkeypatch.setattr(otel_hook, "_CAPTURE_POLICY", otel_hook.CapturePolicy(mode="full"))
         span = mock.MagicMock()
 
-        otel_hook._apply_genai_semconv(span, "SubagentStart", {
+        enrichment._apply_genai_semconv(span, "SubagentStart", {
             "model": "claude-3-7-sonnet",
             "response_model": "claude-3-7-sonnet",
             "response_format": "json_schema",
@@ -841,7 +843,7 @@ class TestGenAISemconv:
                 "cache_creation_input_tokens": 3,
                 "cached_input_tokens": 2,
             },
-        }, "claude")
+        }, "claude", capture_policy=otel_hook._CAPTURE_POLICY)
 
         attrs = self._attrs(span)
         assert attrs["gen_ai.provider.name"] == "anthropic"
@@ -861,10 +863,10 @@ class TestGenAISemconv:
     def test_explicit_provider_overrides_model_inference(self):
         span = mock.MagicMock()
 
-        otel_hook._apply_genai_semconv(span, "UserPromptSubmit", {
+        enrichment._apply_genai_semconv(span, "UserPromptSubmit", {
             "provider_name": "openai",
             "model": "claude-3-7-sonnet",
-        }, "cursor")
+        }, "cursor", capture_policy=otel_hook._CAPTURE_POLICY)
 
         attrs = self._attrs(span)
         assert attrs["gen_ai.provider.name"] == "openai"
@@ -873,12 +875,13 @@ class TestGenAISemconv:
     def test_nested_agent_engine_becomes_genai_system(self):
         span = mock.MagicMock()
 
-        otel_hook._apply_genai_semconv(
+        enrichment._apply_genai_semconv(
             span,
             "SubagentStop",
             {"gen_ai.client.name": "gemini", "service.name": "gemini-cli"},
             "claude",
             session_ctx={"agent_engine": "gemini"},
+            capture_policy=otel_hook._CAPTURE_POLICY,
         )
 
         attrs = self._attrs(span)
@@ -887,12 +890,13 @@ class TestGenAISemconv:
     def test_cursor_with_unconfirmed_claude_engine_keeps_cursor_as_genai_system(self):
         span = mock.MagicMock()
 
-        otel_hook._apply_genai_semconv(
+        enrichment._apply_genai_semconv(
             span,
             "PreToolUse",
             {"transcript_path": "/tmp/transcript.jsonl"},
             "cursor",
             session_ctx={"agent_engine": "claude", "agent_engine_confirmed": False},
+            capture_policy=otel_hook._CAPTURE_POLICY,
         )
 
         attrs = self._attrs(span)
@@ -901,12 +905,13 @@ class TestGenAISemconv:
     def test_single_semantic_field_does_not_change_genai_system(self):
         span = mock.MagicMock()
 
-        otel_hook._apply_genai_semconv(
+        enrichment._apply_genai_semconv(
             span,
             "UserPromptSubmit",
             {"gen_ai.system": "vscode"},
             "cursor",
             session_ctx={},
+            capture_policy=otel_hook._CAPTURE_POLICY,
         )
 
         attrs = self._attrs(span)
@@ -925,7 +930,7 @@ class TestClientIdentityAttributes:
         monkeypatch.setenv("CLAUDE_CODE_ENTRYPOINT", "1")
         span = mock.MagicMock()
 
-        otel_hook._set_client_identity_attributes(
+        identity._set_client_identity_attributes(
             span,
             "cursor",
             data={"session_id": "sess-1", "transcript_path": "/tmp/transcript.jsonl"},
@@ -939,7 +944,7 @@ class TestClientIdentityAttributes:
     def test_promotes_cursor_over_misattributed_outer_ide_from_native_payload(self):
         span = mock.MagicMock()
 
-        otel_hook._set_client_identity_attributes(
+        identity._set_client_identity_attributes(
             span,
             "claude",
             data={"conversation_id": "conv-1", "generation_id": "gen-1"},
@@ -953,7 +958,7 @@ class TestClientIdentityAttributes:
     def test_omits_agent_engine_when_same_as_outer_ide(self):
         span = mock.MagicMock()
 
-        otel_hook._set_client_identity_attributes(span, "claude", data={"client": "Claude Code"})
+        identity._set_client_identity_attributes(span, "claude", data={"client": "Claude Code"})
 
         attrs = self._attrs(span)
         assert attrs["gen_ai.client.name"] == "claude"
@@ -962,7 +967,7 @@ class TestClientIdentityAttributes:
     def test_promotes_gemini_over_outer_claude(self):
         span = mock.MagicMock()
 
-        otel_hook._set_client_identity_attributes(
+        identity._set_client_identity_attributes(
             span,
             "claude",
             data={"gen_ai.client.name": "gemini", "service.name": "gemini-cli"},
@@ -976,7 +981,7 @@ class TestClientIdentityAttributes:
     def test_preserves_outer_agent_when_single_semantic_field_disagrees(self):
         span = mock.MagicMock()
 
-        otel_hook._set_client_identity_attributes(span, "cursor", data={"gen_ai.system": "vscode"})
+        identity._set_client_identity_attributes(span, "cursor", data={"gen_ai.system": "vscode"})
 
         attrs = self._attrs(span)
         assert attrs["gen_ai.client.name"] == "cursor"
@@ -986,7 +991,7 @@ class TestClientIdentityAttributes:
     def test_session_context_engine_promotes_nested_client_identity(self):
         span = mock.MagicMock()
 
-        otel_hook._set_client_identity_attributes(
+        identity._set_client_identity_attributes(
             span,
             "claude",
             data={"session_id": "sess-1"},
@@ -1001,7 +1006,7 @@ class TestClientIdentityAttributes:
     def test_legacy_session_context_engine_promotes_nested_client_identity(self):
         span = mock.MagicMock()
 
-        otel_hook._set_client_identity_attributes(
+        identity._set_client_identity_attributes(
             span,
             "claude",
             data={"session_id": "sess-1"},
@@ -1016,7 +1021,7 @@ class TestClientIdentityAttributes:
     def test_unconfirmed_session_context_engine_keeps_outer_client_identity(self):
         span = mock.MagicMock()
 
-        otel_hook._set_client_identity_attributes(
+        identity._set_client_identity_attributes(
             span,
             "claude",
             data={"session_id": "sess-1"},
@@ -1031,7 +1036,7 @@ class TestClientIdentityAttributes:
     def test_codex_payload_suppresses_stale_claude_session_engine(self):
         span = mock.MagicMock()
 
-        otel_hook._set_client_identity_attributes(
+        identity._set_client_identity_attributes(
             span,
             "codex",
             data={
@@ -1053,7 +1058,7 @@ class TestClientIdentityAttributes:
         monkeypatch.setenv("CLAUDE_CODE_ENTRYPOINT", "1")
         span = mock.MagicMock()
 
-        otel_hook._set_client_identity_attributes(
+        identity._set_client_identity_attributes(
             span,
             "codex",
             data={"hook_event_name": "SessionStart", "session_id": "sess-1"},
@@ -1081,10 +1086,10 @@ class TestRepositoryEnrichment:
                 return mock.Mock(returncode=0, stdout="agent/test-branch\n")
             raise AssertionError(f"unexpected git command: {args}")
 
-        monkeypatch.setattr(otel_hook, "_find_repo_root", lambda _cwd: str(repo_root))
-        monkeypatch.setattr(otel_hook.subprocess, "run", fake_run)
+        monkeypatch.setattr(workspace, "_find_repo_root", lambda _cwd: str(repo_root))
+        monkeypatch.setattr(workspace.subprocess, "run", fake_run)
 
-        ctx = otel_hook._resolve_repository_context({"cwd": str(repo_root)})
+        ctx = workspace._resolve_repository_context({"cwd": str(repo_root)})
 
         assert ctx["repo_root"] == str(repo_root)
         assert ctx["vcs.repository.owner"] == "o11y-dev"
@@ -1098,17 +1103,17 @@ class TestRepositoryEnrichment:
             "vcs.repository.name": "opentelemetry-hooks",
         }
         monkeypatch.setattr(
-            otel_hook,
+            workspace,
             "_find_repo_root",
             mock.Mock(side_effect=AssertionError("unexpected root lookup")),
         )
         monkeypatch.setattr(
-            otel_hook,
+            workspace,
             "_git_command_output",
             mock.Mock(side_effect=AssertionError("unexpected git lookup")),
         )
 
-        ctx = otel_hook._resolve_repository_context({"cwd": str(repo_root)}, session_ctx=session_ctx)
+        ctx = workspace._resolve_repository_context({"cwd": str(repo_root)}, session_ctx=session_ctx)
 
         assert ctx == session_ctx
 
@@ -1117,14 +1122,14 @@ class TestRepositoryEnrichment:
         project_root.mkdir()
         (project_root / ".claude").mkdir()
 
-        monkeypatch.setattr(otel_hook, "_find_repo_root", lambda _cwd: str(project_root))
+        monkeypatch.setattr(workspace, "_find_repo_root", lambda _cwd: str(project_root))
         monkeypatch.setattr(
-            otel_hook,
+            workspace,
             "_git_command_output",
             mock.Mock(side_effect=AssertionError("unexpected git lookup")),
         )
 
-        ctx = otel_hook._resolve_repository_context({"cwd": str(project_root)})
+        ctx = workspace._resolve_repository_context({"cwd": str(project_root)})
 
         assert ctx["repo_root"] == str(project_root)
         assert "vcs.repository.owner" not in ctx
@@ -1219,7 +1224,7 @@ def isolated_hook_state(monkeypatch, tmp_path):
     monkeypatch.setattr(otel_hook, "_BATCH_DIR", str(state_dir / "batches"))
     monkeypatch.setattr(otel_hook, "_LOCK_DIR", str(state_dir / "locks"))
     monkeypatch.setattr(otel_hook, "_CLEANUP_MARKER", str(state_dir / "last_cleanup"))
-    monkeypatch.setattr(otel_hook, "_resolve_repository_context", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(workspace, "_resolve_repository_context", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(otel_hook, "_session_trace_context", lambda _ctx: None)
     monkeypatch.setattr(otel_hook, "_span_context", lambda _span: contextlib.nullcontext())
     monkeypatch.setattr(otel_hook, "_log_with_span", lambda *_args, **_kwargs: None)
@@ -1241,7 +1246,7 @@ class TestMCPIdentityNormalization:
             event_name,
             "claude",
         )
-        attrs = otel_hook._mcp_observability_attributes(event_name, data)
+        attrs = enrichment._mcp_observability_attributes(event_name, data, capture_policy=otel_hook._CAPTURE_POLICY)
         assert data["tool_name"] == "mcp__reflect__reflect_context"
         assert attrs["gen_ai.client.mcp_server"] == "reflect"
         assert attrs["gen_ai.client.mcp_tool"] == "reflect_context"
@@ -2483,13 +2488,13 @@ class TestResolveHookHome:
         """IDE_OTEL_HOOK_HOME overrides every other heuristic."""
         explicit = str(tmp_path / "my-hook-home")
         monkeypatch.setenv("IDE_OTEL_HOOK_HOME", explicit)
-        result = otel_hook._resolve_hook_home()
+        result = bootstrap.resolve_hook_home(otel_hook.__file__)
         assert result == os.path.abspath(explicit)
 
     def test_explicit_env_var_resolves_to_abspath(self, monkeypatch):
         """Relative IDE_OTEL_HOOK_HOME values are converted to absolute paths."""
         monkeypatch.setenv("IDE_OTEL_HOOK_HOME", "relative/path")
-        result = otel_hook._resolve_hook_home()
+        result = bootstrap.resolve_hook_home(otel_hook.__file__)
         assert os.path.isabs(result)
 
     def test_site_packages_returns_xdg_data_home(self, monkeypatch, tmp_path):
@@ -2499,12 +2504,11 @@ class TestResolveHookHome:
         sp_dir = tmp_path / "lib" / "python3.x" / "site-packages"
         sp_dir.mkdir(parents=True)
         fake_file = str(sp_dir / "otel_hook.py")
-        monkeypatch.setattr(otel_hook, "__file__", fake_file)
         import sysconfig as _sysconfig
         monkeypatch.setattr(_sysconfig, "get_path", lambda name, *a, **kw: str(sp_dir) if name in ("purelib", "platlib") else None)
         xdg = str(tmp_path / "xdg-data")
         monkeypatch.setenv("XDG_DATA_HOME", xdg)
-        result = otel_hook._resolve_hook_home()
+        result = bootstrap.resolve_hook_home(fake_file)
         assert result == os.path.join(xdg, "opentelemetry-hooks")
 
     def test_site_packages_defaults_to_dotlocal_share(self, monkeypatch, tmp_path):
@@ -2514,11 +2518,10 @@ class TestResolveHookHome:
         sp_dir = tmp_path / "lib" / "site-packages"
         sp_dir.mkdir(parents=True)
         fake_file = str(sp_dir / "otel_hook.py")
-        monkeypatch.setattr(otel_hook, "__file__", fake_file)
         import sysconfig as _sysconfig
         monkeypatch.setattr(_sysconfig, "get_path", lambda name, *a, **kw: str(sp_dir) if name in ("purelib", "platlib") else None)
         expected = os.path.join(os.path.expanduser("~"), ".local", "share", "opentelemetry-hooks")
-        result = otel_hook._resolve_hook_home()
+        result = bootstrap.resolve_hook_home(fake_file)
         assert result == expected
 
     def test_non_installed_returns_script_directory(self, monkeypatch, tmp_path):
@@ -2527,28 +2530,27 @@ class TestResolveHookHome:
         script_dir = tmp_path / "hooks" / "opentelemetry-hook"
         script_dir.mkdir(parents=True)
         fake_file = str(script_dir / "otel_hook.py")
-        monkeypatch.setattr(otel_hook, "__file__", fake_file)
         import sysconfig as _sysconfig
         # Report a completely different directory as site-packages.
         other_sp = str(tmp_path / "other" / "site-packages")
         monkeypatch.setattr(_sysconfig, "get_path", lambda name, *a, **kw: other_sp if name in ("purelib", "platlib") else None)
-        result = otel_hook._resolve_hook_home()
+        result = bootstrap.resolve_hook_home(fake_file)
         assert result == str(script_dir)
 
 
 class TestBootstrapVenvSelection:
     def test_reuses_legacy_venv_only_when_python_abi_matches(self, tmp_path):
         legacy = tmp_path / ".venv"
-        expected = Path(otel_hook._venv_site_packages_path(str(legacy)))
+        expected = Path(bootstrap.venv_site_packages_path(str(legacy)))
         expected.mkdir(parents=True)
 
-        assert otel_hook._select_bootstrap_venv_dir(str(tmp_path)) == str(legacy)
+        assert bootstrap.select_bootstrap_venv_dir(str(tmp_path)) == str(legacy)
 
     def test_uses_versioned_venv_when_legacy_python_abi_differs(self, tmp_path):
         incompatible = tmp_path / ".venv" / "lib" / "python9.9" / "site-packages"
         incompatible.mkdir(parents=True)
 
-        selected = otel_hook._select_bootstrap_venv_dir(str(tmp_path))
+        selected = bootstrap.select_bootstrap_venv_dir(str(tmp_path))
 
         expected_suffix = f".venv-py{sys.version_info.major}.{sys.version_info.minor}"
         assert selected == str(tmp_path / expected_suffix)
@@ -2619,34 +2621,34 @@ class TestLoadConfigWithFindExampleConfig:
 
 class TestGetOsInfo:
     def test_returns_all_keys(self):
-        otel_hook._OS_INFO = None  # reset cache
-        info = otel_hook._get_os_info()
+        identity._OS_INFO = None  # reset cache
+        info = identity._get_os_info()
         assert "os.type" in info
         assert "os.name" in info
         assert "os.version" in info
         assert "host.arch" in info
 
     def test_os_type_is_lowercase(self):
-        otel_hook._OS_INFO = None
-        info = otel_hook._get_os_info()
+        identity._OS_INFO = None
+        info = identity._get_os_info()
         assert info["os.type"] == info["os.type"].lower()
 
     def test_cached_after_first_call(self):
-        otel_hook._OS_INFO = None
-        first = otel_hook._get_os_info()
-        second = otel_hook._get_os_info()
+        identity._OS_INFO = None
+        first = identity._get_os_info()
+        second = identity._get_os_info()
         assert first is second
 
     def test_darwin_shows_macos(self):
-        otel_hook._OS_INFO = None
-        with mock.patch("otel_hook.platform") as mp:
+        identity._OS_INFO = None
+        with mock.patch("otel_hooks.identity.platform") as mp:
             mp.system.return_value = "Darwin"
             mp.release.return_value = "25.3.0"
             mp.machine.return_value = "arm64"
-            info = otel_hook._get_os_info()
+            info = identity._get_os_info()
             assert info["os.type"] == "darwin"
             assert info["os.name"] == "macOS"
-        otel_hook._OS_INFO = None  # reset
+        identity._OS_INFO = None  # reset
 
 
 # ── Client version detection ─────────────────────────────────────────────
@@ -2654,44 +2656,44 @@ class TestGetOsInfo:
 
 class TestDetectClientVersion:
     def test_from_payload(self):
-        assert otel_hook._detect_client_version({"client_version": "1.2.3"}, "claude") == "1.2.3"
+        assert identity._detect_client_version({"client_version": "1.2.3"}, "claude") == "1.2.3"
 
     def test_from_ide_version_alias(self):
-        assert otel_hook._detect_client_version({"ide_version": "0.9.0"}, "cursor") == "0.9.0"
+        assert identity._detect_client_version({"ide_version": "0.9.0"}, "cursor") == "0.9.0"
 
     def test_from_claude_env(self, monkeypatch):
         monkeypatch.setenv("CLAUDE_CODE_VERSION", "1.0.42")
-        assert otel_hook._detect_client_version({}, "claude") == "1.0.42"
+        assert identity._detect_client_version({}, "claude") == "1.0.42"
 
     def test_from_cursor_env(self, monkeypatch):
         monkeypatch.setenv("CURSOR_VERSION", "0.45.0")
-        assert otel_hook._detect_client_version({}, "cursor") == "0.45.0"
+        assert identity._detect_client_version({}, "cursor") == "0.45.0"
 
     def test_from_generic_env(self, monkeypatch):
         monkeypatch.setenv("IDE_OTEL_CLIENT_VERSION", "2.0.0")
-        assert otel_hook._detect_client_version({}, "opencode") == "2.0.0"
+        assert identity._detect_client_version({}, "opencode") == "2.0.0"
 
     def test_payload_takes_precedence_over_env(self, monkeypatch):
         monkeypatch.setenv("CLAUDE_CODE_VERSION", "1.0.42")
-        assert otel_hook._detect_client_version({"client_version": "2.0.0"}, "claude") == "2.0.0"
+        assert identity._detect_client_version({"client_version": "2.0.0"}, "claude") == "2.0.0"
 
     def test_returns_none_when_unavailable(self, monkeypatch):
         monkeypatch.delenv("CLAUDE_CODE_VERSION", raising=False)
         monkeypatch.delenv("IDE_OTEL_CLIENT_VERSION", raising=False)
-        assert otel_hook._detect_client_version({}, "claude") is None
+        assert identity._detect_client_version({}, "claude") is None
 
     def test_codex_from_env(self, monkeypatch):
         monkeypatch.setenv("CODEX_VERSION", "1.5.0")
-        monkeypatch.setattr(otel_hook, "_CODEX_VERSION_DETECTED", False)
-        monkeypatch.setattr(otel_hook, "_CODEX_VERSION_CACHE", None)
-        assert otel_hook._detect_client_version({}, "codex") == "1.5.0"
+        monkeypatch.setattr(identity, "_CODEX_VERSION_DETECTED", False)
+        monkeypatch.setattr(identity, "_CODEX_VERSION_CACHE", None)
+        assert identity._detect_client_version({}, "codex") == "1.5.0"
 
     def test_codex_subprocess_cached(self, monkeypatch):
         """codex --version subprocess must only be called once per process."""
         monkeypatch.delenv("CODEX_VERSION", raising=False)
         monkeypatch.delenv("IDE_OTEL_CLIENT_VERSION", raising=False)
-        monkeypatch.setattr(otel_hook, "_CODEX_VERSION_DETECTED", False)
-        monkeypatch.setattr(otel_hook, "_CODEX_VERSION_CACHE", None)
+        monkeypatch.setattr(identity, "_CODEX_VERSION_DETECTED", False)
+        monkeypatch.setattr(identity, "_CODEX_VERSION_CACHE", None)
         call_count = []
 
         import subprocess as _sp
@@ -2707,8 +2709,8 @@ class TestDetectClientVersion:
             return real_run(args, **kwargs)
 
         monkeypatch.setattr(_sp, "run", fake_run)
-        assert otel_hook._detect_client_version({}, "codex") == "2.0.0"
-        assert otel_hook._detect_client_version({}, "codex") == "2.0.0"
+        assert identity._detect_client_version({}, "codex") == "2.0.0"
+        assert identity._detect_client_version({}, "codex") == "2.0.0"
         assert len(call_count) == 1, "subprocess must only be invoked once"
 
 
@@ -2746,7 +2748,7 @@ class TestToolPayloadAttributes:
         assert "toolResponse" not in data
 
         span = _FakeSpan()
-        otel_hook._set_tool_payload_attributes(span, "PostToolUse", data)
+        enrichment._set_tool_payload_attributes(span, "PostToolUse", data)
         assert span.attrs["gen_ai.client.tool.response.length"] == len(original_text)
         assert span.attrs["gen_ai.client.tool.response.sha256"] == hashlib.sha256(
             original_text.encode()
@@ -2756,7 +2758,7 @@ class TestToolPayloadAttributes:
         monkeypatch.delenv("IDE_OTEL_CAPTURE_TOOL_INPUT_CONTENT", raising=False)
         span = _FakeSpan()
         data = {"tool_input": {"command": "ls", "path": "/tmp"}, "tool_response": {"output": "file.txt"}}
-        otel_hook._set_tool_payload_attributes(span, "PreToolUse", data)
+        enrichment._set_tool_payload_attributes(span, "PreToolUse", data)
         # This helper receives fields already permitted by capture policy.
         assert span.attrs.get("gen_ai.client.command") == "ls"
         # content should NOT be flattened by default
@@ -2773,7 +2775,7 @@ class TestToolPayloadAttributes:
         monkeypatch.delenv("IDE_OTEL_CAPTURE_TOOL_INPUT_CONTENT", raising=False)
         span = _FakeSpan()
         data = {"tool_input": {"description": "need access"}}
-        otel_hook._set_tool_payload_attributes(span, "PermissionRequest", data)
+        enrichment._set_tool_payload_attributes(span, "PermissionRequest", data)
         assert span.attrs.get("gen_ai.client.approval.description") == "need access"
 
     def test_non_dict_response_does_not_emit_text_when_evidence_present(self, monkeypatch):
@@ -2784,7 +2786,7 @@ class TestToolPayloadAttributes:
             "tool_response_length": 18,
             "tool_response_sha256": "abc123",
         }
-        otel_hook._set_tool_payload_attributes(span, "PostToolUse", data)
+        enrichment._set_tool_payload_attributes(span, "PostToolUse", data)
         assert "gen_ai.client.tool_response.text" not in span.attrs
         assert span.attrs["gen_ai.client.tool.response.length"] == 18
         assert span.attrs["gen_ai.client.tool.response.sha256"] == "abc123"
@@ -2794,7 +2796,7 @@ class TestToolPayloadAttributes:
 class TestEventEnrichmentAttributes:
     def test_user_identity_capture_is_opt_in(self, monkeypatch):
         monkeypatch.delenv("IDE_OTEL_CAPTURE_USER_IDENTITY", raising=False)
-        attrs = otel_hook._collect_event_enrichment_attributes({
+        attrs = enrichment._collect_event_enrichment_attributes({
             "user_id": "user-1",
             "user_email": "user@example.com",
         })
@@ -2803,7 +2805,7 @@ class TestEventEnrichmentAttributes:
 
     def test_collects_user_and_governance_attributes(self, monkeypatch):
         monkeypatch.setenv("IDE_OTEL_CAPTURE_USER_IDENTITY", "1")
-        attrs = otel_hook._collect_event_enrichment_attributes({
+        attrs = enrichment._collect_event_enrichment_attributes({
             "user": {"id": "user-1", "email": "user@example.com"},
             "permission_mode": "acceptEdits",
             "permission_decision": "approved",
@@ -2827,7 +2829,7 @@ class TestEventEnrichmentAttributes:
 
     def test_nested_user_id_wins_over_top_level_object_id(self, monkeypatch):
         monkeypatch.setenv("IDE_OTEL_CAPTURE_USER_IDENTITY", "1")
-        attrs = otel_hook._collect_event_enrichment_attributes({
+        attrs = enrichment._collect_event_enrichment_attributes({
             "id": "response-123",
             "user": {"id": "user-1", "email": "user@example.com"},
         })
@@ -2837,7 +2839,7 @@ class TestEventEnrichmentAttributes:
     def test_spans_include_enrichment_attributes(self, monkeypatch):
         monkeypatch.setenv("IDE_OTEL_CAPTURE_USER_IDENTITY", "1")
         span = _FakeSpan()
-        otel_hook._apply_enrichment_attributes(
+        enrichment._apply_enrichment_attributes(
             span,
             {
                 "tool_name": "bash",
@@ -2858,19 +2860,19 @@ class TestEventEnrichmentAttributes:
 
 class TestNewIdeAliases:
     def test_windsurf(self):
-        assert otel_hook._normalize_ide_name("windsurf") == "windsurf"
-        assert otel_hook._normalize_ide_name("Windsurf IDE") == "windsurf"
+        assert identity._normalize_ide_name("windsurf") == "windsurf"
+        assert identity._normalize_ide_name("Windsurf IDE") == "windsurf"
 
     def test_vscode(self):
-        assert otel_hook._normalize_ide_name("vscode") == "vscode"
-        assert otel_hook._normalize_ide_name("Visual Studio Code") == "vscode"
+        assert identity._normalize_ide_name("vscode") == "vscode"
+        assert identity._normalize_ide_name("Visual Studio Code") == "vscode"
 
     def test_zed(self):
-        assert otel_hook._normalize_ide_name("zed") == "zed"
-        assert otel_hook._normalize_ide_name("Zed Editor") == "zed"
+        assert identity._normalize_ide_name("zed") == "zed"
+        assert identity._normalize_ide_name("Zed Editor") == "zed"
 
     def test_claude_cli_alias(self):
-        assert otel_hook._normalize_ide_name("Claude CLI") == "claude"
+        assert identity._normalize_ide_name("Claude CLI") == "claude"
 
 
 # ── Exporter deduplication guards ────────────────────────────────────────────
@@ -2965,7 +2967,7 @@ class TestModelAttributionFallback:
     def test_model_from_data_field(self):
         """Model is taken directly from the event data when present."""
         span = mock.MagicMock()
-        otel_hook._apply_genai_semconv(span, "SubagentStop", {"model": "claude-3-7-sonnet"}, "claude")
+        enrichment._apply_genai_semconv(span, "SubagentStop", {"model": "claude-3-7-sonnet"}, "claude", capture_policy=otel_hook._CAPTURE_POLICY)
         attrs = self._attrs(span)
         assert attrs.get("gen_ai.request.model") == "claude-3-7-sonnet"
 
@@ -2973,15 +2975,15 @@ class TestModelAttributionFallback:
         """When event data has no model, fall back to session_ctx['last_known_model']."""
         span = mock.MagicMock()
         session_ctx = {"last_known_model": "claude-3-5-haiku"}
-        otel_hook._apply_genai_semconv(span, "SubagentStop", {}, "claude", session_ctx=session_ctx)
+        enrichment._apply_genai_semconv(span, "SubagentStop", {}, "claude", session_ctx=session_ctx, capture_policy=otel_hook._CAPTURE_POLICY)
         attrs = self._attrs(span)
         assert attrs.get("gen_ai.request.model") == "claude-3-5-haiku"
 
     def test_model_falls_back_to_batch_model(self):
         """When neither data nor session_ctx has a model, fall back to batch_model."""
         span = mock.MagicMock()
-        otel_hook._apply_genai_semconv(span, "SubagentStop", {}, "claude",
-                                       session_ctx={}, batch_model="claude-opus-4")
+        enrichment._apply_genai_semconv(span, "SubagentStop", {}, "claude",
+                                       session_ctx={}, batch_model="claude-opus-4", capture_policy=otel_hook._CAPTURE_POLICY)
         attrs = self._attrs(span)
         assert attrs.get("gen_ai.request.model") == "claude-opus-4"
 
@@ -2990,7 +2992,7 @@ class TestModelAttributionFallback:
         monkeypatch.setenv("CLAUDE_MODEL", "claude-3-haiku-20240307")
         monkeypatch.delenv("ANTHROPIC_MODEL", raising=False)
         span = mock.MagicMock()
-        otel_hook._apply_genai_semconv(span, "SubagentStop", {}, "claude", session_ctx={})
+        enrichment._apply_genai_semconv(span, "SubagentStop", {}, "claude", session_ctx={}, capture_policy=otel_hook._CAPTURE_POLICY)
         attrs = self._attrs(span)
         assert attrs.get("gen_ai.request.model") == "claude-3-haiku-20240307"
 
@@ -2999,7 +3001,7 @@ class TestModelAttributionFallback:
         monkeypatch.delenv("CLAUDE_MODEL", raising=False)
         monkeypatch.setenv("ANTHROPIC_MODEL", "claude-3-sonnet-20240229")
         span = mock.MagicMock()
-        otel_hook._apply_genai_semconv(span, "SubagentStop", {}, "claude", session_ctx={})
+        enrichment._apply_genai_semconv(span, "SubagentStop", {}, "claude", session_ctx={}, capture_policy=otel_hook._CAPTURE_POLICY)
         attrs = self._attrs(span)
         assert attrs.get("gen_ai.request.model") == "claude-3-sonnet-20240229"
 
@@ -3007,8 +3009,8 @@ class TestModelAttributionFallback:
         """Model in data takes precedence over session_ctx['last_known_model']."""
         span = mock.MagicMock()
         session_ctx = {"last_known_model": "old-model"}
-        otel_hook._apply_genai_semconv(span, "SubagentStop", {"model": "new-model"}, "claude",
-                                       session_ctx=session_ctx)
+        enrichment._apply_genai_semconv(span, "SubagentStop", {"model": "new-model"}, "claude",
+                                       session_ctx=session_ctx, capture_policy=otel_hook._CAPTURE_POLICY)
         attrs = self._attrs(span)
         assert attrs.get("gen_ai.request.model") == "new-model"
 
@@ -3016,8 +3018,8 @@ class TestModelAttributionFallback:
         """session_ctx['last_known_model'] takes precedence over batch_model."""
         span = mock.MagicMock()
         session_ctx = {"last_known_model": "session-model"}
-        otel_hook._apply_genai_semconv(span, "SubagentStop", {}, "claude",
-                                       session_ctx=session_ctx, batch_model="batch-model")
+        enrichment._apply_genai_semconv(span, "SubagentStop", {}, "claude",
+                                       session_ctx=session_ctx, batch_model="batch-model", capture_policy=otel_hook._CAPTURE_POLICY)
         attrs = self._attrs(span)
         assert attrs.get("gen_ai.request.model") == "session-model"
 
@@ -3026,7 +3028,7 @@ class TestModelAttributionFallback:
         monkeypatch.delenv("CLAUDE_MODEL", raising=False)
         monkeypatch.delenv("ANTHROPIC_MODEL", raising=False)
         span = mock.MagicMock()
-        otel_hook._apply_genai_semconv(span, "SubagentStop", {}, "claude", session_ctx={})
+        enrichment._apply_genai_semconv(span, "SubagentStop", {}, "claude", session_ctx={}, capture_policy=otel_hook._CAPTURE_POLICY)
         attrs = self._attrs(span)
         assert "gen_ai.request.model" not in attrs
 
@@ -3038,12 +3040,13 @@ class TestModelAttributionFallback:
             "session_id": "sess-abc",
             "last_known_model": "claude-3-7-sonnet-20250219",
         }
-        otel_hook._apply_genai_semconv(
+        enrichment._apply_genai_semconv(
             span,
             "SessionEnd",
             {"session_id": "sess-abc", "duration_ms": 5000},
              "claude",
             session_ctx=session_ctx,
+            capture_policy=otel_hook._CAPTURE_POLICY,
         )
         attrs = self._attrs(span)
         assert attrs.get("gen_ai.request.model") == "claude-3-7-sonnet-20250219"

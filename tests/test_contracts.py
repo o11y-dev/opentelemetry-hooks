@@ -12,6 +12,8 @@ from unittest import mock
 import pytest
 
 import otel_hook
+from otel_hooks import enrichment
+from otel_hooks import workspace
 from otel_hooks import cli as hook_cli
 
 
@@ -102,7 +104,7 @@ def test_conversation_content_is_hash_only_by_default(monkeypatch):
     )
     lifecycle_data = event.to_lifecycle_data()
     span = RecordingSpan()
-    otel_hook._apply_conversation_attributes(span, event.event_name, lifecycle_data)
+    enrichment._apply_conversation_attributes(span, event.event_name, lifecycle_data, capture_policy=otel_hook._CAPTURE_POLICY)
     assert span.attributes["gen_ai.client.prompt.length"] == 16
     assert span.attributes["gen_ai.client.prompt.sha256"] == hashlib.sha256(b"synthetic prompt").hexdigest()
     assert "gen_ai.client.prompt.text" not in span.attributes
@@ -119,7 +121,7 @@ def test_conversation_content_uses_explicit_policy(monkeypatch, mode):
         "Stop", "Stop", {"session_id": "session-1", "last_assistant_message": "fixture response"},
     )
     span = RecordingSpan()
-    otel_hook._apply_conversation_attributes(span, event.event_name, event.to_lifecycle_data())
+    enrichment._apply_conversation_attributes(span, event.event_name, event.to_lifecycle_data(), capture_policy=otel_hook._CAPTURE_POLICY)
     assert span.attributes["gen_ai.client.response.text"] == "fixture response"
 
 
@@ -240,8 +242,8 @@ def test_error_and_compaction_callbacks_use_bounded_deduplication(isolated_state
 
 
 def test_workspace_remote_normalization_removes_credentials():
-    ssh = otel_hook._normalize_repository_remote("git@github.com:o11y-dev/opentelemetry-hooks.git")
-    https = otel_hook._normalize_repository_remote(
+    ssh = workspace._normalize_repository_remote("git@github.com:o11y-dev/opentelemetry-hooks.git")
+    https = workspace._normalize_repository_remote(
         "https://token:secret@github.com/o11y-dev/opentelemetry-hooks.git?ignored=true"
     )
     assert ssh == "github.com/o11y-dev/opentelemetry-hooks"
@@ -250,12 +252,12 @@ def test_workspace_remote_normalization_removes_credentials():
 
 
 def test_native_context_attributes_require_valid_ids():
-    assert otel_hook._native_telemetry_attributes({
+    assert enrichment._native_telemetry_attributes({
         "trace_id": "1" * 32,
         "span_id": "2" * 16,
         "_hook_provider_adapter": "gemini",
     }) == {}
-    attrs = otel_hook._native_telemetry_attributes({
+    attrs = enrichment._native_telemetry_attributes({
         "native_trace_id": "1" * 32,
         "native_span_id": "2" * 16,
         "native_parent_span_id": "3" * 16,
@@ -264,7 +266,7 @@ def test_native_context_attributes_require_valid_ids():
     })
     assert attrs["gen_ai.client.native_source"] == "gemini-native"
     assert attrs["gen_ai.client.native_trace_id"] == "1" * 32
-    assert otel_hook._native_telemetry_attributes({"native_trace_id": "not-hex"}) == {}
+    assert enrichment._native_telemetry_attributes({"native_trace_id": "not-hex"}) == {}
 
 
 def test_adapter_separates_upstream_and_native_trace_contracts():
@@ -335,10 +337,11 @@ def test_native_links_require_explicit_native_identifiers():
 def test_real_failure_sets_otel_error_but_interrupt_stays_unset():
     assert otel_hook._load_otel_modules()
     failed = RecordingSpan()
-    otel_hook._apply_conversation_attributes(
+    enrichment._apply_conversation_attributes(
         failed,
         "PostToolUseFailure",
         {"error_type": "FixtureError"},
+        capture_policy=otel_hook._CAPTURE_POLICY,
     )
     otel_hook._apply_operation_status(
         failed,
@@ -351,7 +354,7 @@ def test_real_failure_sets_otel_error_but_interrupt_stays_unset():
 
     interrupted = RecordingSpan()
     data = {"is_interrupt": True, "error_type": "Interrupted"}
-    otel_hook._apply_conversation_attributes(interrupted, "PostToolUseFailure", data)
+    enrichment._apply_conversation_attributes(interrupted, "PostToolUseFailure", data, capture_policy=otel_hook._CAPTURE_POLICY)
     otel_hook._apply_operation_status(interrupted, "PostToolUseFailure", data)
     assert interrupted.attributes["gen_ai.client.status"] == "interrupted"
     assert interrupted.status is None
@@ -381,8 +384,8 @@ def test_trace_authoritative_flush_does_not_fail_for_log_only_failure(monkeypatc
 
 
 def test_workspace_identity_is_not_invented_from_hook_process_cwd(monkeypatch):
-    monkeypatch.setattr(otel_hook, "_resolve_repository_context", lambda *_args, **_kwargs: {})
-    assert otel_hook._workspace_observability_attributes({}, None) == {}
+    monkeypatch.setattr(workspace, "_resolve_repository_context", lambda *_args, **_kwargs: {})
+    assert workspace._workspace_observability_attributes({}, None) == {}
 
 
 def test_doctor_reports_enabled_log_exporter_failure(monkeypatch, isolated_state):
@@ -462,7 +465,7 @@ def test_claude_batch_and_compaction_content_not_persisted(monkeypatch, isolated
             assert call[f"{key}_sha256"] == hashlib.sha256(text.encode()).hexdigest()
     else:
         span = RecordingSpan()
-        otel_hook._apply_conversation_attributes(span, name, persisted)
+        enrichment._apply_conversation_attributes(span, name, persisted, capture_policy=otel_hook._CAPTURE_POLICY)
         label = "instructions" if name == "PreCompact" else "summary"
         assert span.attributes[f"gen_ai.client.compaction.{label}.length"] == len("PRIVATE_FIXTURE")
 

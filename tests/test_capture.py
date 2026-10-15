@@ -9,6 +9,7 @@ from unittest.mock import Mock, patch
 import pytest
 
 import otel_hook as hook
+from otel_hooks import enrichment
 from otel_hooks.capture import CapturePolicy
 from otel_hooks.config import environment_settings
 
@@ -156,7 +157,7 @@ def test_conversation_enrichment_reuses_persisted_facts(isolated_runtime, monkey
     record = parsed.conversation[0]
     span = Mock()
     with patch("otel_hooks.parsers.models._hash_text", side_effect=AssertionError("conversation was rehashed")), \
-            patch.object(hook, "_hash_text", side_effect=AssertionError("conversation was rehashed")):
+            patch.object(enrichment, "_hash_text", side_effect=AssertionError("conversation was rehashed")):
         hook._populate_span(span, event, data, "claude")
     writes = [call.args for call in span.set_attribute.call_args_list]
     attrs = dict(writes)
@@ -659,8 +660,8 @@ def test_config_does_not_translate_capture_policy_into_process_flags(isolated_ru
 def test_span_workspace_and_native_enrichment_is_computed_once(isolated_runtime, monkeypatch):
     workspace = Mock(return_value={"gen_ai.client.workspace_path": "/fixture"})
     native = Mock(return_value={"gen_ai.client.native.source": "fixture"})
-    monkeypatch.setattr(hook, "_workspace_observability_attributes", workspace)
-    monkeypatch.setattr(hook, "_native_telemetry_attributes", native)
+    monkeypatch.setattr(enrichment, "_workspace_observability_attributes", workspace)
+    monkeypatch.setattr(enrichment, "_native_telemetry_attributes", native)
     span = Mock()
     hook._populate_span(span, "SessionStart", {}, "claude")
     workspace.assert_called_once()

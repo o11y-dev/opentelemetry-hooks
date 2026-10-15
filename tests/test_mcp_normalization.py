@@ -5,6 +5,7 @@ from unittest.mock import Mock
 import pytest
 
 import otel_hook as hook
+from otel_hooks import enrichment, lifecycle
 from otel_hooks.capture import CapturePolicy
 
 
@@ -12,8 +13,8 @@ from otel_hooks.capture import CapturePolicy
 def mcp_runtime(monkeypatch):
     monkeypatch.setattr(hook, "_CAPTURE_POLICY", CapturePolicy(mode="full"))
     monkeypatch.setattr(hook, "_LOGS_INITIALIZED", True)
-    monkeypatch.setattr(hook, "_collect_event_enrichment_attributes", lambda *_args, **_kwargs: {})
-    monkeypatch.setattr(hook, "_detect_client_version", lambda *_args: None)
+    monkeypatch.setattr(enrichment, "_collect_event_enrichment_attributes", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(enrichment, "_detect_client_version", lambda *_args: None)
     logger = Mock()
     monkeypatch.setattr(hook, "_get_otel_logger", lambda _name: logger)
     return logger
@@ -36,7 +37,7 @@ def test_parsed_identity_reaches_span_without_reinterpreting_raw_fields(
     parsed = hook._event_adapter_for(provider).parse(event, payload)
     data = parsed.to_lifecycle_data()
     data["_hook_log_body"] = payload
-    monkeypatch.setattr(hook, "_normalize_mcp_event_data", Mock(side_effect=AssertionError("already parsed")))
+    monkeypatch.setattr(lifecycle, "_normalize_mcp_event_data", Mock(side_effect=AssertionError("already parsed")))
 
     span = Mock()
     hook._populate_span(span, parsed.event_name, data, provider)
@@ -77,7 +78,9 @@ def test_cursor_correlation_preserves_duration_identity_and_raw_logs(mcp_runtime
         parsed = hook._event_adapter_for("cursor").parse(event_name, payload)
         data = parsed.to_lifecycle_data()
         data["_hook_log_body"] = payload
-        decision = hook.ToolInvocationCorrelator(session, "cursor", "generation", index + 1).prepare(
+        decision = lifecycle.ToolInvocationCorrelator(
+            session, "cursor", "generation", index + 1, ttl_seconds=86400, capture_content=True,
+        ).prepare(
             parsed.event_name, data,
         )
         assert not decision.duplicate
@@ -90,10 +93,10 @@ def test_cursor_correlation_preserves_duration_identity_and_raw_logs(mcp_runtime
 
     # Flush consumes the fields stored at the ingress boundary, including
     # invocation evidence learned after the original PreToolUse was buffered.
-    monkeypatch.setattr(hook, "_normalize_mcp_event_data", Mock(side_effect=AssertionError("already correlated")))
+    monkeypatch.setattr(lifecycle, "_normalize_mcp_event_data", Mock(side_effect=AssertionError("already correlated")))
     if buffered:
         for event_name, data in events:
-            emit(event_name, hook._enrich_buffered_event(data, session))
+            emit(event_name, lifecycle.enrich_buffered_event(data, session))
 
     post = emitted[-1]
     assert post["gen_ai.client.mcp_server"] == "real-server"
@@ -114,12 +117,12 @@ def test_invocation_merge_preserves_callback_identity_and_failure(mcp_runtime):
         "tool_use_id": "call-1", "error": "failed", "duration_ms": 0,
     })
     data = parsed.to_lifecycle_data()
-    merged = hook._merge_invocation_data(data, {
+    merged = lifecycle._merge_invocation_data(data, {
         "tool_use_id": "call-1", "mcp_server": "previous-server", "mcp_tool": "previous-tool",
         "duration_ms": 42, "mcp_status": "success",
     })
 
-    attrs = hook._mcp_observability_attributes(parsed.event_name, merged)
+    attrs = enrichment._mcp_observability_attributes(parsed.event_name, merged, capture_policy=hook._CAPTURE_POLICY)
     assert attrs["gen_ai.client.mcp_server"] == "callback-server"
     assert attrs["gen_ai.client.mcp_tool"] == "query__all"
     assert attrs["gen_ai.client.mcp.duration_ms"] == 0

@@ -6,6 +6,8 @@ import pytest
 from click.testing import CliRunner
 
 import otel_hook as hook
+from otel_hooks import enrichment
+from otel_hooks import identity
 from otel_hooks import cli as hook_cli
 from tests.test_contracts import isolated_state, RecordingSpan  # noqa: F401
 
@@ -94,7 +96,7 @@ def test_new_response_text_capture_opt_in(monkeypatch):
     monkeypatch.setattr(hook, "_CAPTURE_POLICY", hook.CapturePolicy(mode="full"))
     item = event("cursor", "afterAgentResponse", text="fixture response")
     span = RecordingSpan()
-    hook._apply_conversation_attributes(span, item.event_name, item.to_lifecycle_data())
+    enrichment._apply_conversation_attributes(span, item.event_name, item.to_lifecycle_data(), capture_policy=hook._CAPTURE_POLICY)
     assert span.attributes["gen_ai.client.response.text"] == "fixture response"
 
 
@@ -125,8 +127,8 @@ def test_native_windsurf_identity_and_fields(monkeypatch):
     item = event("windsurf", hook._get_event_name(raw), **raw)
     assert (item.session_id, item.generation_id, item.event_name) == ("trajectory", "turn", "UserPromptSubmit")
     assert "private" not in json.dumps(item.to_lifecycle_data())
-    assert hook._resolve_client_name("windsurf", item.to_lifecycle_data()) == "windsurf"
-    assert hook._detect_payload_client_name(raw) == "windsurf"
+    assert identity._resolve_client_name("windsurf", item.to_lifecycle_data()) == "windsurf"
+    assert identity._detect_payload_client_name(raw) == "windsurf"
     tool = event("windsurf", "pre_mcp_tool_use", trajectory_id="trajectory", execution_id="turn",
                  tool_info={"mcp_server_name": "fixture", "mcp_tool_name": "lookup", "mcp_tool_arguments": {"id": 1}})
     assert tool.original_tool_name == "lookup"
@@ -179,7 +181,7 @@ def test_cursor_conversation_join_preserves_native_identifier_without_inventing_
     item = event("cursor", "beforeSubmitPrompt", conversation_id="conversation-1",
                  generation_id="generation-1", prompt="fixture")
     span = RecordingSpan()
-    hook._apply_genai_semconv(span, item.event_name, item.to_lifecycle_data(), "cursor")
+    enrichment._apply_genai_semconv(span, item.event_name, item.to_lifecycle_data(), "cursor", capture_policy=hook._CAPTURE_POLICY)
     assert span.attributes["gen_ai.conversation.id"] == native_log["cursor.conversation.id"]
     assert item.generation_id != native_log["cursor.request.id"]
     assert item.native.trace_id is None

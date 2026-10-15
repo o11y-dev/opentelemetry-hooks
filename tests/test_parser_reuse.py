@@ -125,3 +125,16 @@ def test_alias_expansion_cannot_hide_boolean_integer_difference(prepare_callback
     data, calls = prepare_callback(payload, capture)
     assert calls == 2
     assert type(data["tracestate"]) is int
+
+
+def test_cli_only_codex_event_blocks_stale_session_engine(prepare_callback, monkeypatch):
+    monkeypatch.setattr(hook, "_CLI_HOOK_EVENT", "PreToolUse")
+    monkeypatch.setattr(hook, "_load_session_context", lambda key: {
+        "agent_engine": "claude", "agent_engine_confirmed": True,
+    })
+    initialize = Mock(return_value=False)
+    monkeypatch.setattr(hook, "_init_tracing", initialize)
+    data, calls = prepare_callback({"session_id": "s"}, CapturePolicy(mode="full"), "codex")
+    assert calls == 1
+    assert data["_hook_original_event"] == "PreToolUse"
+    assert initialize.call_args.kwargs["client_name"] == "codex"
