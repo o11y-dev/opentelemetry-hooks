@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Added
+- Enterprise upgrade/rollback guidance, explicit Reflect integration requirements, and security reporting and community support documentation.
 - Span-only `capture.span_include` allowlist with normalized paths and wildcards, retaining canonical span attributes and full permitted JSON logs. Examples select legacy hook field groups; a Reflect example includes file-path mappings.
 - Structured, unprefixed JSON settings with legacy `IDE_OTEL_*` compatibility; configurable metadata, selected-content and full hook capture across providers.
 - Bounded lowercase recursive span attributes and extraction mappings; optional policy-filtered raw JSON log bodies with trace/span correlation with one record per emitted callback.

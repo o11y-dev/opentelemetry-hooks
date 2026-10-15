@@ -81,9 +81,9 @@ agent analytics are separate integrations.
 New JSON settings have no IDE prefix. Existing `IDE_OTEL_*` environment variables
 and flat JSON aliases remain supported for runtime settings. Capture policy uses
 `capture.mode`; retired content and log fan-out flags do not restore old behavior.
-`IDE_OTEL_CONFIG` selects a different file;
-`IDE_OTEL_HOOK_HOME` selects the data directory. No new environment prefix or
-migration command is required.
+`IDE_OTEL_CONFIG` selects a different file; `IDE_OTEL_HOOK_HOME` selects the data
+directory. Review the [upgrade steps](#upgrade-and-rollback) before replacing an
+existing installation.
 
 ## Choose what to capture
 
@@ -139,6 +139,9 @@ limits, managed policy and compatibility details.
 
 ## Enterprise rollout
 
+Start with a controlled pilot. The project is beta; validate the harness versions,
+workstation policies and destination limits used by your organization.
+
 1. Pin and distribute a tested package version with Python 3.12+.
 2. Deliver the endpoint, credentials and capture configuration through your
    workstation-management system. Keep credentials out of repository examples.
@@ -161,17 +164,34 @@ Changing capture policy isolates pending state from the previous policy to avoid
 replaying previously permitted content. It can split an active session's trace.
 Old files and already exported data are not retroactively deleted.
 
+## Upgrade and rollback
+
+Back up the configuration, managed policy and hook registrations before upgrading.
+This version changes capture defaults and consumer contracts: omitted capture
+mode means metadata-only, hook logs default off, and retired content/log switches
+do not restore old behavior. Migrate to structured settings and update queries
+that relied on separate log records or old flattened fields.
+
+Pilot the approved version and rerun setup. To roll back, restore the tested
+package version and matching configuration through the owning package manager,
+then register and verify hooks again. Exported data is not retracted, and pending
+state needs review before replay. See [upgrade and rollback steps](docs/upgrades.md),
+including Reflect-managed installations.
+
 ## Reflect and other consumers
 
-Local exported spans remain under `.state/local_spans/*.jsonl`. Canonical
-session, generation, tool and conversation attributes remain available, and
-additional provider fields use `hook.*` unless mapped explicitly.
+Local exported spans remain under `.state/local_spans/*.jsonl`. Reflect performs
+skill extraction, analysis and semantic interpretation; the hook collects evidence.
 
-Reflect owns its configuration and interpretation of these fields. A stricter
-capture policy can remove paths or content that its memory enrichment needs;
-select those fields explicitly when required. Provider-reported counters remain
-observations: do not add native telemetry and hook totals without deduplication,
-or assume all providers use the same cache-token accounting.
+The [shared Reflect profile](examples/otel_config.reflect.example.json) selects
+bounded evidence and mappings across agents, with full JSON logs when enabled.
+The reviewed Reflect version requires setup/dependency and consumer updates to preserve all
+previous behavior. Read the [compatibility review](docs/reflect-compatibility.md)
+before integration; successful ingestion alone does not prove equivalent analytics.
+
+A stricter capture policy can remove paths or content a consumer needs. Select
+those fields explicitly. Provider counters remain observations: deduplicate native
+and hook telemetry, and account for provider-specific cache-token semantics.
 
 ## Verify and troubleshoot
 
@@ -203,6 +223,15 @@ To remove a registration:
 ```bash
 otel-hook uninstall --agent cursor
 ```
+
+## Support and security
+
+Use [GitHub issues](https://github.com/o11y-dev/opentelemetry-hooks/issues) for bugs
+and feature requests, with versions and a sanitized reproduction. See
+[security reporting](SECURITY.md) for sensitive findings; do not post real hook
+payloads or credentials publicly. Support is community-based, with no published
+response-time or long-term support commitment. The deploying organization owns
+collector operation, access control and data retention.
 
 ## Development
 
