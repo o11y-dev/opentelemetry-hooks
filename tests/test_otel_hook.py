@@ -171,23 +171,23 @@ class TestMemoryAggregation:
 
 
 class TestEventNormalization:
-    @pytest.mark.parametrize("raw,canonical", [
-        ("sessionStart", "SessionStart"),
-        ("sessionEnd", "SessionEnd"),
-        ("beforeSubmitPrompt", "UserPromptSubmit"),
-        ("preToolUse", "PreToolUse"),
-        ("postToolUse", "PostToolUse"),
-        ("stop", "Stop"),
-        ("userPromptSubmitted", "UserPromptSubmit"),
-        ("errorOccurred", "ErrorOccurred"),
-        ("SessionStart", "SessionStart"),
-        ("PreToolUse", "PreToolUse"),
+    @pytest.mark.parametrize("provider,raw,canonical", [
+        ("cursor", "sessionStart", "SessionStart"),
+        ("cursor", "sessionEnd", "SessionEnd"),
+        ("cursor", "beforeSubmitPrompt", "UserPromptSubmit"),
+        ("cursor", "preToolUse", "PreToolUse"),
+        ("cursor", "postToolUse", "PostToolUse"),
+        ("cursor", "stop", "Stop"),
+        ("copilot", "userPromptSubmitted", "UserPromptSubmit"),
+        ("copilot", "errorOccurred", "ErrorOccurred"),
+        ("claude", "SessionStart", "SessionStart"),
+        ("claude", "PreToolUse", "PreToolUse"),
     ])
-    def test_known_events(self, raw, canonical):
-        assert otel_hook._normalize_event(raw) == canonical
+    def test_known_events(self, provider, raw, canonical):
+        assert otel_hook._event_adapter_for(provider).canonical_event_name(raw) == canonical
 
     def test_unknown_event_passthrough(self):
-        assert otel_hook._normalize_event("customEvent") == "customEvent"
+        assert otel_hook._event_adapter_for("cursor").canonical_event_name("customEvent") == "customEvent"
 
 
 class TestNormalizeInputData:
@@ -502,7 +502,7 @@ class TestOpenCodePluginPayloads:
     ])
     def test_plugin_events_already_canonical(self, event_name):
         # Plugin emits PascalCase names that are already canonical — no mapping needed.
-        assert otel_hook._normalize_event(event_name) == event_name
+        assert otel_hook._event_adapter_for("opencode").canonical_event_name(event_name) == event_name
 
     def test_get_event_name_from_plugin_payload(self):
         payload = {"hook_event_name": "PreToolUse", "source_app": "OpenCode", "session_id": "s1", "tool_name": "bash"}

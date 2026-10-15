@@ -59,7 +59,6 @@ from otel_hooks.config import (
 
 # Compatibility re-exports; parsing itself lives in the SDK-independent package.
 from otel_hooks.parsers.events import (
-    _CANONICAL_EVENT as _CANONICAL_EVENT,
     _COPILOT_EVENTS as _COPILOT_EVENTS,
     _WINDSURF_EVENT_ALIASES as _WINDSURF_EVENT_ALIASES,
     _INPUT_ALIASES as _INPUT_ALIASES,
@@ -388,7 +387,6 @@ _STATE_DIR = os.path.join(_HOOK_DIR, ".state")
 _SESSION_DIR = os.path.join(_STATE_DIR, "sessions")
 _BATCH_DIR = os.path.join(_STATE_DIR, "batches")
 _LOCAL_SPANS_DIR = os.path.join(_STATE_DIR, "local_spans")
-_LOCAL_TRACE_DIR = _LOCAL_SPANS_DIR  # backward-compatible alias
 _LOCK_DIR = os.path.join(_STATE_DIR, "locks")
 _CLEANUP_MARKER = os.path.join(_STATE_DIR, "last_cleanup")
 _DELIVERY_HEALTH_PATH = os.path.join(_STATE_DIR, "delivery_health.json")
@@ -2087,8 +2085,11 @@ def _attach_content_fact(span, label: str, text: str, *, capture: bool) -> None:
         return
     span.set_attribute(f"gen_ai.client.{label}.length", len(text))
     span.set_attribute(f"gen_ai.client.{label}.sha256", _hash_text(text))
-    if not capture:
-        return
+    if capture:
+        _attach_text(span, label, text)
+
+
+def _attach_text(span, label: str, text: str) -> None:
     if _safe_bool(os.getenv("IDE_OTEL_MASK_PROMPTS", "")):
         text = _mask_text(text)
     span.set_attribute(f"gen_ai.client.{label}.text", text[:_text_max_chars()])
@@ -2106,10 +2107,11 @@ def _conversation_records_from_data(data: dict) -> tuple[ConversationRecord, ...
         sha256 = item.get("sha256")
         if not isinstance(kind, str) or not isinstance(role, str):
             continue
-        if isinstance(text, str) and text:
+        if isinstance(length, int) and length >= 0 and isinstance(sha256, str) and sha256:
+            retained_text = text if isinstance(text, str) and _CAPTURE_POLICY.content_enabled else None
+            records.append(ConversationRecord(kind, role, retained_text, length, sha256))
+        elif isinstance(text, str) and text:
             records.append(ConversationRecord.from_text(kind, role, text, capture=_CAPTURE_POLICY.content_enabled))
-        elif isinstance(length, int) and length >= 0 and isinstance(sha256, str) and sha256:
-            records.append(ConversationRecord(kind, role, None, length, sha256))
     return tuple(records)
 
 
@@ -2124,7 +2126,24 @@ def _apply_conversation_attributes(span, event_name: str, data: dict) -> None:
         span.set_attribute(f"gen_ai.client.{record.kind}.length", record.length)
         span.set_attribute(f"gen_ai.client.{record.kind}.sha256", record.sha256)
         if _CAPTURE_POLICY.content_enabled and record.text is not None:
-            _attach_content_fact(span, record.kind, record.text, capture=True)
+            _attach_text(span, record.kind, record.text)
+
+    # Both message formats use the same records and preserve the original facts
+    # while masking and bounding only their captured text.
+    if _CAPTURE_POLICY.content_enabled:
+        prompt = next((record.text for record in records if record.kind == "prompt"), None)
+        response = next((record.text for record in records if record.kind == "response"), None)
+        prompt = prompt or (data.get("prompt") if isinstance(data.get("prompt"), str) else None)
+        response = response or (data.get("response") if isinstance(data.get("response"), str) else None)
+        if _safe_bool(os.getenv("IDE_OTEL_MASK_PROMPTS", "")):
+            prompt = _mask_text(prompt) if prompt else None
+            response = _mask_text(response) if response else None
+        max_chars = _text_max_chars()
+        prompt = prompt[:max_chars] if prompt else None
+        response = response[:max_chars] if response else None
+        inp_msg, out_msg = _genai_messages(prompt, response)
+        _set_if_present(span, "gen_ai.input.messages", inp_msg)
+        _set_if_present(span, "gen_ai.output.messages", out_msg)
 
     error = data.get("error")
     if isinstance(error, dict):
@@ -2151,15 +2170,6 @@ def _apply_operation_status(span, event_name: str, data: dict) -> None:
     )
     if is_error and Status is not None and StatusCode is not None and hasattr(span, "set_status"):
         span.set_status(Status(StatusCode.ERROR))
-
-
-def _maybe_attach_text(span, label: str, text: str) -> None:
-    _attach_content_fact(
-        span,
-        label,
-        text,
-        capture=_CAPTURE_POLICY.content_enabled,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -2337,11 +2347,6 @@ def _get_event_name(data: dict) -> str:
     if "prompt" in data:
         return "beforeSubmitPrompt"
     return "stop"
-
-
-def _normalize_event(event_name: str) -> str:
-    """Normalize event name to canonical PascalCase."""
-    return _CANONICAL_EVENT.get(event_name, event_name)
 
 
 # ---------------------------------------------------------------------------
@@ -3766,22 +3771,6 @@ def _apply_genai_semconv(span, event_name: str, data: dict, ide: str, session_ct
     if tool_defs is not None and _CAPTURE_POLICY.content_enabled:
         span.set_attribute("gen_ai.tool.definitions", _stringify(tool_defs))
 
-    # GenAI messages (opt-in)
-    if _CAPTURE_POLICY.content_enabled:
-        records = _conversation_records_from_data(data)
-        prompt = next((record.text for record in records if record.kind == "prompt"), None)
-        response = next((record.text for record in records if record.kind == "response"), None)
-        prompt = prompt or (data.get("prompt") if isinstance(data.get("prompt"), str) else None)
-        response = response or (data.get("response") if isinstance(data.get("response"), str) else None)
-        if _safe_bool(os.getenv("IDE_OTEL_MASK_PROMPTS", "")):
-            prompt = _mask_text(prompt) if prompt else None
-            response = _mask_text(response) if response else None
-        max_chars = _text_max_chars()
-        prompt = prompt[:max_chars] if prompt else None
-        response = response[:max_chars] if response else None
-        inp_msg, out_msg = _genai_messages(prompt, response)
-        _set_if_present(span, "gen_ai.input.messages", inp_msg)
-        _set_if_present(span, "gen_ai.output.messages", out_msg)
     if _CAPTURE_POLICY.content_enabled:
         system_instructions = _first_present(data, ("system_instructions", "system_prompt"))
         if system_instructions is not None:
@@ -3832,7 +3821,7 @@ def _populate_span(span, event_name: str, data: dict, ide: str, session_ctx: Opt
     for label in ("tool_input", "tool_output", "mcp_input", "mcp_output"):
         value = data.get(label)
         if value is not None and not isinstance(value, dict):
-            _maybe_attach_text(span, label, _stringify(value))
+            _attach_content_fact(span, label, _stringify(value), capture=_CAPTURE_POLICY.content_enabled)
 
     # Attach correlation last so large content cannot evict it from bounded
     # SDK attribute storage. Explicit configured mappings still take precedence.

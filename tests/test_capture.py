@@ -139,6 +139,54 @@ def test_primary_log_body_and_trace_correlation_without_legacy_fanout(monkeypatc
     assert logger.info.call_args.kwargs["extra"]["gen_ai.client.session_id"] == "s"
 
 
+@pytest.mark.parametrize("mode", ["metadata_only", "selected_content", "full"])
+@pytest.mark.parametrize("event,field,kind,message_attr", [
+    ("UserPromptSubmit", "prompt", "prompt", "gen_ai.input.messages"),
+    ("Stop", "last_assistant_message", "response", "gen_ai.output.messages"),
+])
+def test_conversation_enrichment_reuses_persisted_facts(isolated_runtime, monkeypatch, mode, event, field, kind, message_attr):
+    capture = policy(mode)
+    monkeypatch.setattr(hook, "_CAPTURE_POLICY", capture)
+    monkeypatch.setenv("IDE_OTEL_MASK_PROMPTS", "true")
+    monkeypatch.setenv("IDE_OTEL_TEXT_MAX_CHARS", "20")
+    parsed = hook.ClaudeEventAdapter(capture_policy=capture).parse(
+        event, {"session_id": "s", field: "alice@example.test says " + "é" * 20},
+    )
+    data = json.loads(json.dumps(parsed.to_lifecycle_data()))
+    record = parsed.conversation[0]
+    span = Mock()
+    with patch("otel_hooks.parsers.models._hash_text", side_effect=AssertionError("conversation was rehashed")), \
+            patch.object(hook, "_hash_text", side_effect=AssertionError("conversation was rehashed")):
+        hook._populate_span(span, event, data, "claude")
+    writes = [call.args for call in span.set_attribute.call_args_list]
+    attrs = dict(writes)
+    prefix = f"gen_ai.client.{kind}"
+    assert writes.count((f"{prefix}.length", record.length)) == 1
+    assert writes.count((f"{prefix}.sha256", record.sha256)) == 1
+    if capture.content_enabled:
+        expected_text = "[REDACTED_EMAIL] says "[:20]
+        assert attrs[f"{prefix}.text"] == expected_text
+        assert json.loads(attrs[message_attr])[0]["parts"][0]["content"] == expected_text
+    else:
+        assert f"{prefix}.text" not in attrs
+        assert message_attr not in attrs
+
+
+@pytest.mark.parametrize("data", [
+    {"prompt": "hello"},
+    {"_conversation_records": [{"kind": "prompt", "role": "user", "text": "hello"}]},
+])
+def test_conversation_enrichment_derives_missing_facts(isolated_runtime, monkeypatch, data):
+    monkeypatch.setattr(hook, "_CAPTURE_POLICY", policy("full"))
+    span = Mock()
+    hook._populate_span(span, "UserPromptSubmit", data, "claude")
+    attrs = dict(call.args for call in span.set_attribute.call_args_list)
+    assert attrs["gen_ai.client.prompt.length"] == 5
+    assert attrs["gen_ai.client.prompt.sha256"] == "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+    assert attrs["gen_ai.client.prompt.text"] == "hello"
+    assert json.loads(attrs["gen_ai.input.messages"])[0]["parts"][0]["content"] == "hello"
+
+
 @pytest.mark.parametrize("provider", ["cursor", "claude", "codex", "copilot", "gemini", "windsurf", "antigravity", "opencode"])
 def test_metadata_filter_precedes_buffer_writes(isolated_runtime, monkeypatch, provider):
     monkeypatch.setattr(hook, "_load_config", lambda: {
