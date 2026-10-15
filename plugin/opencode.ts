@@ -17,7 +17,7 @@ import type { Plugin } from "@opencode-ai/plugin"
 
 export const OtelHookPlugin: Plugin = async ({ $, directory }) => {
   try {
-    await $`which otel-hook`.quiet()
+    await $`otel-hook --help`.quiet()
   } catch {
     console.warn("[otel-hook] otel-hook not found in PATH — plugin disabled")
     console.warn("[otel-hook] Install with: pip install opentelemetry-hooks")

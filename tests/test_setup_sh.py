@@ -4,14 +4,17 @@ Verifies that setup.sh prefers the system-installed otel-hook command when it
 is available on PATH, and falls back to the local script otherwise.
 
 Also verifies that --global is scoped to only the explicitly selected IDEs,
-and that --reinstall calls `pipx install --force .` before registering hooks.
+and that --reinstall uses the selected installer (pipx by default) before registering hooks.
 """
 
 import json
 import os
 import shutil
+import shlex
 import subprocess
 from typing import Dict, List, Optional
+
+import pytest
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SETUP_SH = os.path.join(REPO_ROOT, "setup.sh")
@@ -19,6 +22,19 @@ OTEL_HOOK_PY = os.path.join(REPO_ROOT, "otel_hook.py")
 OTEL_CONFIG_EXAMPLE = os.path.join(REPO_ROOT, "otel_config.example.json")
 PLUGIN_SRC = os.path.join(REPO_ROOT, "plugin", "opencode.ts")
 COPILOT_EXAMPLE = os.path.join(REPO_ROOT, "examples", "copilot-hooks.example.json")
+
+
+
+def _python_only_bin(tmp_root: str) -> str:
+    """Expose Python without sibling otel-hook/pipx commands from its install."""
+    python = shutil.which("python3") or "/usr/bin/python3"
+    bin_dir = os.path.join(tmp_root, "python-only-bin")
+    os.makedirs(bin_dir, exist_ok=True)
+    wrapper = os.path.join(bin_dir, "python3")
+    with open(wrapper, "w", encoding="utf-8") as fh:
+        fh.write(f'#!/bin/sh\nexec {shlex.quote(python)} "$@"\n')
+    os.chmod(wrapper, 0o755)
+    return bin_dir
 
 
 def _make_hook_dir(tmp_root: str) -> str:
@@ -29,6 +45,7 @@ def _make_hook_dir(tmp_root: str) -> str:
     # Copy the files that setup.sh needs to find next to itself.
     shutil.copy(SETUP_SH, os.path.join(hook_dir, "setup.sh"))
     shutil.copy(OTEL_HOOK_PY, os.path.join(hook_dir, "otel_hook.py"))
+    shutil.copytree(os.path.join(REPO_ROOT, "otel_hooks"), os.path.join(hook_dir, "otel_hooks"))
     shutil.copy(OTEL_CONFIG_EXAMPLE, os.path.join(hook_dir, "otel_config.example.json"))
     # Copy the OpenCode plugin source so --opencode tests can find it.
     if os.path.exists(PLUGIN_SRC):
@@ -61,6 +78,7 @@ def _make_clean_dir(tmp_root: str) -> str:
     os.makedirs(clean_dir, exist_ok=True)
     shutil.copy(SETUP_SH, os.path.join(clean_dir, "setup.sh"))
     shutil.copy(OTEL_HOOK_PY, os.path.join(clean_dir, "otel_hook.py"))
+    shutil.copytree(os.path.join(REPO_ROOT, "otel_hooks"), os.path.join(clean_dir, "otel_hooks"))
     shutil.copy(OTEL_CONFIG_EXAMPLE, os.path.join(clean_dir, "otel_config.example.json"))
     if os.path.exists(PLUGIN_SRC):
         plugin_dir = os.path.join(clean_dir, "plugin")
@@ -71,8 +89,7 @@ def _make_clean_dir(tmp_root: str) -> str:
 
 def _run_setup_from_clean_dir(clean_dir: str, home_dir: str, args: Optional[List[str]] = None, env: Optional[Dict[str, str]] = None) -> subprocess.CompletedProcess:
     """Run setup.sh from *clean_dir* (no IDE markers in the tree) with controlled HOME."""
-    python3_bin = shutil.which("python3") or "/usr/bin/python3"
-    python3_dir = os.path.dirname(python3_bin)
+    python3_dir = _python_only_bin(home_dir)
     full_env = {
         "HOME": home_dir,
         "PATH": f"{python3_dir}:/usr/bin:/bin",
@@ -202,8 +219,7 @@ class TestSetupShCommandSelection:
 
         # Build a minimal PATH containing python3 but definitely no otel-hook,
         # so the test is portable across macOS (/opt/homebrew/bin) and Linux.
-        python3_bin = shutil.which("python3") or "/usr/bin/python3"
-        python3_dir = os.path.dirname(python3_bin)
+        python3_dir = _python_only_bin(str(tmp_path))
         env_override = {"PATH": f"{python3_dir}:/usr/bin:/bin"}
 
         result = _run_setup(hook_dir, env=env_override)
@@ -227,8 +243,7 @@ class TestSetupShGlobalScoping:
         from the real home directory. A minimal PATH ensures no spurious
         otel-hook binary leaks in.
         """
-        python3_bin = shutil.which("python3") or "/usr/bin/python3"
-        python3_dir = os.path.dirname(python3_bin)
+        python3_dir = _python_only_bin(str(tmp_path))
         return {
             "HOME": str(tmp_path),
             "PATH": f"{python3_dir}:/usr/bin:/bin",
@@ -322,8 +337,7 @@ class TestSetupShGlobalScoping:
 
 class TestSetupShIdeDetectionConfig:
     def _minimal_env(self, tmp_path) -> dict:
-        python3_bin = shutil.which("python3") or "/usr/bin/python3"
-        python3_dir = os.path.dirname(python3_bin)
+        python3_dir = _python_only_bin(str(tmp_path))
         return {
             "HOME": str(tmp_path),
             "PATH": f"{python3_dir}:/usr/bin:/bin",
@@ -469,12 +483,37 @@ class TestSetupShIdeDetectionConfig:
 
 
 class TestSetupShReinstall:
-    """--reinstall must call `pipx install --force .` before registering hooks."""
+    """Reinstall through the selected installer before registering hooks."""
+
+    @pytest.mark.parametrize("exit_code", [0, 7])
+    def test_reinstall_with_uv_respects_selection_and_failure(self, tmp_path, exit_code):
+        hook_dir = _make_hook_dir(str(tmp_path))
+        fake_bin = tmp_path / "fakebin"
+        fake_bin.mkdir()
+        log = tmp_path / "uv-args.txt"
+        uv = fake_bin / "uv"
+        uv.write_text(f'#!/bin/sh\nprintf "%s\\n" "$@" > {shlex.quote(str(log))}\nexit {exit_code}\n')
+        uv.chmod(0o755)
+        pipx = fake_bin / "pipx"
+        pipx.write_text('#!/bin/sh\necho "wrong installer" >&2\nexit 99\n')
+        pipx.chmod(0o755)
+        env = self._minimal_env(tmp_path)
+        env["PATH"] = f'{fake_bin}:{env["PATH"]}'
+        result = _run_setup(hook_dir, args=["--cursor", "--reinstall", "--installer", "uv"], env=env)
+        assert result.returncode == exit_code, result.stderr
+        assert log.read_text().splitlines() == ["tool", "install", "--reinstall", hook_dir]
+        assert (tmp_path / ".cursor" / "hooks.json").exists() is (exit_code == 0)
+
+    @pytest.mark.parametrize("args", [["--installer"], ["--installer", "unknown"]])
+    def test_invalid_installer_is_rejected(self, tmp_path, args):
+        hook_dir = _make_hook_dir(str(tmp_path))
+        result = _run_setup(hook_dir, args=args, env=self._minimal_env(tmp_path))
+        assert result.returncode == 1
+        assert "--installer requires uv or pipx" in result.stdout
 
     def _minimal_env(self, tmp_path) -> dict:
         """Return an env dict with HOME set to tmp_path and a minimal PATH."""
-        python3_bin = shutil.which("python3") or "/usr/bin/python3"
-        python3_dir = os.path.dirname(python3_bin)
+        python3_dir = _python_only_bin(str(tmp_path))
         return {
             "HOME": str(tmp_path),
             "PATH": f"{python3_dir}:/usr/bin:/bin",
@@ -520,8 +559,7 @@ class TestSetupShReinstall:
             )
         os.chmod(fake_pipx, 0o755)
 
-        python3_bin = shutil.which("python3") or "/usr/bin/python3"
-        python3_dir = os.path.dirname(python3_bin)
+        python3_dir = _python_only_bin(str(tmp_path))
         env = {
             "HOME": str(tmp_path),
             "PATH": f"{fake_bin}:{python3_dir}:/usr/bin:/bin",
@@ -553,8 +591,7 @@ class TestSetupShReinstall:
             f.write("#!/bin/sh\nexit 0\n")
         os.chmod(fake_pipx, 0o755)
 
-        python3_bin = shutil.which("python3") or "/usr/bin/python3"
-        python3_dir = os.path.dirname(python3_bin)
+        python3_dir = _python_only_bin(str(tmp_path))
         env = {
             "HOME": str(tmp_path),
             "PATH": f"{fake_bin}:{python3_dir}:/usr/bin:/bin",
@@ -570,8 +607,7 @@ class TestSetupShReinstall:
 
 class TestProcessDiscoveryExamples:
     def _minimal_env(self, tmp_path) -> dict:
-        python3_bin = shutil.which("python3") or "/usr/bin/python3"
-        python3_dir = os.path.dirname(python3_bin)
+        python3_dir = _python_only_bin(str(tmp_path))
         return {
             "HOME": str(tmp_path),
             "PATH": f"{python3_dir}:/usr/bin:/bin",
@@ -603,8 +639,7 @@ class TestGeminiSetup:
     """Tests for Gemini CLI hook setup and operational commands."""
 
     def _minimal_env(self, tmp_path) -> dict:
-        python3_bin = shutil.which("python3") or "/usr/bin/python3"
-        python3_dir = os.path.dirname(python3_bin)
+        python3_dir = _python_only_bin(str(tmp_path))
         return {
             "HOME": str(tmp_path),
             "PATH": f"{python3_dir}:/usr/bin:/bin",
@@ -791,8 +826,7 @@ class TestOperationalFlags:
     """Tests for --diagnose, --clean, --uninstall auto-detection and behavior."""
 
     def _minimal_env(self, tmp_path) -> dict:
-        python3_bin = shutil.which("python3") or "/usr/bin/python3"
-        python3_dir = os.path.dirname(python3_bin)
+        python3_dir = _python_only_bin(str(tmp_path))
         return {
             "HOME": str(tmp_path),
             "PATH": f"{python3_dir}:/usr/bin:/bin",
