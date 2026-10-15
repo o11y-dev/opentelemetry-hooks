@@ -1187,9 +1187,8 @@ def _mcp_identity(data: dict) -> Tuple[Optional[str], Optional[str]]:
 
 
 def _mcp_observability_attributes(event_name: str, data: dict) -> dict:
-    """Build content-safe MCP attributes shared by spans and logs."""
-    normalized = _normalize_mcp_event_data(data, event_name)
-    server, tool = _mcp_identity(normalized)
+    """Build content-safe MCP attributes from canonical lifecycle data."""
+    server, tool = _mcp_identity(data)
     if not server and not tool:
         return {}
     attrs = {}
@@ -1197,22 +1196,22 @@ def _mcp_observability_attributes(event_name: str, data: dict) -> dict:
         attrs["gen_ai.client.mcp_server"] = server
     if tool:
         attrs["gen_ai.client.mcp_tool"] = tool
-    invocation_id = normalized.get("tool_use_id")
+    invocation_id = data.get("tool_use_id")
     if invocation_id:
         attrs["gen_ai.client.tool_use_id"] = invocation_id
-    duration = _first_present(normalized, ("duration_ms", "duration"))
+    duration = _first_present(data, ("duration_ms", "duration"))
     if duration is not None:
         attrs["gen_ai.client.mcp.duration_ms"] = duration
         attrs["gen_ai.client.duration_ms"] = duration
-    status = normalized.get("status") or normalized.get("mcp_status")
-    if event_name == "PostToolUseFailure" or normalized.get("error") is not None:
+    status = data.get("status") or data.get("mcp_status")
+    if event_name == "PostToolUseFailure" or data.get("error") is not None:
         status = "error"
     elif event_name in {"PostToolUse", "AfterMCPExecution"} and not status:
         status = "success"
     if status:
         attrs["gen_ai.client.status"] = status
-    if normalized.get("error") is not None:
-        error_text = _stringify(normalized["error"])
+    if data.get("error") is not None:
+        error_text = _stringify(data["error"])
         attrs["gen_ai.client.error.length"] = len(error_text)
         attrs["gen_ai.client.error.sha256"] = _hash_text(error_text)
         if _CAPTURE_POLICY.content_enabled:
@@ -1220,21 +1219,21 @@ def _mcp_observability_attributes(event_name: str, data: dict) -> dict:
                 error_text = _mask_text(error_text)
             attrs["gen_ai.client.error.text"] = error_text[:_text_max_chars()]
     else:
-        if normalized.get("error_length") is not None:
-            attrs["gen_ai.client.error.length"] = normalized["error_length"]
-        if normalized.get("error_sha256") is not None:
-            attrs["gen_ai.client.error.sha256"] = normalized["error_sha256"]
+        if data.get("error_length") is not None:
+            attrs["gen_ai.client.error.length"] = data["error_length"]
+        if data.get("error_sha256") is not None:
+            attrs["gen_ai.client.error.sha256"] = data["error_sha256"]
 
-    result = _first_present(normalized, ("result_json", "mcp_output", "tool_output", "output"))
+    result = _first_present(data, ("result_json", "mcp_output", "tool_output", "output"))
     if result is not None:
         text = _stringify(result)
         attrs["gen_ai.client.mcp.output.length"] = len(text)
         attrs["gen_ai.client.mcp.output.sha256"] = _hash_text(text)
     else:
-        if normalized.get("mcp_result_length") is not None:
-            attrs["gen_ai.client.mcp.output.length"] = normalized["mcp_result_length"]
-        if normalized.get("mcp_result_sha256") is not None:
-            attrs["gen_ai.client.mcp.output.sha256"] = normalized["mcp_result_sha256"]
+        if data.get("mcp_result_length") is not None:
+            attrs["gen_ai.client.mcp.output.length"] = data["mcp_result_length"]
+        if data.get("mcp_result_sha256") is not None:
+            attrs["gen_ai.client.mcp.output.sha256"] = data["mcp_result_sha256"]
     return attrs
 
 
@@ -2998,6 +2997,7 @@ def _store_mcp_result(invocation: dict, data: dict) -> None:
 
 
 def _merge_invocation_data(data: dict, invocation: dict) -> dict:
+    """Fill absent canonical fields without replacing callback evidence."""
     merged = dict(data)
     for key in (
         "tool_use_id",
@@ -3076,6 +3076,7 @@ class ToolInvocationCorrelator:
         return self.session_ctx.setdefault("tool_invocations", [])
 
     def prepare(self, event_name: str, data: dict) -> _BufferedEventDecision:
+        # This boundary also accepts raw lifecycle events from direct callers.
         prepared = _normalize_mcp_event_data(data, event_name, self.ide)
         if event_name in {"SubagentStart", "SubagentStop"}:
             prepared, duplicate = SubagentInvocationCorrelator(
@@ -3391,11 +3392,11 @@ def _pending_batch_keys_for_session(session_key: str, session_ctx: Optional[dict
     return keys
 
 
-def _enrich_buffered_event(data: dict, event_name: str, session_ctx: Optional[dict], ide: str) -> dict:
-    enriched = _normalize_mcp_event_data(data, event_name, ide)
-    invocation_id = enriched.get("tool_use_id")
+def _enrich_buffered_event(data: dict, session_ctx: Optional[dict]) -> dict:
+    """Merge invocation facts into events normalized before they were buffered."""
+    invocation_id = data.get("tool_use_id")
     if not invocation_id or not session_ctx:
-        return enriched
+        return data
     invocation = next(
         (
             item for item in session_ctx.get("tool_invocations", [])
@@ -3403,7 +3404,7 @@ def _enrich_buffered_event(data: dict, event_name: str, session_ctx: Optional[di
         ),
         None,
     )
-    return _merge_invocation_data(enriched, invocation) if invocation else enriched
+    return _merge_invocation_data(data, invocation) if invocation else data
 
 
 # ---------------------------------------------------------------------------
@@ -3781,8 +3782,7 @@ def _apply_genai_semconv(span, event_name: str, data: dict, ide: str, session_ct
 # Span population
 # ---------------------------------------------------------------------------
 def _populate_span(span, event_name: str, data: dict, ide: str, session_ctx: Optional[dict] = None, batch_model: Optional[str] = None) -> None:
-    """Attach all attributes to a span and emit OTel log records."""
-    data = _normalize_mcp_event_data(data, event_name, ide)
+    """Attach canonical lifecycle attributes to a span and emit OTel log records."""
     # Add bounded provider fields first so canonical attributes retain priority
     # when the SDK/backend imposes a smaller attribute count limit.
     for key, value in (data.get("_hook_attributes") or {}).items():
@@ -3914,9 +3914,7 @@ def _flush_generation_unlocked(tracer, gen_key: str, session_ctx: Optional[dict]
     for entry in batch:
         entry["data"] = _enrich_buffered_event(
             entry.get("data") or {},
-            entry.get("event") or "unknown",
             session_ctx,
-            ide,
         )
 
     first_ts = batch[0].get("timestamp_ns") or time.time_ns()
@@ -4106,12 +4104,16 @@ def main() -> int:
     input_data = _load_input()
     if not isinstance(input_data, dict):
         input_data = {}
-    data = _normalize_input_data(input_data)
+    original_data = data = _normalize_input_data(input_data)
     raw_event = _get_event_name(data)
     ide = _detect_ide(data)
     captured_payload = _CAPTURE_POLICY.filter(input_data)
     # Never trust incoming private keys as runtime-generated state.
-    data = _normalize_input_data({k: v for k, v in captured_payload.items() if not k.startswith("_")})
+    parser_input = {k: v for k, v in captured_payload.items() if not k.startswith("_")}
+    # Filtering preserves leaf types. Compare before aliases are added, which
+    # could otherwise hide changed values through Python's True == 1 equality.
+    input_unchanged = parser_input == input_data
+    data = _normalize_input_data(parser_input)
     short_hook = ide == "codex" and raw_event in {"SessionEnd", "Interrupt"}
     # Leave one second of Codex's three-second budget for startup and local I/O.
     _EXPORT_DEADLINE = started + 2.0 if short_hook else None
@@ -4129,7 +4131,9 @@ def main() -> int:
     data = canonical_event.to_lifecycle_data()
     # Pure parsing can retain identity and length/hash facts from omitted
     # conversation content, without persisting that content.
-    observed = adapter.parse(raw_event, _normalize_input_data(input_data), session_ctx=initial_session_ctx)
+    observed = canonical_event if input_unchanged else adapter.parse(
+        raw_event, original_data, session_ctx=initial_session_ctx,
+    )
     if canonical_event.event_id_source != "provider":
         # Unmapped fields can distinguish real callbacks (for example,
         # model_params-only thoughts). Include them in fallback identity.
@@ -4143,7 +4147,6 @@ def main() -> int:
     data["_hook_attributes"] = _CAPTURE_POLICY.attributes(captured_payload)
     if _safe_bool(os.getenv("IDE_OTEL_ENABLE_LOGS", "false")):
         data["_hook_log_body"] = captured_payload
-    data = _normalize_mcp_event_data(data, event_name, ide)
     sk = _session_key(data)
     session_ctx = initial_session_ctx if sk == initial_session_key else _load_session_context(sk)
     if sk and session_ctx is None and event_name not in _SESSION_START_EVENTS:
