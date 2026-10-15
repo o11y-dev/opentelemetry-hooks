@@ -3884,11 +3884,6 @@ def _set_tool_payload_attributes(span, event_name: str, data: dict) -> None:
 # ---------------------------------------------------------------------------
 # Memory enrichment (generation/session summaries)
 # ---------------------------------------------------------------------------
-def _aggregate_generation_memory(batch: list, repo_root: Optional[str] = None) -> dict:
-    """Backward-compatible wrapper for connector-based enrichment."""
-    return aggregate_generation_memory(batch, repo_root=repo_root)
-
-
 def _apply_memory_summary_attrs(span, prefix: str, summary: dict) -> None:
     """Attach memory summary attributes to a span."""
     files = summary.get("files") or []
@@ -3949,7 +3944,7 @@ def _flush_generation_unlocked(tracer, gen_key: str, session_ctx: Optional[dict]
         None
     )
     repo_root = (session_ctx or {}).get("repo_root")
-    memory_summary = _aggregate_generation_memory(batch, repo_root=repo_root)
+    memory_summary = aggregate_generation_memory(batch, repo_root=repo_root)
     first_event_data = batch[0].get("data") if batch else {}
 
     span_kind = SpanKind.INTERNAL if SpanKind is not None else None

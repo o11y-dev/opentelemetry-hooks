@@ -167,6 +167,8 @@ class CapturePolicy:
         numeric path components. Null leaves are omitted (unsupported on spans).
         Colliding normalized paths are all omitted, never silently overwritten.
         """
+        if self.span_include == ():
+            return {}
         if self.span_include is not None:
             payload = self.filter(payload, span_only=True)
         result, collisions = {}, set()
@@ -177,7 +179,9 @@ class CapturePolicy:
             nonlocal used_bytes, dropped
             key = self.mappings.get(path, f"hook.{path}")
             if key in result or key in collisions:
-                result.pop(key, None)
+                if key in result:
+                    removed = result.pop(key)
+                    used_bytes -= len(key.encode()) + len(json.dumps(removed, ensure_ascii=False).encode())
                 collisions.add(key)
                 dropped += 1
                 return

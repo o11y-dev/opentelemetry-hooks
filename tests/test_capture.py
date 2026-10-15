@@ -93,6 +93,19 @@ def test_collisions_are_reported_not_silently_overwritten():
     assert attrs["hook.capture.collisions"] == 1
 
 
+@pytest.mark.parametrize("keys,mappings", [
+    (("A-B", "a b", "a_b"), {}),
+    (("first", "second", "third"), {key: "hook.a_b" for key in ("first", "second", "third")}),
+])
+def test_collisions_release_byte_budget_once(keys, mappings):
+    # The first attribute takes all 14 bytes; its collisions must free those
+    # bytes exactly once, allowing z (10 bytes) but not zz (another 8 bytes).
+    payload = {key: ["é"] for key in keys}
+    payload.update({"z": "é", "zz": 1})
+    attrs = policy("full", mappings=mappings, max_attribute_bytes=14).attributes(payload)
+    assert attrs == {"hook.z": "é", "hook.capture.dropped_fields": 3, "hook.capture.collisions": 1}
+
+
 def test_limits_and_mapping():
     attrs = policy("full", max_attributes=2, mappings={"input_tokens": "observed.input_tokens"}).attributes(
         {"inputTokens": 5, "model": "example", "z": "too much"},

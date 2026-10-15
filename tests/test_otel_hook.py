@@ -135,7 +135,7 @@ class TestMemoryAggregation:
             {"event": "PostToolUse", "data": {"tool_name": "read", "file_path": "README.md"}},
             {"event": "AfterFileEdit", "data": {"file_path": "otel_hook.py", "tool_name": "edit"}},
         ]
-        summary = otel_hook._aggregate_generation_memory(batch)
+        summary = enrichment_connectors.aggregate_generation_memory(batch)
         assert summary["files"] == ["README.md", "otel_hook.py"]
         assert summary["tools"] == ["read", "edit"]
         assert summary["tool_counts"] == {"read": 2, "edit": 1}
