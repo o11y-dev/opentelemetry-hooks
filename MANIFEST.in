@@ -1,7 +1,7 @@
 include CHANGELOG.md
 include CONTRIBUTING.md
 include SECURITY.md
-recursive-include docs *.md
+recursive-include docs *.md *.json
 recursive-include examples *.json
 recursive-include examples *.md
 recursive-include examples *.ts
