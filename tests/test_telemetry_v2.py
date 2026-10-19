@@ -356,3 +356,13 @@ def test_correlated_mcp_alias_callbacks_do_not_create_extra_invocation_scopes():
         records = plan(state, event, data, 'g')
     assert sum(record['name'] == 'gen_ai.client.tool' for record in records) == 1
     assert sum(record['name'].startswith('gen_ai.client.hook.') for record in records) == 5
+
+
+def test_effective_privacy_and_log_settings_partition_pending_queues(runtime, monkeypatch):
+    fingerprints = []
+    for settings in ({}, {'capture': {'mask': True}}, {'capture': {'user_identity': True}}, {'logs': {'enabled': True}}):
+        for key in ('IDE_OTEL_MASK_PROMPTS', 'IDE_OTEL_CAPTURE_USER_IDENTITY', 'IDE_OTEL_ENABLE_LOGS'):
+            monkeypatch.delenv(key, raising=False)
+        hook._apply_config_env(settings)
+        fingerprints.append(hook._CAPTURE_POLICY.fingerprint)
+    assert len(set(fingerprints)) == 4

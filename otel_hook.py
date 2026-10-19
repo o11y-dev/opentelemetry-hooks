@@ -24,7 +24,7 @@ import threading
 import time
 import urllib.parse
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -693,7 +693,12 @@ def _apply_config_env(config: dict) -> None:
     for key, value in environment_settings(restrictions).items():
         os.environ[key] = _coerce_env_value(key, value)
     effective = merge_settings(config, restrictions)
-    _CAPTURE_POLICY = CapturePolicy.from_config(effective)
+    _CAPTURE_POLICY = replace(
+        CapturePolicy.from_config(effective),
+        mask=_safe_bool(os.getenv('IDE_OTEL_MASK_PROMPTS', 'false')),
+        logs_enabled=_safe_bool(os.getenv('IDE_OTEL_ENABLE_LOGS', 'false')),
+        user_identity=_safe_bool(os.getenv('IDE_OTEL_CAPTURE_USER_IDENTITY', 'false')),
+    )
     # Keep old queues separate so stricter policy never replays old content.
     # Local span paths stay stable for Reflect's existing watcher.
     global _SESSION_DIR, _BATCH_DIR, _LOCK_DIR

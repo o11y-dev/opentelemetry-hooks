@@ -71,6 +71,9 @@ class CapturePolicy:
     max_attribute_bytes: int = 32768
     max_log_body_bytes: int | None = None
     max_export_attempts: int = 3
+    mask: bool = False
+    logs_enabled: bool = False
+    user_identity: bool = False
 
     @property
     def content_enabled(self) -> bool:
@@ -88,7 +91,11 @@ class CapturePolicy:
         mode = config.get("mode", "metadata_only")
         if mode not in {"metadata_only", "selected_content", "full"}:
             raise ValueError(f"invalid capture.mode: {mode!r}")
-        kwargs = {"mode": mode}
+        kwargs = {"mode": mode, "logs_enabled": logs.get('enabled', False)}
+        for key in ('mask', 'user_identity'):
+            if key in config and type(config[key]) is not bool:
+                raise ValueError(f'capture.{key} must be a boolean')
+            kwargs[key] = config.get(key, False)
         for key in ("include", "exclude", "span_include"):
             if key == "span_include" and key not in config:
                 continue
@@ -282,7 +289,7 @@ def bound_runtime_payload(data: dict, policy: CapturePolicy) -> dict:
 
     facts = data.get('_payload_facts') or payload_facts(data)
     used, dropped = 0, 0
-    masked = _safe_bool(os.getenv('IDE_OTEL_MASK_PROMPTS', ''))
+    masked = policy.mask or _safe_bool(os.getenv('IDE_OTEL_MASK_PROMPTS', ''))
 
     def visit(value, depth):
         nonlocal used, dropped

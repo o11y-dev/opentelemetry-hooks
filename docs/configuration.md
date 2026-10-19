@@ -295,7 +295,8 @@ deadline. See [provider contracts](hook-coverage.md) for first-party sources.
 application-level export attempts per buffered generation or streaming record.
 Exhausted records are retained in policy-local `*.quarantine.json` files with
 original IDs/timestamps and an `export_attempts_exhausted` reason. Changing this
-setting or the log-body limit changes the policy fingerprint and isolates queues.
+setting, the log-body limit, effective masking, user-identity capture or log
+enablement changes the policy fingerprint and isolates queues.
 Quarantined files require operator review and are not removed by stale cleanup.
 
 `capture.mask` masks canonical text previews before persistence and on spans.
