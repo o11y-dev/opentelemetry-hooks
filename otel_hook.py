@@ -29,6 +29,8 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from otel_hooks import bootstrap, enrichment
+from otel_hooks.streaming import plan as plan_streaming
+from otel_hooks.timing import PersistedIdGenerator, export_identity, new_span_id, boundaries
 from otel_hooks.lifecycle import BufferedEventDecision, ToolInvocationCorrelator, enrich_buffered_event
 from otel_hooks.workspace import _collect_repository_attributes, _resolve_repository_context
 from otel_hooks.identity import (
@@ -40,7 +42,7 @@ from otel_hooks.enrichment import (
     _apply_memory_summary_attrs, _set_if_present,
 )
 from otel_hooks.attributes import _OBSERVATION_FIELDS as _OBSERVATION_FIELDS
-from otel_hooks.capture import CapturePolicy
+from otel_hooks.capture import CapturePolicy, bound_runtime_payload
 from otel_hooks.config import (
     environment_settings, merge_settings,
     _coerce_env_value as _coerce_env_value,
@@ -171,9 +173,9 @@ class _TraceShim:
             return _REAL_TRACE.get_tracer_provider()
         return None
 
-    def get_tracer(self, _name: str):
+    def get_tracer(self, _name: str, version=None):
         if _REAL_TRACE is not None:
-            return _REAL_TRACE.get_tracer(_name)
+            return _REAL_TRACE.get_tracer(_name, version)
         return None
 
     def get_current_span(self):
@@ -434,6 +436,10 @@ def _cleanup_state() -> None:
             path = os.path.join(_BATCH_DIR, name)
             try:
                 if not os.path.isfile(path) or os.path.getmtime(path) >= cutoff:
+                    continue
+                if name.endswith('.quarantine.json'):
+                    continue
+                if name.endswith('.identity.json') and os.path.exists(path.removesuffix('.identity.json')):
                     continue
                 key = name.removesuffix(".jsonl")
                 events = _load_batch_events(key)
@@ -822,7 +828,7 @@ def _init_sdk_tracer_provider(resource_attrs: dict, disable_batch: bool) -> bool
     headers = _parse_otlp_headers(os.getenv("OTEL_EXPORTER_OTLP_HEADERS", ""))
 
     if not endpoint and _local_spans_enabled():
-        sdk_provider = SDKTracerProvider(resource=Resource.create(resource_attrs), shutdown_on_exit=_EXPORT_DEADLINE is None)
+        sdk_provider = SDKTracerProvider(resource=Resource.create(resource_attrs), id_generator=PersistedIdGenerator(), shutdown_on_exit=_EXPORT_DEADLINE is None)
         trace.set_tracer_provider(sdk_provider)
         _LOGGER.info("SDK TracerProvider ready (file-only mode, no OTLP endpoint)")
         return True
@@ -847,7 +853,7 @@ def _init_sdk_tracer_provider(resource_attrs: dict, disable_batch: bool) -> bool
 
     exporter = _DiagnosticExporter(exporter, "traces")
 
-    sdk_provider = SDKTracerProvider(resource=Resource.create(resource_attrs), shutdown_on_exit=_EXPORT_DEADLINE is None)
+    sdk_provider = SDKTracerProvider(resource=Resource.create(resource_attrs), id_generator=PersistedIdGenerator(), shutdown_on_exit=_EXPORT_DEADLINE is None)
     if disable_batch and _EXPORT_DEADLINE is None:
         sdk_provider.add_span_processor(SimpleSpanProcessor(exporter))
     else:
@@ -924,8 +930,14 @@ def _init_sdk_logger_provider(resource_attrs: dict, disable_batch: bool) -> bool
         logger_provider.add_log_record_processor(BatchLogRecordProcessor(exporter))
     set_logger_provider(logger_provider)
 
-    # Python logging → OTel log bridge handler
-    _OTEL_LOG_HANDLER = LoggingHandler(level=logging.DEBUG, logger_provider=logger_provider)
+    # Retain original observation/event times, including sub-microsecond precision.
+    from otel_hooks.serialization import CallbackLogTimeMixin
+
+    class CallbackLoggingHandler(CallbackLogTimeMixin, LoggingHandler):
+        def emit(self, record):
+            logger_provider.get_logger(record.name, _hook_distro_attributes().get('telemetry.distro.version')).emit(self._translate(record))
+
+    _OTEL_LOG_HANDLER = CallbackLoggingHandler(level=logging.DEBUG, logger_provider=logger_provider)
     _LOGS_INITIALIZED = True
     _LOGGER.info("SDK LoggerProvider ready (protocol=%s endpoint=%s)", protocol, endpoint)
     return True
@@ -1100,7 +1112,7 @@ def _init_tracing(
         resource_attrs.setdefault("gen_ai.client.wrapper", ide)
     resource_attrs.update(_hook_distro_attributes())
     resource_attrs.setdefault("gen_ai.client.telemetry_source", _TELEMETRY_SOURCE)
-    resource_attrs.setdefault("gen_ai.client.hook_schema_version", _HOOK_SCHEMA_VERSION)
+    resource_attrs["gen_ai.client.hook_schema_version"] = _HOOK_SCHEMA_VERSION
 
     # OS / host resource attributes (OTel semantic conventions)
     os_info = _get_os_info()
@@ -1152,16 +1164,19 @@ def _event_adapter_for(ide: str) -> ProviderEventAdapter:
 
 def _apply_operation_status(span, event_name: str, data: dict) -> None:
     """Set OTel status for real failures without leaking error descriptions."""
-    if data.get("is_interrupt"):
-        return
-    status = _lower_or_none(data.get("status") or data.get("mcp_status"))
-    is_error = bool(
-        event_name in {"ErrorOccurred", "PostToolUseFailure"}
-        or data.get("error") is not None
-        or status in {"error", "failed", "failure"}
-    )
-    if is_error and Status is not None and StatusCode is not None and hasattr(span, "set_status"):
+    if _operation_failed(event_name, data) and Status is not None and StatusCode is not None and hasattr(span, "set_status"):
         span.set_status(Status(StatusCode.ERROR))
+
+
+def _operation_failed(event_name: str, data: dict) -> bool:
+    if data.get('is_interrupt'):
+        return False
+    status = _lower_or_none(data.get('status') or data.get('mcp_status'))
+    return bool(data.get('_hook_failure_observed') or event_name in {'ErrorOccurred', 'PostToolUseFailure'}
+                or data.get('error') is not None
+                or (type(data.get('error_length')) in (int, float) and data['error_length'] > 0)
+                or status in {'error', 'failed', 'failure'}
+                or (type(data.get('exit_code')) is int and data['exit_code'] != 0))
 
 
 # ---------------------------------------------------------------------------
@@ -1170,6 +1185,7 @@ def _apply_operation_status(span, event_name: str, data: dict) -> None:
 def _get_otel_logger(name: str) -> logging.Logger:
     """Get or create a Python logger with the OTel log bridge handler attached."""
     logger = logging.getLogger(f"otel_hook.{name}")
+    logger.propagate = False
     if _OTEL_LOG_HANDLER is not None and _OTEL_LOG_HANDLER not in logger.handlers:
         logger.addHandler(_OTEL_LOG_HANDLER)
         logger.setLevel(logging.DEBUG)
@@ -1217,7 +1233,27 @@ def _emit_event_log(event_name: str, data: dict) -> None:
         if data.get(source) is not None:
             attrs[f"gen_ai.client.{target}"] = data[source]
     _inject_trace_context(attrs)
-    _get_otel_logger("hooks").info(body, extra=attrs)
+    if data.get('_hook_provider_adapter'):
+        attrs['gen_ai.client.hook.provider_adapter'] = data['_hook_provider_adapter']
+    invocation = data.get('tool_use_id') or data.get('tool_call_id') or data.get('call_id')
+    if invocation is not None:
+        attrs['gen_ai.tool.call.id'] = invocation
+    for key in ('event', 'observed'):
+        value = data.get('_hook_' + ('event_time_ns' if key == 'event' else 'observed_time_ns'))
+        if type(value) is int:
+            attrs['o11y.time.' + key + '_ns'] = value
+    attrs['gen_ai.client.hook_schema_version'] = _HOOK_SCHEMA_VERSION
+    attrs['o11y.capture.mode'] = _CAPTURE_POLICY.mode
+    attrs['o11y.capture.policy_id'] = _CAPTURE_POLICY.fingerprint
+    for key in ('tool_use_id', 'tool_call_id', 'agent_id'):
+        if data.get(key) is not None:
+            attrs['gen_ai.client.' + key] = data[key]
+    record = logging.LogRecord('otel_hook.hooks', logging.ERROR if _operation_failed(event_name, data) else logging.INFO,
+                               '', 0, body, (), None)
+    if data.get('_hook_event_time_ns') is not None:
+        record.created = data['_hook_event_time_ns'] / 1e9
+    record.__dict__.update(attrs)
+    _get_otel_logger('hooks').handle(record)
 
 
 # ---------------------------------------------------------------------------
@@ -1340,9 +1376,10 @@ def _new_session_context(data: dict, ide: str) -> dict:
     """Build a new session context without writing it."""
     upstream_ctx = _resolve_upstream_trace_context(data)
     ctx = {
+        "session_span_id": new_span_id(),
         "phantom_parent_id": f"{random.getrandbits(64):016x}",
         "trace_id": f"{random.getrandbits(128):032x}",
-        "start_time_ns": time.time_ns(),
+        "start_time_ns": data.get("_hook_event_time_ns") or data.get("_hook_observed_time_ns") or time.time_ns(),
         "ide": ide,
         "generation_count": 0,
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -1451,14 +1488,14 @@ def _maybe_enrich_session_context(session_key: Optional[str], session_ctx: Optio
 
 
 def _maybe_bind_session_to_upstream_context(session_key: Optional[str], session_ctx: Optional[dict], data: dict) -> Optional[dict]:
-    if not session_key or not session_ctx or session_ctx.get("context_origin") == "upstream":
+    if not session_key or not session_ctx or (session_ctx.get("context_origin") == "upstream" or session_ctx.get("identity_committed")):
         return session_ctx
     upstream_ctx = _resolve_upstream_trace_context(data)
     if upstream_ctx is None:
         return session_ctx
 
     def mutate(latest: dict) -> None:
-        if latest.get("context_origin") == "upstream":
+        if latest.get("context_origin") == "upstream" or latest.get("identity_committed"):
             return
         latest["trace_id"] = upstream_ctx["trace_id"]
         latest["upstream_parent_span_id"] = upstream_ctx["parent_span_id"]
@@ -1683,7 +1720,9 @@ def _batch_path(key: str) -> str:
 
 def _append_batch_event(key: str, event_name: str, data: dict) -> None:
     os.makedirs(_BATCH_DIR, exist_ok=True)
-    record = {"event": event_name, "timestamp_ns": time.time_ns(), "data": data}
+    observed = data.get('_hook_observed_time_ns') or time.time_ns()
+    record = {"event": event_name, "timestamp_ns": data.get('_hook_event_time_ns') or observed,
+              "observed_time_ns": observed, "span_id": new_span_id(), "data": data}
     lock_path = os.path.join(_LOCK_DIR, f"{re.sub(r'[^A-Za-z0-9_.-]+', '_', key)}.lock")
     with _acquire_lock(lock_path):
         with open(_batch_path(key), "a", encoding="utf-8") as fh:
@@ -1859,6 +1898,62 @@ def _prepare_streaming_session_event(
     return decision or BufferedEventDecision(None, data)
 
 
+def _emit_streaming_event(tracer, session_key, event_name, data, ide, generation_key):
+    """Persist scope and callback identities before retryable SDK export."""
+    data.setdefault('_hook_observed_time_ns', time.time_ns())
+    current, records = _update_session_context(
+        session_key, lambda latest: (list(latest.get('stream_outbox', [])) if data.get('_replay_only')
+                                     else plan_streaming(latest, event_name, data, generation_key)),
+    )
+    if not current or records is None:
+        return False
+    for record in records:
+        parent = _make_trace_context(record['trace_id'], record['parent_span_id'],
+                                     current.get('trace_flags', '01'), current.get('tracestate'))
+        with export_identity(record['trace_id'], record['span_id']):
+            span = tracer.start_span(record['name'], context=parent, start_time=record['start'],
+                                     links=_event_span_links(record['data'], current))
+        span.set_attribute('o11y.timing.basis', record['basis'])
+        span.set_attribute('o11y.timing.inferred', record['basis'] != 'matching_callback')
+        if record.get('missing'):
+            span.set_attribute('o11y.timing.missing_end', True)
+        with _span_context(span):
+            if record.get('scope_only'):
+                enrichment.populate_span(span, record['event'], record['data'], ide,
+                                         session_ctx=current, capture_policy=_CAPTURE_POLICY)
+                _apply_operation_status(span, record['event'], record['data'])
+            else:
+                _populate_span(span, record['event'], record['data'], ide, session_ctx=current)
+                _remember_agent_span_context(session_key, current, record['event'], record['data'], span)
+        span.set_attribute('o11y.span.role', record['name'].rsplit('.', 1)[-1] if record.get('scope_only') else 'callback')
+        if record['end'] < record['start']:
+            span.set_attribute('o11y.timing.end_before_start', True)
+        span.end(end_time=record['end'])
+    success = _force_flush_provider(authoritative_signal='traces')
+    if success:
+        exported = {record['span_id'] for record in records}
+        _update_session_context(session_key, lambda latest: latest.__setitem__(
+            'stream_outbox', [r for r in latest.get('stream_outbox', []) if r['span_id'] not in exported]))
+    else:
+        def failed(latest):
+            retained = []
+            attempted = {record['span_id'] for record in records}
+            for record in latest.get('stream_outbox', []):
+                if record['span_id'] in attempted:
+                    record['attempts'] = record.get('attempts', 0) + 1
+                if record.get('attempts', 0) >= _CAPTURE_POLICY.max_export_attempts:
+                    _atomic_write_json(os.path.join(_BATCH_DIR, record['span_id'] + '.quarantine.json'), {
+                        'record': record, 'trace_id': latest['trace_id'],
+                        'policy_id': _CAPTURE_POLICY.fingerprint, 'reason': 'export_attempts_exhausted',
+                    })
+                    _LOGGER.error('Streaming export attempts exhausted; policy-filtered record quarantined')
+                else:
+                    retained.append(record)
+            latest['stream_outbox'] = retained
+        _update_session_context(session_key, failed)
+    return success
+
+
 def _complete_generation_state(session_key: str, gen_key: str, memory: Optional[dict] = None) -> None:
     def mutate(session_ctx: dict) -> None:
         pending = session_ctx.get("pending_generations")
@@ -1870,12 +1965,12 @@ def _complete_generation_state(session_key: str, gen_key: str, memory: Optional[
         invocations = session_ctx.get("tool_invocations")
         if isinstance(invocations, list):
             session_ctx["tool_invocations"] = [
-                item for item in invocations if item.get("generation_key") != gen_key
+                item for item in invocations if item.get("generation_key") != gen_key or item.get("state") == "open"
             ]
         agents = session_ctx.get("agent_invocations")
         if isinstance(agents, list):
             session_ctx["agent_invocations"] = [
-                item for item in agents if item.get("generation_key") != gen_key
+                item for item in agents if item.get("generation_key") != gen_key or item.get("state") == "open"
             ]
         seen = session_ctx.get("seen_events")
         if isinstance(seen, list):
@@ -2031,7 +2126,7 @@ def _session_trace_context(session_ctx: Optional[dict]):
         return None
     return _make_trace_context(
         session_ctx.get("trace_id", "0"),
-        session_ctx.get("upstream_parent_span_id") or session_ctx.get("phantom_parent_id", "0"),
+        session_ctx.get("session_span_id") or session_ctx.get("upstream_parent_span_id") or session_ctx.get("phantom_parent_id", "0"),
         session_ctx.get("trace_flags", "01"),
         session_ctx.get("tracestate"),
     )
@@ -2114,6 +2209,13 @@ def _agent_relationship_links(data: dict, session_ctx: Optional[dict]) -> list:
 def _event_span_links(data: dict, session_ctx: Optional[dict]) -> list:
     links = _native_span_links(data)
     links.extend(_agent_relationship_links(data, session_ctx))
+    upstream = _resolve_upstream_trace_context(data)
+    if upstream and session_ctx and session_ctx.get('identity_committed') and upstream['trace_id'] != session_ctx.get('trace_id'):
+        if SpanContext is not None and Link is not None:
+            context = SpanContext(trace_id=int(upstream['trace_id'], 16), span_id=int(upstream['parent_span_id'], 16),
+                                  is_remote=True, trace_flags=TraceFlags(int(upstream.get('trace_flags', '01'), 16)),
+                                  trace_state=TraceState())
+            links.append(Link(context, attributes={'o11y.relationship': 'late_upstream'}))
     return links
 
 
@@ -2124,8 +2226,11 @@ def _remember_agent_span_context(
     data: dict,
     span,
 ) -> None:
-    if event_name != "SubagentStart" or not session_key or not session_ctx or not data.get("agent_id"):
+    is_agent = event_name == 'SubagentStart' and data.get('agent_id')
+    is_tool = event_name == 'PreToolUse' and data.get('tool_use_id')
+    if not (is_agent or is_tool) or not session_key or not session_ctx:
         return
+    collection, identity_key = ('agent_invocations', 'agent_id') if is_agent else ('tool_invocations', 'tool_use_id')
     try:
         context = span.get_span_context()
         if context is None or not context.is_valid:
@@ -2136,15 +2241,15 @@ def _remember_agent_span_context(
         return
 
     def mutate(latest: dict) -> None:
-        for invocation in reversed(latest.get("agent_invocations", [])):
-            if invocation.get("agent_id") == data.get("agent_id"):
+        for invocation in reversed(latest.get(collection, [])):
+            if invocation.get(identity_key) == data.get(identity_key):
                 invocation["start_trace_id"] = trace_id
                 invocation["start_span_id"] = span_id
                 break
 
     _update_session_context(session_key, mutate)
-    for invocation in reversed(session_ctx.get("agent_invocations", [])):
-        if invocation.get("agent_id") == data.get("agent_id"):
+    for invocation in reversed(session_ctx.get(collection, [])):
+        if invocation.get(identity_key) == data.get(identity_key):
             invocation["start_trace_id"] = trace_id
             invocation["start_span_id"] = span_id
             break
@@ -2182,6 +2287,25 @@ def _flush_generation_unlocked(tracer, gen_key: str, session_ctx: Optional[dict]
             session_ctx,
         )
 
+    identity_path = _batch_path(gen_key) + '.identity.json'
+    try:
+        with open(identity_path, encoding='utf-8') as fh:
+            identity = json.load(fh)
+    except FileNotFoundError:
+        identity = {'span_id': new_span_id(), 'trace_id': (session_ctx or {}).get('trace_id') or uuid.uuid4().hex,
+                    'callbacks': {}}
+    for entry in batch:
+        key = entry.get('span_id') or (entry.get('data') or {}).get('_hook_event_id')
+        if key is None:
+            key = str(batch.index(entry))
+        entry['span_id'] = identity['callbacks'].setdefault(key, entry.get('span_id') or new_span_id())
+    _atomic_write_json(identity_path, identity)
+    if session_ctx is not None:
+        session_ctx['identity_committed'] = True
+        owner = _session_key(batch[0].get('data') or {})
+        if owner:
+            _update_session_context(owner, lambda latest: latest.__setitem__('identity_committed', True))
+    intervals = boundaries(batch)
     first_ts = batch[0].get("timestamp_ns") or time.time_ns()
     last_ts = batch[-1].get("timestamp_ns") or time.time_ns()
 
@@ -2200,12 +2324,20 @@ def _flush_generation_unlocked(tracer, gen_key: str, session_ctx: Optional[dict]
     first_event_data = batch[0].get("data") if batch else {}
 
     span_kind = SpanKind.INTERNAL if SpanKind is not None else None
-    gen_span = tracer.start_span(
-        "gen_ai.client.generation", kind=span_kind,
-        context=parent_ctx, start_time=first_ts,
-    )
+    with export_identity(identity['trace_id'], identity['span_id']):
+        gen_span = tracer.start_span(
+            "gen_ai.client.generation", kind=span_kind,
+            context=parent_ctx, start_time=first_ts,
+        )
     gen_ctx = trace.set_span_in_context(gen_span)
+    agent_parents = {item['agent_id']: item['start_span_id']
+                     for item in (session_ctx or {}).get('agent_invocations', [])
+                     if item.get('agent_id') and item.get('start_span_id')}
+    tool_parents = {(item.get('agent_id'), item['tool_use_id']): item['start_span_id']
+                    for item in (session_ctx or {}).get('tool_invocations', [])
+                    if item.get('tool_use_id') and item.get('start_span_id')}
     with _span_context(gen_span):
+        gen_span.set_attribute("o11y.span.role", "generation")
         gen_span.set_attribute("gen_ai.client.generation_id", gen_key)
         _set_if_present(
             gen_span,
@@ -2224,13 +2356,30 @@ def _flush_generation_unlocked(tracer, gen_key: str, session_ctx: Optional[dict]
             evt = entry.get("event") or "unknown"
             evt_data = entry.get("data") or {}
             ts = entry.get("timestamp_ns") or time.time_ns()
-            next_ts = batch[idx + 1].get("timestamp_ns") if idx + 1 < len(batch) else ts + 1_000_000
+            next_ts, timing_basis, missing_end = intervals[idx]
 
-            span = tracer.start_span(
-                f"gen_ai.client.hook.{evt}", kind=span_kind,
-                context=gen_ctx, start_time=ts,
-                links=_event_span_links(evt_data, session_ctx),
-            )
+            callback_parent = gen_ctx
+            agent_id = evt_data.get('agent_id') or evt_data.get('subagent_id')
+            tool_id = evt_data.get('tool_use_id') or evt_data.get('tool_call_id') or evt_data.get('call_id')
+            parent_id = agent_parents.get(agent_id) if evt != 'SubagentStart' else agent_parents.get(evt_data.get('parent_agent_id'))
+            if tool_id and evt in {'PostToolUse', 'PostToolUseFailure', 'AfterMCPExecution', 'AfterShellExecution'}:
+                parent_id = tool_parents.get((agent_id, tool_id)) or parent_id
+            if parent_id:
+                callback_parent = _make_trace_context(identity['trace_id'], parent_id)
+            if evt == 'SubagentStart' and agent_id:
+                agent_parents[agent_id] = entry['span_id']
+            if evt in {'PreToolUse', 'BeforeMCPExecution', 'BeforeShellExecution'} and tool_id:
+                tool_parents[(agent_id, tool_id)] = entry['span_id']
+            with export_identity(identity['trace_id'], entry['span_id']):
+                span = tracer.start_span(
+                    f"gen_ai.client.hook.{evt}", kind=span_kind,
+                    context=callback_parent, start_time=ts,
+                    links=_event_span_links(evt_data, session_ctx),
+                )
+            span.set_attribute('o11y.timing.basis', timing_basis)
+            span.set_attribute('o11y.timing.inferred', timing_basis != 'matching_callback')
+            if missing_end:
+                span.set_attribute('o11y.timing.missing_end', True)
             with _span_context(span):
                 _populate_span(span, evt, evt_data, ide, session_ctx=session_ctx, batch_model=batch_model)
                 _remember_agent_span_context(
@@ -2240,17 +2389,33 @@ def _flush_generation_unlocked(tracer, gen_key: str, session_ctx: Optional[dict]
                     evt_data,
                     span,
                 )
+            span.set_attribute('o11y.span.role', 'callback_scope' if evt in {'PreToolUse', 'SubagentStart', 'BeforeShellExecution', 'BeforeMCPExecution'} else 'callback')
             span.end(end_time=next_ts)
 
         gen_span.end(end_time=last_ts)
 
-    if session_ctx is not None:
-        session_memory = session_ctx.setdefault("memory", {})
-        merge_memory_summaries(session_memory, memory_summary, repo_root=repo_root)
-
     success = not flush or _force_flush_provider(authoritative_signal="traces")
     if success:
+        if session_ctx is not None:
+            session_memory = session_ctx.setdefault("memory", {})
+            merge_memory_summaries(session_memory, memory_summary, repo_root=repo_root)
         _clear_batch_events(gen_key)
+        try:
+            os.remove(identity_path)
+        except FileNotFoundError:
+            pass
+    else:
+        identity['attempts'] = identity.get('attempts', 0) + 1
+        if identity['attempts'] >= _CAPTURE_POLICY.max_export_attempts:
+            _atomic_write_json(identity_path + '.quarantine.json', {
+                'identity': identity, 'events': batch, 'session_context': session_ctx,
+                'policy_id': _CAPTURE_POLICY.fingerprint, 'reason': 'export_attempts_exhausted',
+            })
+            _clear_batch_events(gen_key)
+            os.remove(identity_path)
+            _LOGGER.error('Generation export attempts exhausted; policy-filtered records quarantined')
+        else:
+            _atomic_write_json(identity_path, identity)
     _LOGGER.info("Flushed generation %s (%d events)", gen_key, len(batch))
     return success
 
@@ -2266,7 +2431,7 @@ def _flush_generation(tracer, gen_key: str, session_ctx: Optional[dict], ide: st
 def _flush_session(tracer, session_key: str, session_ctx: dict, ide: str, flush: bool = True) -> bool:
     """Emit the root session span covering the full session duration."""
     start_ns = session_ctx.get("start_time_ns") or time.time_ns()
-    end_ns = time.time_ns()
+    end_ns = session_ctx.get("end_time_ns") or time.time_ns()
     session_batch = sorted(
         _load_batch_events(f"{session_key}_session"),
         key=lambda e: e.get("timestamp_ns") or 0,
@@ -2276,22 +2441,30 @@ def _flush_session(tracer, session_key: str, session_ctx: dict, ide: str, flush:
     parent_ctx = _session_trace_context(session_ctx)
 
     span_kind = SpanKind.INTERNAL if SpanKind is not None else None
-    session_span = tracer.start_span(
-        "gen_ai.client.session", kind=span_kind,
-        context=parent_ctx, start_time=start_ns,
-    )
+    # Children already reference this persisted session ID. The session itself
+    # is parented only to a validated upstream context, never to itself.
+    parent_ctx = (_make_trace_context(session_ctx['trace_id'], session_ctx['upstream_parent_span_id'],
+                                    session_ctx.get('trace_flags', '01'), session_ctx.get('tracestate'))
+                  if session_ctx.get('upstream_parent_span_id') else None)
+    with export_identity(session_ctx['trace_id'], session_ctx.get('session_span_id') or new_span_id()):
+        session_span = tracer.start_span(
+            "gen_ai.client.session", kind=span_kind,
+            context=parent_ctx, start_time=start_ns,
+        )
     with _span_context(session_span):
         for entry in session_batch:
             data = entry.get("data") or {}
             event = entry["event"]
             timestamp = entry.get("timestamp_ns") or end_ns
-            hook_span = tracer.start_span(
-                f"gen_ai.client.hook.{event}", kind=span_kind,
-                context=trace.set_span_in_context(session_span), start_time=timestamp,
-            )
+            with export_identity(session_ctx['trace_id'], entry.get('span_id') or new_span_id()):
+                hook_span = tracer.start_span(
+                    f"gen_ai.client.hook.{event}", kind=span_kind,
+                    context=trace.set_span_in_context(session_span), start_time=timestamp,
+                )
             with _span_context(hook_span):
                 _populate_span(hook_span, event, data, ide, session_ctx=session_ctx)
             hook_span.end(end_time=timestamp)
+        session_span.set_attribute("o11y.span.role", "session")
         session_span.set_attribute("gen_ai.client.session_id", session_key)
         _set_if_present(session_span, "gen_ai.agent.id", session_ctx.get("root_agent_id"))
         _set_if_present(
@@ -2327,11 +2500,19 @@ def _finalize_session(
     with _acquire_lock(finalize_lock):
         current_ctx, _result = _update_session_context(
             session_key,
-            lambda latest: latest.__setitem__("finalizing", True),
+            lambda latest: latest.update({'finalizing': True, 'end_time_ns': latest.get('end_time_ns') or time.time_ns()}),
         )
         if not current_ctx:
             return True
         session_ctx = current_ctx
+        if any(session_ctx.get(key) for key in ('stream_scopes', 'stream_outbox', 'stream_generations')):
+            # Maintenance closes missing scope callbacks, without fabricating a
+            # callback log or changing the original observed timestamps.
+            if not _emit_streaming_event(tracer, session_key, 'SessionEnd', {
+                'session_id': session_key, '_hook_observed_time_ns': session_ctx['end_time_ns'],
+                '_scope_closure_only': True, '_hook_timeout': True,
+            }, ide, None):
+                return False
         pending = _pending_batch_keys_for_session(session_key, session_ctx)
         session_ctx["generation_count"] = max(session_ctx.get("generation_count", 0), len(pending))
         for gen_key in pending:
@@ -2369,6 +2550,7 @@ def main() -> int:
     input_data = _load_input()
     if not isinstance(input_data, dict):
         input_data = {}
+    observed_time_ns = time.time_ns()
     original_data = data = _normalize_input_data(input_data)
     raw_event = _get_event_name(data, override=_CLI_HOOK_EVENT)
     ide = _detect_ide(data)
@@ -2400,18 +2582,31 @@ def main() -> int:
         raw_event, original_data, session_ctx=initial_session_ctx,
     )
     if canonical_event.event_id_source != "provider":
-        # Unmapped fields can distinguish real callbacks (for example,
-        # model_params-only thoughts). Include them in fallback identity.
-        data["_hook_event_id"] = "hook:" + _hash_text(json.dumps(
-            [observed.event_id, input_data], sort_keys=True, ensure_ascii=False,
-        ))
+        # Content equality is not callback identity. Generate once at observation,
+        # then persist it with the record for replay.
+        data['_hook_event_id'] = 'hook:' + str(uuid.uuid4())
+    if _operation_failed(event_name, original_data):
+        data['_hook_failure_observed'] = True
+    data['_hook_observed_time_ns'] = observed_time_ns
+    event_ns = input_data.get('timestamp_ns')
+    if type(event_ns) is int and event_ns > 0:
+        data['_hook_event_time_ns'] = event_ns
+    else:
+        data['_hook_event_time_ns'] = observed_time_ns
+    data['_payload_facts'] = {**data.get('_payload_facts', {}), **observed.to_lifecycle_data().get('_payload_facts', {})}
     records = data.setdefault("_conversation_records", [])
     retained = {record["kind"] for record in records}
-    records.extend({"kind": record.kind, "role": record.role, "length": record.length, "sha256": record.sha256}
+    records.extend({"kind": record.kind, "role": record.role, "length": record.length, "bytes": record.bytes, "sha256": record.sha256}
                    for record in observed.conversation if record.kind not in retained)
     data["_hook_attributes"] = _CAPTURE_POLICY.attributes(captured_payload)
     if _safe_bool(os.getenv("IDE_OTEL_ENABLE_LOGS", "false")):
-        data["_hook_log_body"] = captured_payload
+        log_size = len(json.dumps(captured_payload, ensure_ascii=False, separators=(',', ':')).encode('utf-8'))
+        limit = _CAPTURE_POLICY.max_log_body_bytes
+        if limit is not None and log_size > limit:
+            data['_hook_log_body'] = {'o11y.body.omitted_reason': 'max_body_bytes', 'o11y.body.bytes': log_size}
+        else:
+            data['_hook_log_body'] = captured_payload
+    data = bound_runtime_payload(data, _CAPTURE_POLICY)
     sk = _session_key(data)
     session_ctx = initial_session_ctx if sk == initial_session_key else _load_session_context(sk)
     if sk and session_ctx is None and event_name not in _SESSION_START_EVENTS:
@@ -2442,15 +2637,21 @@ def main() -> int:
             _emit_stdout_response(event_name, ide, data)
             return 0
 
-    if not _init_tracing(
-        ide,
-        client_name=_resolve_client_name(ide, data=data, agent_engine=agent_engine, session_ctx=session_ctx),
-        resource_attributes=_collect_repository_attributes(data, session_ctx=session_ctx),
-    ):
+    try:
+        initialized = _init_tracing(
+            ide,
+            client_name=_resolve_client_name(ide, data=data, agent_engine=agent_engine, session_ctx=session_ctx),
+            resource_attributes=_collect_repository_attributes(data, session_ctx=session_ctx),
+        )
+    except Exception as exc:
+        # Invalid exporters must not consume the harness protocol response.
+        _LOGGER.warning('Telemetry initialization failed (%s)', type(exc).__name__)
+        initialized = False
+    if not initialized:
         _emit_stdout_response(event_name, ide, data)
         return 0
 
-    tracer = trace.get_tracer("ide-hooks")
+    tracer = trace.get_tracer("ide-hooks", _hook_distro_attributes().get("telemetry.distro.version"))
     # Codex only allows up to three seconds for these callbacks. Spend that
     # budget on the current session, leaving stale maintenance to other hooks.
     if not (ide == "codex" and event_name in {"SessionEnd", "Interrupt"}):
@@ -2541,21 +2742,28 @@ def main() -> int:
         if sk and event_name not in _SESSION_START_EVENTS and event_name not in _SESSION_END_EVENTS:
             streaming_decision = _prepare_streaming_session_event(sk, event_name, data, ide)
             if streaming_decision.duplicate:
-                _emit_stdout_response(event_name, ide, streaming_decision.data)
-                return 0
+                if not (session_ctx or {}).get('stream_outbox'):
+                    _emit_stdout_response(event_name, ide, streaming_decision.data)
+                    return 0
+                streaming_decision.data['_replay_only'] = True
             data = streaming_decision.data
             session_ctx = _load_session_context(sk) or session_ctx
             if streaming_decision.correlated:
                 data = dict(data)
                 data["_mcp_correlated_evidence"] = True
 
-        with tracer.start_as_current_span(
-            f"gen_ai.client.hook.{event_name}", kind=SpanKind.INTERNAL,
-            context=parent_ctx,
-            links=_event_span_links(data, session_ctx),
-        ) as span:
-            _populate_span(span, event_name, data, ide, session_ctx=session_ctx)
-            _remember_agent_span_context(sk, session_ctx, event_name, data, span)
+        if sk:
+            if not _emit_streaming_event(tracer, sk, event_name, data, ide,
+                                         streaming_decision.generation_key if streaming_decision else None):
+                _emit_stdout_response(event_name, ide, data)
+                return 0
+        else:
+            with tracer.start_as_current_span(
+                f"gen_ai.client.hook.{event_name}", kind=SpanKind.INTERNAL,
+                context=parent_ctx, links=_event_span_links(data, session_ctx),
+            ) as span:
+                span.set_attribute('o11y.timing.basis', 'hook_execution')
+                _populate_span(span, event_name, data, ide, session_ctx=session_ctx)
 
         if (
             event_name in _GENERATION_END_EVENTS

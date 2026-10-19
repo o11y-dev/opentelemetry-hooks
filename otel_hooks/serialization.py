@@ -72,7 +72,9 @@ def _span_to_dict(span) -> dict:
             "span_id": format(link_context.span_id, "016x"),
             "attributes": dict(getattr(link, "attributes", {}) or {}),
         })
+    scope = getattr(span, 'instrumentation_scope', None)
     return {
+        "scope": {'name': getattr(scope, 'name', None), 'version': getattr(scope, 'version', None)},
         "name": span.name,
         "trace_id": format(ctx.trace_id, "032x") if ctx else None,
         "span_id": format(ctx.span_id, "016x") if ctx else None,
@@ -86,3 +88,12 @@ def _span_to_dict(span) -> dict:
     }
 
 
+class CallbackLogTimeMixin:
+    """Preserve nanosecond hook observation times across the Python log bridge."""
+    def _translate(self, record):
+        translated = super()._translate(record)
+        for key, target in (('o11y.time.event_ns', 'timestamp'), ('o11y.time.observed_ns', 'observed_timestamp')):
+            value = record.__dict__.get(key)
+            if type(value) is int:
+                setattr(translated, target, value)
+        return translated

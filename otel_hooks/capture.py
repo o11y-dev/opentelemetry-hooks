@@ -39,7 +39,7 @@ native_trace_id native_span_id native_parent_span_id native_source
 input_tokens prompt_tokens output_tokens completion_tokens total_tokens
 cache_read_tokens cache_write_tokens cache_read_input_tokens
 cache_creation_input_tokens cache_creation_tokens cached_input_tokens
-temperature top_p top_k max_tokens frequency_penalty presence_penalty seed
+reasoning_tokens cached_tokens usage_semantics is_partial truncated temperature top_p top_k max_tokens frequency_penalty presence_penalty seed
 """.split())
 _NUMERIC = set("""
 duration duration_ms exit_code loop_count index context_tokens context_usage_percent
@@ -49,7 +49,7 @@ total_tokens cache_read_tokens cache_write_tokens cache_read_input_tokens
 cache_creation_input_tokens cache_creation_tokens cached_input_tokens temperature
 top_p top_k max_tokens frequency_penalty presence_penalty seed
 """.split())
-_BOOLEAN = {"is_interrupt", "stop_hook_active", "final", "is_first_compaction", "prompt_cache_warm"}
+_BOOLEAN = {"is_partial", "truncated", "is_interrupt", "stop_hook_active", "final", "is_first_compaction", "prompt_cache_warm"}
 _MISSING = object()
 
 
@@ -69,6 +69,8 @@ class CapturePolicy:
     max_depth: int = 16
     max_array_length: int = 128
     max_attribute_bytes: int = 32768
+    max_log_body_bytes: int | None = None
+    max_export_attempts: int = 3
 
     @property
     def content_enabled(self) -> bool:
@@ -101,6 +103,27 @@ class CapturePolicy:
             for k, v in mappings.items()
         ):
             raise ValueError("capture.mappings must map paths to lowercase attribute names")
+        # Canonical identity, status and accounting semantics are runtime-owned.
+        protected = ('gen_ai.usage.', 'gen_ai.client.hook', 'gen_ai.agent.',
+                     'gen_ai.conversation.', 'error.', 'o11y.', 'otel.')
+        if any(v.startswith(protected) or v in {'trace_id', 'span_id', 'parent_span_id', 'gen_ai.tool.call.id',
+                         'gen_ai.client.session_id', 'gen_ai.client.generation_id',
+                         'gen_ai.client.turn_id', 'gen_ai.client.status', 'gen_ai.client.tool_use_id',
+                         'gen_ai.client.name', 'gen_ai.client.agent_engine', 'gen_ai.client.exit_code',
+                         'gen_ai.provider.name', 'gen_ai.request.model', 'gen_ai.response.model',
+                         'gen_ai.operation.name', 'gen_ai.system'} for v in mappings.values()):
+            raise ValueError("capture.mappings cannot overwrite protected telemetry fields")
+        limit = logs.get('max_body_bytes')
+        if limit is not None and (type(limit) is not int or limit < 1):
+            raise ValueError("logs.max_body_bytes must be a positive integer")
+        kwargs['max_log_body_bytes'] = limit
+        batch = settings.get('batch', {})
+        if not isinstance(batch, dict):
+            raise ValueError('batch must be a JSON object')
+        attempts = batch.get('max_export_attempts', 3)
+        if type(attempts) is not int or attempts < 1:
+            raise ValueError('batch.max_export_attempts must be a positive integer')
+        kwargs['max_export_attempts'] = attempts
         kwargs["mappings"] = dict(mappings)
         for key in ("max_attributes", "max_string_length", "max_depth", "max_array_length", "max_attribute_bytes"):
             value = config.get(key, cls.__dataclass_fields__[key].default)
@@ -147,7 +170,7 @@ class CapturePolicy:
                 return _MISSING
             parts = path.split(".")
             # Known usage/request metadata containers have the same scalar schema.
-            permitted = len(parts) == 1 or (len(parts) == 2 and parts[0] in {"usage", "metadata", "model_params"})
+            permitted = len(parts) == 1 or (len(parts) == 2 and parts[0] in {"usage", "metadata", "model_params", "prompt_tokens_details", "completion_tokens_details"}) or (len(parts) == 3 and parts[0] == "usage" and parts[1] in {"prompt_tokens_details", "completion_tokens_details"})
             name = parts[-1]
             if not permitted or name not in _METADATA:
                 return _MISSING
@@ -228,3 +251,93 @@ class CapturePolicy:
         if collisions:
             result["hook.capture.collisions"] = len(collisions)
         return result
+
+
+def payload_facts(data: dict) -> dict:
+    """Measure original canonical payloads without retaining their content."""
+    from .parsers.common import _hash_text, _stringify
+    facts = {}
+    for label in ('tool_input', 'tool_output', 'tool_response', 'mcp_input', 'mcp_output'):
+        if data.get(label) is not None:
+            text = _stringify(data[label])
+            facts[label] = {'length': len(text), 'bytes': len(text.encode('utf-8')),
+                            'sha256': _hash_text(text), 'hash_basis': 'legacy_stringify_utf8',
+                            'serialization_version': '1'}
+            canonical = (json.dumps(data[label], ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+                         if isinstance(data[label], (dict, list)) else text)
+            facts[label]['bytes'] = len(canonical.encode('utf-8'))
+            facts[label]['fingerprint.sha256'] = _hash_text(canonical)
+            facts[label]['fingerprint.basis'] = 'sorted_compact_json_utf8' if isinstance(data[label], (dict, list)) else 'utf8_text'
+    return facts
+
+
+def bound_runtime_payload(data: dict, policy: CapturePolicy) -> dict:
+    """Bound parsed canonical previews before persistence; log bodies have their own limit.
+
+    Observation fingerprints are computed before this operation. JSON structures
+    remain valid; omitted fields and shortened previews are separately marked.
+    """
+    from .parsers.common import _mask_text, _safe_bool
+    import os
+
+    facts = data.get('_payload_facts') or payload_facts(data)
+    used, dropped = 0, 0
+    masked = _safe_bool(os.getenv('IDE_OTEL_MASK_PROMPTS', ''))
+
+    def visit(value, depth):
+        nonlocal used, dropped
+        if depth > policy.max_depth:
+            dropped += 1
+            return None
+        if isinstance(value, dict):
+            result = {}
+            # Facts and identifiers precede content in the persistence budget.
+            items = sorted(value.items(), key=lambda item: (
+                0 if type(item[1]) in (int, float, bool) or item[0].endswith(('id', 'sha256', 'length', 'bytes')) else 1))
+            for key, child in items:
+                if used >= policy.max_attribute_bytes:
+                    dropped += 1
+                    continue
+                used += len(key.encode('utf-8'))
+                if isinstance(child, str) and (key.endswith(('id', 'sha256')) or key.startswith('_hook_') or key == '_canonical_event_name'):
+                    size = len(child.encode('utf-8'))
+                    if used + size <= policy.max_attribute_bytes:
+                        result[key] = child
+                        used += size
+                    else:
+                        dropped += 1
+                else:
+                    result[key] = visit(child, depth + 1)
+            return result
+        if isinstance(value, list):
+            dropped += max(0, len(value) - policy.max_array_length)
+            return [visit(item, depth + 1) for item in value[:policy.max_array_length]]
+        if isinstance(value, str):
+            if len(value) > policy.max_string_length:
+                dropped += 1
+            value = value[:policy.max_string_length]
+            if masked:
+                value = _mask_text(value)
+            # Bound by remaining UTF-8 bytes without splitting a code point.
+            value = value.encode('utf-8')[:max(0, policy.max_attribute_bytes - used)].decode('utf-8', errors='ignore')
+            used += len(value.encode('utf-8'))
+        else:
+            used += len(json.dumps(value).encode('utf-8'))
+        return value
+
+    exempt = {'_hook_log_body', '_hook_attributes', '_conversation_records', '_payload_facts'}
+    result = visit({key: value for key, value in data.items() if key not in exempt}, 0)
+    result.update({key: data[key] for key in exempt if key in data and key != '_conversation_records'})
+    # Conversation facts are always retained; only the preview consumes a budget.
+    if '_conversation_records' in data:
+        result['_conversation_records'] = []
+        for record in data['_conversation_records']:
+            item = {key: value for key, value in record.items() if key != 'text'}
+            if 'text' in record:
+                item['text'] = visit(record['text'], 1)
+                item['preview_truncated'] = item['text'] != record['text']
+            result['_conversation_records'].append(item)
+    result['_payload_facts'] = facts
+    if dropped:
+        result['_canonical_dropped_fields'] = dropped
+    return result

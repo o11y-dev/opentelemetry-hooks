@@ -1443,7 +1443,7 @@ class TestCrossAgentBatchLifecycle:
         assert [span.name for span in tracer.spans].count("gen_ai.client.session") == 1
         assert not list((isolated_hook_state / "batches").glob("*.jsonl"))
 
-    def test_no_id_mcp_duplicate_is_bounded(self, isolated_hook_state):
+    def test_equal_no_id_mcp_callbacks_remain_distinct(self, isolated_hook_state):
         session_id = "no-id-mcp-session"
         otel_hook._create_session_context(session_id, {"session_id": session_id}, "cursor")
         payload = {
@@ -1458,8 +1458,8 @@ class TestCrossAgentBatchLifecycle:
             session_id, "BeforeMCPExecution", payload, "cursor"
         )
         assert not first.duplicate
-        assert duplicate.duplicate
-        assert len(otel_hook._load_batch_events(first.generation_key)) == 1
+        assert not duplicate.duplicate
+        assert len(otel_hook._load_batch_events(first.generation_key)) == 2
 
     def test_streaming_cursor_spans_correlated_dedicated_evidence(
         self, monkeypatch, isolated_hook_state
@@ -1560,6 +1560,7 @@ class TestCrossAgentBatchLifecycle:
         assert [event for event, _data in emitted] == [
             "PreToolUse",
             "BeforeMCPExecution",
+            "BeforeMCPExecution",
             "AfterMCPExecution",
             "PostToolUse",
         ]
@@ -1569,9 +1570,10 @@ class TestCrossAgentBatchLifecycle:
             for event, data in emitted
             if event in {"BeforeMCPExecution", "AfterMCPExecution"}
         ]
-        assert {data["tool_use_id"] for data in dedicated} == {tool_use_id}
+        assert {data.get("tool_use_id") for data in dedicated} == {tool_use_id, None}
         assert {data["mcp_server"] for data in dedicated} == {"reflect"}
-        assert all(data["_mcp_correlated_evidence"] for data in dedicated)
+        assert sum(bool(data.get("_mcp_correlated_evidence")) for data in dedicated) == 2
+        # Repeated no-ID observations remain visible without inventing parentage.
         post = next(data for event, data in emitted if event == "PostToolUse")
         assert post["tool_use_id"] == tool_use_id
         assert post["mcp_server"] == "reflect"

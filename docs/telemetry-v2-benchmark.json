@@ -1,0 +1,34 @@
+{
+  "baseline": {
+    "metadata_only": {
+      "processes": 18,
+      "median_cli_ms": 264.24,
+      "p95_cli_ms": 555.19,
+      "peak_rss_kib": 41212,
+      "mean_otlp_bytes_per_session": 11745
+    },
+    "full": {
+      "processes": 18,
+      "median_cli_ms": 260.66,
+      "p95_cli_ms": 652.37,
+      "peak_rss_kib": 41436,
+      "mean_otlp_bytes_per_session": 31001
+    }
+  },
+  "schema_v2": {
+    "metadata_only": {
+      "processes": 18,
+      "median_cli_ms": 275.29,
+      "p95_cli_ms": 416.37,
+      "peak_rss_kib": 41468,
+      "mean_otlp_bytes_per_session": 14643
+    },
+    "full": {
+      "processes": 18,
+      "median_cli_ms": 247.55,
+      "p95_cli_ms": 321.43,
+      "peak_rss_kib": 42532,
+      "mean_otlp_bytes_per_session": 34750
+    }
+  }
+}

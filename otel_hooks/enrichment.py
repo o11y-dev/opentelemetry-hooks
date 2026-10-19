@@ -8,6 +8,7 @@ import json
 import os
 from typing import Optional, Tuple
 
+from .telemetry import AttributeBudget, usage_attributes
 from .attributes import _EVENT_ATTR_MAP
 from .capture import CapturePolicy
 from .identity import _detect_client_version, _get_os_info, _resolve_client_name, _set_client_identity_attributes
@@ -20,7 +21,7 @@ from .parsers.models import ConversationRecord
 from .workspace import _workspace_observability_attributes
 
 
-_HOOK_SCHEMA_VERSION = "1"
+_HOOK_SCHEMA_VERSION = "2"
 
 _TELEMETRY_SOURCE = "hook"
 
@@ -284,8 +285,11 @@ def _apply_mcp_attributes(span, event_name: str, data: dict, *, capture_policy: 
 
 
 def _attach_content_fact(span, label: str, text: str, *, capture: bool) -> None:
-    if not text:
+    if text is None:
         return
+    span.set_attribute(f"gen_ai.client.{label}.bytes", len(text.encode("utf-8")))
+    span.set_attribute(f"gen_ai.client.{label}.hash_basis", "utf8_text")
+    span.set_attribute(f"gen_ai.client.{label}.serialization_version", "1")
     span.set_attribute(f"gen_ai.client.{label}.length", len(text))
     span.set_attribute(f"gen_ai.client.{label}.sha256", _hash_text(text))
     if capture:
@@ -312,7 +316,7 @@ def _conversation_records_from_data(data: dict, *, capture_policy: CapturePolicy
             continue
         if isinstance(length, int) and length >= 0 and isinstance(sha256, str) and sha256:
             retained_text = text if isinstance(text, str) and capture_policy.content_enabled else None
-            records.append(ConversationRecord(kind, role, retained_text, length, sha256))
+            records.append(ConversationRecord(kind, role, retained_text, length, sha256, item.get("bytes")))
         elif isinstance(text, str) and text:
             records.append(ConversationRecord.from_text(kind, role, text, capture=capture_policy.content_enabled))
     return tuple(records)
@@ -326,6 +330,11 @@ def _apply_conversation_attributes(span, event_name: str, data: dict, *, capture
         span.set_attribute("gen_ai.client.message.types", [record.kind for record in records])
         span.set_attribute("gen_ai.client.message.roles", [record.role for record in records])
     for record in records:
+        _set_if_present(span, f"gen_ai.client.{record.kind}.bytes", record.bytes)
+        span.set_attribute(f"gen_ai.client.{record.kind}.hash_basis", "utf8_text")
+        span.set_attribute(f"gen_ai.client.{record.kind}.serialization_version", "1")
+        if record.text is not None:
+            span.set_attribute(f"gen_ai.client.{record.kind}.preview_truncated", record.length > min(_text_max_chars(), capture_policy.max_string_length))
         span.set_attribute(f"gen_ai.client.{record.kind}.length", record.length)
         span.set_attribute(f"gen_ai.client.{record.kind}.sha256", record.sha256)
         if capture_policy.content_enabled and record.text is not None:
@@ -366,7 +375,9 @@ def _genai_operation(event_name: str) -> str:
         return "execute_tool"
     if event_name in _OP_AGENT_EVENTS:
         return "invoke_agent"
-    return "chat"
+    if event_name in {"UserPromptSubmit", "Stop", "BeforeModel", "AfterModel", "BeforeAgent", "AfterAgent"}:
+        return "chat"
+    return None
 
 
 def _genai_messages(
@@ -386,7 +397,7 @@ def _apply_genai_semconv(span, event_name: str, data: dict, ide: str, session_ct
     if provider is not None:
         span.set_attribute("gen_ai.provider.name", provider)
     span.set_attribute("gen_ai.system", _resolve_client_name(ide, data=data, session_ctx=session_ctx))
-    span.set_attribute("gen_ai.operation.name", _genai_operation(event_name))
+    _set_if_present(span, "gen_ai.operation.name", _genai_operation(event_name))
     _set_if_present(span, "gen_ai.conversation.id", data.get("conversation_id") or data.get("session_id"))
     _set_if_present(
         span,
@@ -406,6 +417,11 @@ def _apply_genai_semconv(span, event_name: str, data: dict, ide: str, session_ct
     if not model:
         model = os.getenv("CLAUDE_MODEL") or os.getenv("ANTHROPIC_MODEL")
 
+    if model:
+        model_basis = ('provider' if _first_present(data, ('request_model', 'model', 'model_name'))
+                       else 'session' if session_ctx and session_ctx.get('last_known_model')
+                       else 'generation' if batch_model else 'configuration')
+        span.set_attribute('o11y.model.basis', model_basis)
     _set_if_present(span, "gen_ai.request.model", model)
     _set_if_present(span, "gen_ai.response.model", _first_present(data, ("response_model",)))
     _set_if_present(span, "gen_ai.request.choice.count", _int_or_none(_first_present(data, ("choice_count",))))
@@ -415,36 +431,8 @@ def _apply_genai_semconv(span, event_name: str, data: dict, ide: str, session_ct
         _normalize_genai_output_type(_first_present(data, ("output_type", "response_format"))),
     )
 
-    # Token usage (top-level)
-    _set_if_present(span, "gen_ai.usage.input_tokens", _int_or_none(_first_present(data, ("input_tokens", "prompt_tokens"))))
-    _set_if_present(span, "gen_ai.usage.output_tokens", _int_or_none(_first_present(data, ("output_tokens", "completion_tokens"))))
-    _set_if_present(
-        span,
-        "gen_ai.usage.cache_creation.input_tokens",
-        _int_or_none(_first_present(data, ("cache_creation_input_tokens",))),
-    )
-    _set_if_present(
-        span,
-        "gen_ai.usage.cache_read.input_tokens",
-        _int_or_none(_first_present(data, ("cache_read_input_tokens",))),
-    )
-
-    # Token usage (nested)
-    usage = data.get("usage")
-    if isinstance(usage, dict):
-        _set_if_present(span, "gen_ai.usage.input_tokens", _int_or_none(_first_present(usage, ("input_tokens", "prompt_tokens"))))
-        _set_if_present(span, "gen_ai.usage.output_tokens", _int_or_none(_first_present(usage, ("output_tokens", "completion_tokens"))))
-        _set_if_present(
-            span,
-            "gen_ai.usage.cache_creation.input_tokens",
-            _int_or_none(_first_present(usage, ("cache_creation_input_tokens", "cache_creation_tokens"))),
-        )
-        _set_if_present(
-            span,
-            "gen_ai.usage.cache_read.input_tokens",
-            _int_or_none(_first_present(usage, ("cache_read_input_tokens", "cached_input_tokens"))),
-        )
-        _set_if_present(span, "gen_ai.usage.total_tokens", _int_or_none(_first_present(usage, ("total_tokens",))))
+    for key, value in usage_attributes(data, provider).items():
+        span.set_attribute(key, value)
 
     # Request params
     for source in (data, data.get("metadata") or {}):
@@ -487,8 +475,9 @@ def _set_tool_payload_attributes(span, event_name: str, data: dict) -> None:
                 span.set_attribute(f"gen_ai.client.{target}", value[:_text_max_chars()])
     for source, target in (("tool_input", "input"), ("tool_response", "response")):
         value = data.get(source)
-        length = _int_or_none(data.get(f"{source}_length"))
-        digest = data.get(f"{source}_sha256")
+        facts = (data.get("_payload_facts") or {}).get(source, {})
+        length = _int_or_none(data.get(f"{source}_length", facts.get("length")))
+        digest = data.get(f"{source}_sha256") or facts.get("sha256")
         if value is not None and (length is None or not digest):
             text = _stringify(value)
             length, digest = len(text), _hash_text(text)
@@ -524,10 +513,8 @@ def _apply_memory_summary_attrs(span, prefix: str, summary: dict) -> None:
 
 def populate_span(span, event_name: str, data: dict, ide: str, session_ctx: Optional[dict] = None, batch_model: Optional[str] = None, *, capture_policy: CapturePolicy, attach_os_attributes: bool = False) -> None:
     """Attach bounded hook fields and canonical attributes in priority order."""
-    # Add bounded provider fields first so canonical attributes retain priority
-    # when the SDK/backend imposes a smaller attribute count limit.
-    for key, value in (data.get("_hook_attributes") or {}).items():
-        span.set_attribute(key, value)
+    span = AttributeBudget(span, capture_policy)
+    span.set_attribute('o11y.span.role', 'callback')
     _set_client_identity_attributes(span, ide, data=data, session_ctx=session_ctx)
     _apply_enrichment_attributes(span, data, session_ctx=session_ctx)
 
@@ -543,7 +530,15 @@ def populate_span(span, event_name: str, data: dict, ide: str, session_ctx: Opti
     client_version = _detect_client_version(data, ide)
     _set_if_present(span, "gen_ai.client.version", client_version)
 
-    span.set_attribute("gen_ai.client.timestamp", datetime.now(timezone.utc).isoformat())
+    observed = data.get('_hook_observed_time_ns')
+    span.set_attribute("gen_ai.client.timestamp", (
+        datetime.fromtimestamp(observed / 1e9, timezone.utc).isoformat()
+        if observed is not None else datetime.now(timezone.utc).isoformat()
+    ))
+    _set_if_present(span, 'o11y.time.observed_ns', observed)
+    _set_if_present(span, 'o11y.time.event_ns', data.get('_hook_event_time_ns'))
+    span.set_attribute('o11y.capture.mode', capture_policy.mode)
+    span.set_attribute('o11y.capture.policy_id', capture_policy.fingerprint)
 
     # GenAI semantic conventions
     _apply_genai_semconv(span, event_name, data, ide, session_ctx=session_ctx, batch_model=batch_model, capture_policy=capture_policy)
@@ -559,10 +554,13 @@ def populate_span(span, event_name: str, data: dict, ide: str, session_ctx: Opti
     for label in ("tool_input", "tool_output", "mcp_input", "mcp_output"):
         value = data.get(label)
         if value is not None and not isinstance(value, dict):
-            _attach_content_fact(span, label, _stringify(value), capture=capture_policy.content_enabled)
+            if label not in (data.get("_payload_facts") or {}):
+                _attach_content_fact(span, label, _stringify(value), capture=capture_policy.content_enabled)
+            elif capture_policy.content_enabled:
+                _attach_text(span, label, _stringify(value))
 
     # Attach correlation last so large content cannot evict it from bounded
-    # SDK attribute storage. Explicit configured mappings still take precedence.
+    # SDK attribute storage. Protected mappings cannot replace these facts.
     span.set_attribute("gen_ai.client.hook.event", event_name)
     span.set_attribute("gen_ai.client.telemetry_source", _TELEMETRY_SOURCE)
     span.set_attribute("gen_ai.client.hook_schema_version", _HOOK_SCHEMA_VERSION)
@@ -579,8 +577,17 @@ def populate_span(span, event_name: str, data: dict, ide: str, session_ctx: Opti
     _set_if_present(span, "gen_ai.client.generation_id", data.get("generation_id"))
     _set_if_present(span, "gen_ai.client.turn_id", data.get("turn_id"))
 
-    # Explicit extraction mappings can override a canonical value. This lets
-    # consumers choose their field semantics without provider-specific switches.
-    for key in capture_policy.mappings.values():
-        if key in (data.get("_hook_attributes") or {}):
-            span.set_attribute(key, data["_hook_attributes"][key])
+    for label, facts in (data.get('_payload_facts') or {}).items():
+        for fact, value in facts.items():
+            span.set_attribute(f'gen_ai.client.{label}.{fact}', value)
+        alias = {'tool_input': 'tool.input', 'tool_response': 'tool.response'}.get(label)
+        if alias:
+            for fact in ('length', 'sha256'):
+                _set_if_present(span, f'gen_ai.client.{alias}.{fact}', facts.get(fact))
+    _set_if_present(span, 'o11y.capture.canonical_dropped_fields', data.get('_canonical_dropped_fields'))
+    _set_if_present(span, 'gen_ai.tool.call.id', data.get('tool_use_id') or data.get('tool_call_id') or data.get('call_id'))
+    if type(data.get('is_partial')) is bool:
+        span.set_attribute('o11y.result.completeness', 'partial' if data['is_partial'] else 'complete')
+    if type(data.get('truncated')) is bool:
+        span.set_attribute('o11y.result.provider_truncated', data['truncated'])
+    span.finish(data.get('_hook_attributes') or {})

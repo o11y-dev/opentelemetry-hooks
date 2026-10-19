@@ -15,6 +15,7 @@ class ConversationRecord:
     text: Optional[str] = None
     length: int = 0
     sha256: str = ""
+    bytes: Optional[int] = None
 
     @classmethod
     def from_text(cls, kind: str, role: str, text: str, *, capture: bool = False) -> "ConversationRecord":
@@ -25,6 +26,7 @@ class ConversationRecord:
             text=text if capture else None,
             length=len(text),
             sha256=_hash_text(text),
+            bytes=len(text.encode("utf-8")),
         )
 
 

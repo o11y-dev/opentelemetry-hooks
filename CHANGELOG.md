@@ -3,6 +3,9 @@
 ## Unreleased
 
 ### Added
+- Telemetry schema v2: original observation/event timing, provider-aware inclusive token accounting, UTF-8 payload facts, capture-policy provenance, protected identity/usage mappings and shared canonical/recursive attribute budgets.
+- Optional `logs.max_body_bytes` and bounded `batch.max_export_attempts` with retained policy-local quarantine records.
+- Persisted replay identities, branch-local buffered boundaries, streaming generation/tool/subagent scopes and nanosecond native log correlation with failure severity.
 - Enterprise upgrade/rollback guidance, explicit Reflect integration requirements, and security reporting and community support documentation.
 - Span-only `capture.span_include` allowlist with normalized paths and wildcards, retaining canonical span attributes and full permitted JSON logs. Examples select legacy hook field groups; a Reflect example includes file-path mappings.
 - Structured, unprefixed JSON settings with legacy `IDE_OTEL_*` compatibility; configurable metadata, selected-content and full hook capture across providers.

@@ -112,7 +112,8 @@ jobs:
             "tests/test_mcp_normalization.py",
             "tests/test_cli_boundaries.py",
             "tests/test_module_boundaries.py",
-            "tests/test_lifecycle.py"
+            "tests/test_lifecycle.py",
+            "tests/test_telemetry_v2.py"
           )
           Copy-Item $testFiles $tests
           Copy-Item tests/fixtures $tests -Recurse

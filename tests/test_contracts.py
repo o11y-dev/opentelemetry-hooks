@@ -133,13 +133,14 @@ def test_hook_logs_require_enabled_logging_and_a_captured_body(monkeypatch):
     body = {"session_id": "session-1", "error": "synthetic failure"}
     data = {"_hook_log_body": body}
     otel_hook._emit_event_log("ErrorOccurred", data)
-    logger.info.assert_not_called()
+    logger.handle.assert_not_called()
     monkeypatch.setattr(otel_hook, "_LOGS_INITIALIZED", True)
     otel_hook._emit_event_log("ErrorOccurred", {})
-    logger.info.assert_not_called()
+    logger.handle.assert_not_called()
     otel_hook._emit_event_log("ErrorOccurred", data)
-    logger.info.assert_called_once()
-    assert logger.info.call_args.args == (body,)
+    logger.handle.assert_called_once()
+    assert logger.handle.call_args.args[0].msg == body
+    assert logger.handle.call_args.args[0].levelno == 40
 
 
 def test_duplicate_prompt_and_concurrent_subagents_are_handled_independently(isolated_state):

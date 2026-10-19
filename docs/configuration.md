@@ -160,19 +160,21 @@ by `hook.capture.collisions`. Truncation/omission is reported through
 count budget. Keys are traversed deterministically.
 
 `mappings` maps normalized source paths to complete lowercase attribute names.
-It can rename fields or explicitly override an existing canonical attribute.
+It can rename extracted content fields. Mappings to protected callback, session,
+agent, invocation, status, usage, error, OTel or `o11y.*` fields are rejected.
 Mappings do not perform arithmetic, infer missing data or change log bodies.
-Generated fields are attached before canonical attributes so SDK attribute-count
-limits prioritize canonical correlation fields. Explicit mappings are applied
-last. SDK and backend limits may still remove attributes.
+Canonical identity and numerical facts receive budget priority before optional
+content and recursive extras. SDK and backend limits may still remove attributes.
 
 Recursive extraction handles metadata and tool input/response objects once. Map fields
 explicitly when a consumer requires an old flattened attribute name. Stable
 canonical identities, model/usage fields and conversation facts remain.
 
-Extraction limits apply to recursively generated attributes; canonical attributes
-retain their existing field-specific limits. These are not a maximum size for an
-entire exported span. The hook never attaches the entire callback JSON as a span
+The attribute count, string, array and byte limits cover canonical attributes
+and recursive extras together. Parsed canonical previews are also bounded before
+lifecycle persistence. Identity and original size/hash facts are retained in
+preference to bulky previews. Small diagnostic counters are emitted separately.
+These limits do not include the OTel envelope, Resource or protocol overhead. The hook never attaches the entire callback JSON as a span
 attribute.
 
 Filtering occurs before local lifecycle state and batch writes. Pure provider
@@ -205,9 +207,11 @@ MCP callbacks are retained in batches with
 additional tool invocations. A terminal callback can establish an incomplete
 session/generation when its start callback was unavailable.
 
-Full raw bodies intentionally are not truncated by span extraction limits. Large
-bodies may be rejected by a destination; use exclusions or a collector policy for
-that destination. The original JSON log body is buffered only when logs are enabled.
+Full raw bodies intentionally are not truncated by span extraction limits. Set
+`logs.max_body_bytes` to a positive integer to measure compact UTF-8 JSON before
+buffering; an oversized body becomes a small correlated reason body containing
+`o11y.body.omitted_reason=max_body_bytes` and `o11y.body.bytes`. JSON is never cut
+into invalid fragments. The default is no body limit; backend limits still apply. The original JSON log body is buffered only when logs are enabled.
 Policy-permitted parsed fields and extracted attributes are buffered for spans.
 Logs are best effort. A retained trace batch can replay its log on retry, so use
 `gen_ai.client.hook.event_id` for deduplication.
@@ -284,3 +288,19 @@ triggering-tool IDs remain distinct relationship attributes. Claude elicitation
 IDs and failure duration are retained. OpenCode plugin invocation IDs normalize
 to `tool_use_id`. Codex retains its tool/turn/session IDs and short callback export
 deadline. See [provider contracts](hook-coverage.md) for first-party sources.
+
+### Schema-v2 persistence and retry settings
+
+`batch.max_export_attempts` is a positive integer (default 3). It bounds automatic
+application-level export attempts per buffered generation or streaming record.
+Exhausted records are retained in policy-local `*.quarantine.json` files with
+original IDs/timestamps and an `export_attempts_exhausted` reason. Changing this
+setting or the log-body limit changes the policy fingerprint and isolates queues.
+Quarantined files require operator review and are not removed by stale cleanup.
+
+`capture.mask` masks canonical text previews before persistence and on spans.
+It does **not** alter policy-permitted original JSON log bodies or recursive
+`hook.*` source evidence. Use `capture.exclude`, `span_include`, metadata-only
+mode, or disable logs when those fields must not be retained. Exclusions apply to
+both canonical/source capture and raw logs; size/hash facts remain permitted.
+Never use preview masking as a substitute for a raw-content exclusion policy.

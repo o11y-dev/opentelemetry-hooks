@@ -18,7 +18,7 @@ from .common import (
     _generation_key_from_data,
     _normalize_mcp_event_data,
 )
-from ..capture import CapturePolicy
+from ..capture import CapturePolicy, payload_facts
 from .models import (
     ConversationRecord,
     AgentRelationship,
@@ -74,6 +74,7 @@ class BaseParser:
         event_name = event_name or self.canonical_event_name(original_event_name)
         normalized = dict(_normalize_input_data(data))
         self._normalize_provider_fields(event_name, normalized)
+        normalized['_payload_facts'] = payload_facts(normalized)
         conversation = tuple(self._conversation_records(event_name, normalized))
         event_id, event_id_source = self._event_identity(event_name, normalized, conversation, session_ctx)
         normalized["_hook_event_id"] = event_id
@@ -172,6 +173,7 @@ class BaseParser:
                     "kind": record.kind,
                     "role": record.role,
                     "length": record.length,
+                    "bytes": record.bytes,
                     "sha256": record.sha256,
                     **({"text": record.text} if capture and record.text is not None else {}),
                 }

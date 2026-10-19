@@ -3,7 +3,6 @@
 Callers own persistence and pass the active state lifetime and capture settings.
 """
 from dataclasses import dataclass
-import hashlib
 import uuid
 from typing import Optional, Tuple
 
@@ -126,10 +125,11 @@ class SessionEventDeduplicator:
                     window_seconds=window,
                 )
             return False
-        return self.seen(
-            _no_id_mcp_fingerprint(event_name, data, self.generation_key),
-            window_seconds=0.25,
-        )
+        event_id = data.get('_hook_event_id')
+        if event_id and (data.get('_hook_event_id_source') == 'provider' or data.get('_hook_observed_time_ns') is not None):
+            return self.seen(f'mcp-callback:{event_name}:{event_id}')
+        # Equal content without callback/invocation identity cannot prove replay.
+        return False
 
 
 class SubagentInvocationCorrelator:
@@ -240,27 +240,6 @@ class SubagentInvocationCorrelator:
         invocation["updated_at_ns"] = self.now_ns
         invocation["status"] = prepared.get("status") or "success"
         return prepared, False
-
-
-def _no_id_mcp_fingerprint(event_name: str, data: dict, generation_key: Optional[str]) -> str:
-    server, tool = data.get("mcp_server"), data.get("mcp_tool")
-    result = _first_present(data, ("result_json", "mcp_output", "tool_output", "output"))
-    result_hash = _hash_text(_stringify(result)) if result is not None else ""
-    error = data.get("error")
-    error_hash = _hash_text(str(error)) if error is not None else ""
-    supplied_time = _first_present(data, ("timestamp_ns", "timestamp", "event_time"))
-    payload = "|".join(str(value or "") for value in (
-        event_name,
-        server,
-        tool,
-        generation_key,
-        data.get("duration_ms") or data.get("duration"),
-        data.get("status"),
-        result_hash,
-        error_hash,
-        supplied_time,
-    ))
-    return f"mcp-fingerprint:{hashlib.sha256(payload.encode('utf-8')).hexdigest()}"
 
 
 def _store_mcp_result(invocation: dict, data: dict, *, capture_content: bool) -> None:
@@ -419,6 +398,7 @@ class ToolInvocationCorrelator:
         server, tool = data.get("mcp_server"), data.get("mcp_tool")
         self.invocations.append({
             "tool_use_id": invocation_id,
+            "agent_id": data.get("agent_id"),
             "tool_name": data.get("tool_name"),
             "tool_key": _event_tool_key(data),
             "mcp_server": server,

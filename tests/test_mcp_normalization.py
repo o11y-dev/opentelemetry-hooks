@@ -48,7 +48,7 @@ def test_parsed_identity_reaches_span_without_reinterpreting_raw_fields(
     if provider == "cursor":
         assert attrs["gen_ai.client.mcp.duration_ms"] == 123.0
     assert payload == original
-    assert mcp_runtime.info.call_args.args == (original,)
+    assert mcp_runtime.handle.call_args.args[0].msg == original
 
 
 @pytest.mark.parametrize("buffered", [False, True], ids=["streaming", "buffered"])
@@ -107,7 +107,7 @@ def test_cursor_correlation_preserves_duration_identity_and_raw_logs(mcp_runtime
     assert post["gen_ai.client.mcp.output.sha256"] == hook._hash_text('{"result": "found"}')
     if buffered:
         assert {attrs["gen_ai.client.mcp_server"] for attrs in emitted} == {"real-server"}
-    assert [call.args[0] for call in mcp_runtime.info.call_args_list] == [data for _, data in expected_raw]
+    assert [call.args[0].msg for call in mcp_runtime.handle.call_args_list] == [data for _, data in expected_raw]
     assert raw_events == expected_raw
 
 

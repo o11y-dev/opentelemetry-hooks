@@ -98,7 +98,7 @@ def test_filtered_conversation_keeps_original_hash_and_callback_identity(prepare
         assert ("text" in record) is has_text
         if not has_text:
             assert "secret" not in json.dumps(data)
-    assert len(identities) == 1
+    assert len(identities) == 5  # separate observations, even when content is identical
     changed, _ = prepare_callback({**payload, "future_field": {"revision": 2}}, CapturePolicy())
     assert changed["_hook_event_id"] not in identities
 

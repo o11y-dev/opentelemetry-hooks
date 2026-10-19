@@ -136,8 +136,9 @@ def test_primary_log_body_and_trace_correlation_without_legacy_fanout(monkeypatc
     monkeypatch.setattr(hook, "_get_otel_logger", lambda name: logger)
     body = {"toolInput": {"command": "echo hello"}, "unknown": [None, True, 42]}
     hook._emit_event_log("PreToolUse", {"_hook_attributes": {}, "_hook_log_body": body, "session_id": "s"})
-    assert logger.info.call_args.args == (body,)
-    assert logger.info.call_args.kwargs["extra"]["gen_ai.client.session_id"] == "s"
+    record = logger.handle.call_args.args[0]
+    assert record.msg == body
+    assert record.__dict__["gen_ai.client.session_id"] == "s"
 
 
 @pytest.mark.parametrize("mode", ["metadata_only", "selected_content", "full"])
@@ -346,14 +347,9 @@ def test_managed_legacy_value_beats_local_structured_value(isolated_runtime):
     assert not hook._batch_enabled()
 
 
-def test_mapping_can_override_canonical_semantics(isolated_runtime):
-    hook._apply_config_env({"capture": {"mode": "full", "mappings": {"uncached_input": "gen_ai.usage.input_tokens"}}})
-    span = Mock()
-    data = {"input_tokens": 100, "uncached_input": 25}
-    data["_hook_attributes"] = hook._CAPTURE_POLICY.attributes(data)
-    hook._populate_span(span, "Stop", data, "cursor")
-    attrs = {call.args[0]: call.args[1] for call in span.set_attribute.call_args_list}
-    assert attrs["gen_ai.usage.input_tokens"] == 25
+def test_mapping_cannot_override_canonical_semantics(isolated_runtime):
+    with pytest.raises(ValueError, match="protected"):
+        hook._apply_config_env({"capture": {"mode": "full", "mappings": {"uncached_input": "gen_ai.usage.input_tokens"}}})
 
 
 def test_correlated_cursor_callbacks_keep_original_evidence_in_batch(isolated_runtime):
@@ -435,9 +431,9 @@ def test_shell_mcp_and_conversation_evidence_stays_on_spans(
     attrs = {call.args[0]: call.args[1] for call in span.set_attribute.call_args_list}
     assert expected.items() <= attrs.items()
     assert payload not in attrs.values()
-    assert logger.info.call_count == int(logs_enabled)
+    assert logger.handle.call_count == int(logs_enabled)
     if logs_enabled:
-        assert logger.info.call_args.args == (payload,)
+        assert logger.handle.call_args.args[0].msg == payload
 
 
 def test_selected_array_fields_preserve_indices_without_retaining_siblings():
