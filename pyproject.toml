@@ -72,6 +72,20 @@ include = ["otel_hooks*"]
     "examples/capture/antigravity.example.json",
 ]
 
+"share/opentelemetry-hooks/examples/mdm" = [
+    "examples/mdm/README.md",
+    "examples/mdm/deploy-jamf.sh",
+    "examples/mdm/deploy-intune.ps1",
+    "examples/mdm/runtime-constraints.txt",
+    "examples/mdm/opentelemetry-hook.mobileconfig",
+    "examples/mdm/opentelemetry-hook.reg",
+    "examples/mdm/claude-shared.mobileconfig",
+    "examples/mdm/claude-shared.reg",
+]
+
+"share/opentelemetry-hooks/docs" = ["docs/*.md"]
+"share/opentelemetry-hooks/scripts" = ["scripts/build_mdm_bundle.py"]
+
 [tool.ruff]
 line-length = 120
 target-version = "py312"

@@ -55,6 +55,35 @@ large/concurrent session memory, Windows latency or production backend limits.
 
 ## Live coverage and rollout limits
 
+### Managed deployment extension
+
+The MDM extension adds explicit machine/user registration, per-event overlap
+suppression, enforced export policy, shared Claude settings, offline bundle
+generation and Jamf/Intune lifecycle scripts. The operator procedures and policy
+templates are in [managed deployment](managed-deployment.md).
+
+Local Linux validation covers registration upgrade/removal without discarding
+unrelated settings, interrupted atomic saves, partial/missing launchers, passive
+duplicate callbacks, shared-settings precedence, export override rejection,
+registry value types, SDK-independent management commands, profile/JSON templates,
+missing-file shell guards, and wheel hash locking. The focused managed/template
+suite passes 24 tests with one Windows-native test skipped on Linux.
+The broader Linux run, using temporary explicit project roots outside the
+repository, passed 702 tests with three platform skips; the three unchanged
+shell tests requiring no ancestor agent markers remain incompatible with this
+sandbox. Additional current managed tests were run separately after that run.
+Ruff, whitespace checks, wheel and source-distribution builds also pass locally.
+The rebuilt installed wheel passed 43 managed/template/schema-v2 tests outside
+the checkout; the Windows-native check and source-only bundle-builder test were
+skipped in that installed-wheel run.
+
+CI includes native Windows PowerShell parsing/launcher checks and macOS policy
+tests, plus target-specific wheelhouse resolution and hash-checked offline
+installation. These runner checks do not establish Jamf/Intune assignment,
+new-user onboarding, actual GUI harness behavior or live collector acceptance.
+Record those checks and credential rotation/rollback on managed pilot devices
+before broader rollout. No fleet deployment or live backend canary is claimed.
+
 No live Cursor, Claude, Codex, Gemini, Copilot, Windsurf, OpenCode or Antigravity
 vendor session was run for this change. Provider fixtures and the OpenCode Bun
 contract suite are replay evidence. Antigravity still uses a manual compatibility

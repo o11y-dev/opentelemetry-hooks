@@ -13,6 +13,10 @@ legacy flat keys. Nested managed objects merge into local objects.
 Managed structured `capture` and `logs` settings are the final authority, including
 when legacy environment flags conflict. `IDE_OTEL_SKIP_MDM` skips legacy managed
 settings only; it cannot skip these structured restrictions.
+Managed `enforce_export: true` also makes `OTEL_EXPORTER_OTLP*` values authoritative.
+It requires a managed generic endpoint and `grpc` or `http/protobuf` protocol;
+alternate inherited/local per-signal export settings are cleared. This mode cannot
+be bypassed with environment overrides or `IDE_OTEL_SKIP_MDM`.
 
 Every configuration uses the same capture and logging path. Omitting
 `capture.mode` selects `metadata_only`; logs default off. The
@@ -262,8 +266,20 @@ absent. Distribute nested `capture` and `logs` dictionaries, for example:
 ```
 
 Windows reads `SOFTWARE\Policies\OpenTelemetryHook` from HKCU then HKLM, so machine
-values win. Use JSON object strings for registry values named `capture` and
-`logs`. For standard/legacy scalar settings, use ordinary string values.
+values win. Use JSON object strings for registry values named `capture`, `logs`
+and the optional `claude` object. `enforce_export` is a JSON boolean string
+(`"true"` or `"false"`); other standard/legacy scalar settings use ordinary strings.
+
+For Claude only, `claude.shared_config: true` imports allowed native telemetry
+settings from the machine managed-settings file, then `~/.claude/remote-settings.json`,
+then `~/.claude/settings.json`. The first nonempty value per key wins; explicit
+hook settings override imported defaults. Enforced export excludes the user-file
+fallback and uses shared settings plus explicit MDM values, never local hook JSON.
+Only `OTEL_EXPORTER_OTLP*`, `OTEL_RESOURCE_ATTRIBUTES` and `OTEL_SERVICE_NAME` are
+imported; commands and arbitrary environment variables are not imported. Run the
+hook/doctor with `--claude` so its source is explicit. Doctor reports source paths
+and enforcement state without credential values. See the
+[deployment guide](managed-deployment.md) for policy templates and rotation.
 
 A managed mode fixes the mode for that device. Administrators should specify the
 complete permitted include/exclude policy rather than relying on user defaults.

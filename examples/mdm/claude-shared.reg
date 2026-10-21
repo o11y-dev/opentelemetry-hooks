@@ -1,0 +1,9 @@
+Windows Registry Editor Version 5.00
+
+; Claude-only: endpoint/auth come from Claude's managed env block.
+; Use -Agents claude and remove stale OTEL_EXPORTER_OTLP* hook policy values.
+[HKEY_LOCAL_MACHINE\SOFTWARE\Policies\OpenTelemetryHook]
+"enforce_export"="true"
+"claude"="{\"shared_config\":true}"
+"capture"="{\"mode\":\"metadata_only\"}"
+"logs"="{\"enabled\":false}"

@@ -139,6 +139,13 @@ limits, managed policy and compatibility details.
 
 ## Enterprise rollout
 
+Use the [managed deployment guide](docs/managed-deployment.md) and
+[Jamf/Intune templates](examples/mdm/README.md) for offline version-pinned staging,
+machine registration, detection/remediation and removal. `setup --global` is
+current-user scope; machine installation uses the separate `managed` commands.
+Claude can share native managed telemetry configuration with the hook. Installation
+health and verified backend delivery are separate checks.
+
 Start with a controlled pilot. The project is beta; validate the harness versions,
 workstation policies and destination limits used by your organization.
 

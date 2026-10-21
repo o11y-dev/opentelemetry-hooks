@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>PayloadContent</key>
+	<array>
+		<dict>
+			<key>OTEL_EXPORTER_OTLP_ENDPOINT</key>
+			<string>https://collector.example.com</string>
+			<key>OTEL_EXPORTER_OTLP_HEADERS</key>
+			<string>Authorization=REPLACE_THROUGH_MDM</string>
+			<key>OTEL_EXPORTER_OTLP_PROTOCOL</key>
+			<string>http/protobuf</string>
+			<key>PayloadDisplayName</key>
+			<string>OpenTelemetry Hook Policy</string>
+			<key>PayloadIdentifier</key>
+			<string>dev.o11y.opentelemetry-hook.opentelemetry-hook</string>
+			<key>PayloadType</key>
+			<string>dev.o11y.opentelemetry-hook</string>
+			<key>PayloadUUID</key>
+			<string>9e31e1dd-b114-518d-9d41-f10d09840a55</string>
+			<key>PayloadVersion</key>
+			<integer>1</integer>
+			<key>capture</key>
+			<dict>
+				<key>mode</key>
+				<string>metadata_only</string>
+			</dict>
+			<key>enforce_export</key>
+			<true/>
+			<key>logs</key>
+			<dict>
+				<key>enabled</key>
+				<false/>
+			</dict>
+		</dict>
+	</array>
+	<key>PayloadDisplayName</key>
+	<string>OpenTelemetry Hook opentelemetry-hook</string>
+	<key>PayloadIdentifier</key>
+	<string>dev.o11y.opentelemetry-hook.profile.opentelemetry-hook</string>
+	<key>PayloadType</key>
+	<string>Configuration</string>
+	<key>PayloadUUID</key>
+	<string>a506a460-b7fe-54f9-9d88-e5e15bdc5217</string>
+	<key>PayloadVersion</key>
+	<integer>1</integer>
+</dict>
+</plist>

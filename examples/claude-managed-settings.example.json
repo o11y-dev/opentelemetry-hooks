@@ -1,13 +1,359 @@
 {
-  "_comment": "Minimal Claude Code managed-settings.json snippet for org-wide Claude telemetry.",
-  "_comment_2": "This configures Claude Code itself. otel-hook still reads its own otel_config.json because Claude strips OTEL_* from hook subprocesses.",
+  "_comment": "Complete guarded native telemetry and hook registration example. Deliver with the Claude shared MDM policy. Choose script-generated machine hooks or centrally delivered hooks, not both.",
   "$schema": "https://json.schemastore.org/claude-code-settings.json",
   "env": {
     "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
     "OTEL_METRICS_EXPORTER": "otlp",
     "OTEL_LOGS_EXPORTER": "otlp",
-    "OTEL_EXPORTER_OTLP_PROTOCOL": "grpc",
-    "OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector.example.com:4317",
-    "OTEL_EXPORTER_OTLP_HEADERS": "Authorization=******"
+    "OTEL_EXPORTER_OTLP_PROTOCOL": "http/protobuf",
+    "OTEL_EXPORTER_OTLP_ENDPOINT": "https://collector.example.com",
+    "OTEL_EXPORTER_OTLP_HEADERS": "Authorization=REPLACE_THROUGH_MDM",
+    "OTEL_RESOURCE_ATTRIBUTES": "service.name=claude-code"
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 10,
+            "command": "case \"$(uname -s)\" in Darwin) hook='/Library/Application Support/OpenTelemetryHook/bin/otel-hook'; if [ -x \"$hook\" ]; then exec \"$hook\" --claude --managed; fi;; MINGW*|MSYS*|CYGWIN*) hook='C:/ProgramData/OpenTelemetryHook/bin/otel-hook.ps1'; if [ -f \"$hook\" ]; then exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$hook\" --claude --managed; fi;; esac; printf '{}\\n'"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 10,
+            "command": "case \"$(uname -s)\" in Darwin) hook='/Library/Application Support/OpenTelemetryHook/bin/otel-hook'; if [ -x \"$hook\" ]; then exec \"$hook\" --claude --managed; fi;; MINGW*|MSYS*|CYGWIN*) hook='C:/ProgramData/OpenTelemetryHook/bin/otel-hook.ps1'; if [ -f \"$hook\" ]; then exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$hook\" --claude --managed; fi;; esac; printf '{}\\n'"
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 10,
+            "command": "case \"$(uname -s)\" in Darwin) hook='/Library/Application Support/OpenTelemetryHook/bin/otel-hook'; if [ -x \"$hook\" ]; then exec \"$hook\" --claude --managed; fi;; MINGW*|MSYS*|CYGWIN*) hook='C:/ProgramData/OpenTelemetryHook/bin/otel-hook.ps1'; if [ -f \"$hook\" ]; then exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$hook\" --claude --managed; fi;; esac; printf '{}\\n'"
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 10,
+            "command": "case \"$(uname -s)\" in Darwin) hook='/Library/Application Support/OpenTelemetryHook/bin/otel-hook'; if [ -x \"$hook\" ]; then exec \"$hook\" --claude --managed; fi;; MINGW*|MSYS*|CYGWIN*) hook='C:/ProgramData/OpenTelemetryHook/bin/otel-hook.ps1'; if [ -f \"$hook\" ]; then exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$hook\" --claude --managed; fi;; esac; printf '{}\\n'"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 10,
+            "command": "case \"$(uname -s)\" in Darwin) hook='/Library/Application Support/OpenTelemetryHook/bin/otel-hook'; if [ -x \"$hook\" ]; then exec \"$hook\" --claude --managed; fi;; MINGW*|MSYS*|CYGWIN*) hook='C:/ProgramData/OpenTelemetryHook/bin/otel-hook.ps1'; if [ -f \"$hook\" ]; then exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$hook\" --claude --managed; fi;; esac; printf '{}\\n'"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 10,
+            "command": "case \"$(uname -s)\" in Darwin) hook='/Library/Application Support/OpenTelemetryHook/bin/otel-hook'; if [ -x \"$hook\" ]; then exec \"$hook\" --claude --managed; fi;; MINGW*|MSYS*|CYGWIN*) hook='C:/ProgramData/OpenTelemetryHook/bin/otel-hook.ps1'; if [ -f \"$hook\" ]; then exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$hook\" --claude --managed; fi;; esac; printf '{}\\n'"
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 10,
+            "command": "case \"$(uname -s)\" in Darwin) hook='/Library/Application Support/OpenTelemetryHook/bin/otel-hook'; if [ -x \"$hook\" ]; then exec \"$hook\" --claude --managed; fi;; MINGW*|MSYS*|CYGWIN*) hook='C:/ProgramData/OpenTelemetryHook/bin/otel-hook.ps1'; if [ -f \"$hook\" ]; then exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$hook\" --claude --managed; fi;; esac; printf '{}\\n'"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 10,
+            "command": "case \"$(uname -s)\" in Darwin) hook='/Library/Application Support/OpenTelemetryHook/bin/otel-hook'; if [ -x \"$hook\" ]; then exec \"$hook\" --claude --managed; fi;; MINGW*|MSYS*|CYGWIN*) hook='C:/ProgramData/OpenTelemetryHook/bin/otel-hook.ps1'; if [ -f \"$hook\" ]; then exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$hook\" --claude --managed; fi;; esac; printf '{}\\n'"
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 10,
+            "command": "case \"$(uname -s)\" in Darwin) hook='/Library/Application Support/OpenTelemetryHook/bin/otel-hook'; if [ -x \"$hook\" ]; then exec \"$hook\" --claude --managed; fi;; MINGW*|MSYS*|CYGWIN*) hook='C:/ProgramData/OpenTelemetryHook/bin/otel-hook.ps1'; if [ -f \"$hook\" ]; then exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$hook\" --claude --managed; fi;; esac; printf '{}\\n'"
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 10,
+            "command": "case \"$(uname -s)\" in Darwin) hook='/Library/Application Support/OpenTelemetryHook/bin/otel-hook'; if [ -x \"$hook\" ]; then exec \"$hook\" --claude --managed; fi;; MINGW*|MSYS*|CYGWIN*) hook='C:/ProgramData/OpenTelemetryHook/bin/otel-hook.ps1'; if [ -f \"$hook\" ]; then exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$hook\" --claude --managed; fi;; esac; printf '{}\\n'"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 10,
+            "command": "case \"$(uname -s)\" in Darwin) hook='/Library/Application Support/OpenTelemetryHook/bin/otel-hook'; if [ -x \"$hook\" ]; then exec \"$hook\" --claude --managed; fi;; MINGW*|MSYS*|CYGWIN*) hook='C:/ProgramData/OpenTelemetryHook/bin/otel-hook.ps1'; if [ -f \"$hook\" ]; then exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$hook\" --claude --managed; fi;; esac; printf '{}\\n'"
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 10,
+            "command": "case \"$(uname -s)\" in Darwin) hook='/Library/Application Support/OpenTelemetryHook/bin/otel-hook'; if [ -x \"$hook\" ]; then exec \"$hook\" --claude --managed; fi;; MINGW*|MSYS*|CYGWIN*) hook='C:/ProgramData/OpenTelemetryHook/bin/otel-hook.ps1'; if [ -f \"$hook\" ]; then exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$hook\" --claude --managed; fi;; esac; printf '{}\\n'"
+          }
+        ]
+      }
+    ],
+    "PermissionDenied": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 10,
+            "command": "case \"$(uname -s)\" in Darwin) hook='/Library/Application Support/OpenTelemetryHook/bin/otel-hook'; if [ -x \"$hook\" ]; then exec \"$hook\" --claude --managed; fi;; MINGW*|MSYS*|CYGWIN*) hook='C:/ProgramData/OpenTelemetryHook/bin/otel-hook.ps1'; if [ -f \"$hook\" ]; then exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$hook\" --claude --managed; fi;; esac; printf '{}\\n'"
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 10,
+            "command": "case \"$(uname -s)\" in Darwin) hook='/Library/Application Support/OpenTelemetryHook/bin/otel-hook'; if [ -x \"$hook\" ]; then exec \"$hook\" --claude --managed; fi;; MINGW*|MSYS*|CYGWIN*) hook='C:/ProgramData/OpenTelemetryHook/bin/otel-hook.ps1'; if [ -f \"$hook\" ]; then exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$hook\" --claude --managed; fi;; esac; printf '{}\\n'"
+          }
+        ]
+      }
+    ],
+    "StopFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 10,
+            "command": "case \"$(uname -s)\" in Darwin) hook='/Library/Application Support/OpenTelemetryHook/bin/otel-hook'; if [ -x \"$hook\" ]; then exec \"$hook\" --claude --managed; fi;; MINGW*|MSYS*|CYGWIN*) hook='C:/ProgramData/OpenTelemetryHook/bin/otel-hook.ps1'; if [ -f \"$hook\" ]; then exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$hook\" --claude --managed; fi;; esac; printf '{}\\n'"
+          }
+        ]
+      }
+    ],
+    "Setup": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 10,
+            "command": "case \"$(uname -s)\" in Darwin) hook='/Library/Application Support/OpenTelemetryHook/bin/otel-hook'; if [ -x \"$hook\" ]; then exec \"$hook\" --claude --managed; fi;; MINGW*|MSYS*|CYGWIN*) hook='C:/ProgramData/OpenTelemetryHook/bin/otel-hook.ps1'; if [ -f \"$hook\" ]; then exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$hook\" --claude --managed; fi;; esac; printf '{}\\n'"
+          }
+        ]
+      }
+    ],
+    "InstructionsLoaded": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 10,
+            "command": "case \"$(uname -s)\" in Darwin) hook='/Library/Application Support/OpenTelemetryHook/bin/otel-hook'; if [ -x \"$hook\" ]; then exec \"$hook\" --claude --managed; fi;; MINGW*|MSYS*|CYGWIN*) hook='C:/ProgramData/OpenTelemetryHook/bin/otel-hook.ps1'; if [ -f \"$hook\" ]; then exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$hook\" --claude --managed; fi;; esac; printf '{}\\n'"
+          }
+        ]
+      }
+    ],
+    "UserPromptExpansion": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 10,
+            "command": "case \"$(uname -s)\" in Darwin) hook='/Library/Application Support/OpenTelemetryHook/bin/otel-hook'; if [ -x \"$hook\" ]; then exec \"$hook\" --claude --managed; fi;; MINGW*|MSYS*|CYGWIN*) hook='C:/ProgramData/OpenTelemetryHook/bin/otel-hook.ps1'; if [ -f \"$hook\" ]; then exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$hook\" --claude --managed; fi;; esac; printf '{}\\n'"
+          }
+        ]
+      }
+    ],
+    "MessageDisplay": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 10,
+            "command": "case \"$(uname -s)\" in Darwin) hook='/Library/Application Support/OpenTelemetryHook/bin/otel-hook'; if [ -x \"$hook\" ]; then exec \"$hook\" --claude --managed; fi;; MINGW*|MSYS*|CYGWIN*) hook='C:/ProgramData/OpenTelemetryHook/bin/otel-hook.ps1'; if [ -f \"$hook\" ]; then exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$hook\" --claude --managed; fi;; esac; printf '{}\\n'"
+          }
+        ]
+      }
+    ],
+    "PostToolBatch": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 10,
+            "command": "case \"$(uname -s)\" in Darwin) hook='/Library/Application Support/OpenTelemetryHook/bin/otel-hook'; if [ -x \"$hook\" ]; then exec \"$hook\" --claude --managed; fi;; MINGW*|MSYS*|CYGWIN*) hook='C:/ProgramData/OpenTelemetryHook/bin/otel-hook.ps1'; if [ -f \"$hook\" ]; then exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$hook\" --claude --managed; fi;; esac; printf '{}\\n'"
+          }
+        ]
+      }
+    ],
+    "TaskCreated": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 10,
+            "command": "case \"$(uname -s)\" in Darwin) hook='/Library/Application Support/OpenTelemetryHook/bin/otel-hook'; if [ -x \"$hook\" ]; then exec \"$hook\" --claude --managed; fi;; MINGW*|MSYS*|CYGWIN*) hook='C:/ProgramData/OpenTelemetryHook/bin/otel-hook.ps1'; if [ -f \"$hook\" ]; then exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$hook\" --claude --managed; fi;; esac; printf '{}\\n'"
+          }
+        ]
+      }
+    ],
+    "TaskCompleted": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 10,
+            "command": "case \"$(uname -s)\" in Darwin) hook='/Library/Application Support/OpenTelemetryHook/bin/otel-hook'; if [ -x \"$hook\" ]; then exec \"$hook\" --claude --managed; fi;; MINGW*|MSYS*|CYGWIN*) hook='C:/ProgramData/OpenTelemetryHook/bin/otel-hook.ps1'; if [ -f \"$hook\" ]; then exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$hook\" --claude --managed; fi;; esac; printf '{}\\n'"
+          }
+        ]
+      }
+    ],
+    "TeammateIdle": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 10,
+            "command": "case \"$(uname -s)\" in Darwin) hook='/Library/Application Support/OpenTelemetryHook/bin/otel-hook'; if [ -x \"$hook\" ]; then exec \"$hook\" --claude --managed; fi;; MINGW*|MSYS*|CYGWIN*) hook='C:/ProgramData/OpenTelemetryHook/bin/otel-hook.ps1'; if [ -f \"$hook\" ]; then exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$hook\" --claude --managed; fi;; esac; printf '{}\\n'"
+          }
+        ]
+      }
+    ],
+    "ConfigChange": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 10,
+            "command": "case \"$(uname -s)\" in Darwin) hook='/Library/Application Support/OpenTelemetryHook/bin/otel-hook'; if [ -x \"$hook\" ]; then exec \"$hook\" --claude --managed; fi;; MINGW*|MSYS*|CYGWIN*) hook='C:/ProgramData/OpenTelemetryHook/bin/otel-hook.ps1'; if [ -f \"$hook\" ]; then exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$hook\" --claude --managed; fi;; esac; printf '{}\\n'"
+          }
+        ]
+      }
+    ],
+    "CwdChanged": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 10,
+            "command": "case \"$(uname -s)\" in Darwin) hook='/Library/Application Support/OpenTelemetryHook/bin/otel-hook'; if [ -x \"$hook\" ]; then exec \"$hook\" --claude --managed; fi;; MINGW*|MSYS*|CYGWIN*) hook='C:/ProgramData/OpenTelemetryHook/bin/otel-hook.ps1'; if [ -f \"$hook\" ]; then exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$hook\" --claude --managed; fi;; esac; printf '{}\\n'"
+          }
+        ]
+      }
+    ],
+    "DirectoryAdded": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 10,
+            "command": "case \"$(uname -s)\" in Darwin) hook='/Library/Application Support/OpenTelemetryHook/bin/otel-hook'; if [ -x \"$hook\" ]; then exec \"$hook\" --claude --managed; fi;; MINGW*|MSYS*|CYGWIN*) hook='C:/ProgramData/OpenTelemetryHook/bin/otel-hook.ps1'; if [ -f \"$hook\" ]; then exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$hook\" --claude --managed; fi;; esac; printf '{}\\n'"
+          }
+        ]
+      }
+    ],
+    "WorktreeRemove": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 10,
+            "command": "case \"$(uname -s)\" in Darwin) hook='/Library/Application Support/OpenTelemetryHook/bin/otel-hook'; if [ -x \"$hook\" ]; then exec \"$hook\" --claude --managed; fi;; MINGW*|MSYS*|CYGWIN*) hook='C:/ProgramData/OpenTelemetryHook/bin/otel-hook.ps1'; if [ -f \"$hook\" ]; then exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$hook\" --claude --managed; fi;; esac; printf '{}\\n'"
+          }
+        ]
+      }
+    ],
+    "PreModelSwitch": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 10,
+            "command": "case \"$(uname -s)\" in Darwin) hook='/Library/Application Support/OpenTelemetryHook/bin/otel-hook'; if [ -x \"$hook\" ]; then exec \"$hook\" --claude --managed; fi;; MINGW*|MSYS*|CYGWIN*) hook='C:/ProgramData/OpenTelemetryHook/bin/otel-hook.ps1'; if [ -f \"$hook\" ]; then exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$hook\" --claude --managed; fi;; esac; printf '{}\\n'"
+          }
+        ]
+      }
+    ],
+    "PostModelSwitch": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 10,
+            "command": "case \"$(uname -s)\" in Darwin) hook='/Library/Application Support/OpenTelemetryHook/bin/otel-hook'; if [ -x \"$hook\" ]; then exec \"$hook\" --claude --managed; fi;; MINGW*|MSYS*|CYGWIN*) hook='C:/ProgramData/OpenTelemetryHook/bin/otel-hook.ps1'; if [ -f \"$hook\" ]; then exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$hook\" --claude --managed; fi;; esac; printf '{}\\n'"
+          }
+        ]
+      }
+    ],
+    "Elicitation": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 10,
+            "command": "case \"$(uname -s)\" in Darwin) hook='/Library/Application Support/OpenTelemetryHook/bin/otel-hook'; if [ -x \"$hook\" ]; then exec \"$hook\" --claude --managed; fi;; MINGW*|MSYS*|CYGWIN*) hook='C:/ProgramData/OpenTelemetryHook/bin/otel-hook.ps1'; if [ -f \"$hook\" ]; then exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$hook\" --claude --managed; fi;; esac; printf '{}\\n'"
+          }
+        ]
+      }
+    ],
+    "ElicitationResult": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 10,
+            "command": "case \"$(uname -s)\" in Darwin) hook='/Library/Application Support/OpenTelemetryHook/bin/otel-hook'; if [ -x \"$hook\" ]; then exec \"$hook\" --claude --managed; fi;; MINGW*|MSYS*|CYGWIN*) hook='C:/ProgramData/OpenTelemetryHook/bin/otel-hook.ps1'; if [ -f \"$hook\" ]; then exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$hook\" --claude --managed; fi;; esac; printf '{}\\n'"
+          }
+        ]
+      }
+    ]
   }
 }

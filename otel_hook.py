@@ -44,7 +44,8 @@ from otel_hooks.enrichment import (
 from otel_hooks.attributes import _OBSERVATION_FIELDS as _OBSERVATION_FIELDS
 from otel_hooks.capture import CapturePolicy, bound_runtime_payload
 from otel_hooks.config import (
-    environment_settings, merge_settings,
+    environment_settings, merge_settings, shared_claude_settings,
+    export_enforced, enforce_export_environment,
     _coerce_env_value as _coerce_env_value,
     _headers_to_env as _headers_to_env,
     _load_mdm_config_macos as _load_mdm_config_macos,
@@ -290,6 +291,8 @@ _HEX_DIGITS = frozenset("0123456789abcdef")
 _MANAGED_HOOK_SOURCE_ENV = "IDE_OTEL_HOOK_SOURCE"
 _CLI_HOOK_SOURCE: Optional[str] = None
 _CLI_HOOK_EVENT: Optional[str] = None
+_CLI_REGISTRATION_SCOPE: Optional[str] = None
+_POLICY_SOURCES: dict = {}
 
 # Session boundary events
 _SESSION_START_EVENTS = {"SessionStart"}
@@ -669,21 +672,40 @@ def _load_config() -> dict:
         config = _load_json_config(path)
     # MDM settings override JSON config (IT admin policy takes precedence)
     mdm = _load_mdm_config()
+    shared_options = merge_settings(config, mdm).get("claude", {})
+    if not isinstance(shared_options, dict):
+        raise ValueError("claude configuration must be an object")
+    sources = {}
+    if shared_options.get("shared_config") is True and _CLI_HOOK_SOURCE == "claude":
+        shared, sources = shared_claude_settings(managed_only=export_enforced(mdm))
+        # Explicit hook settings override imported defaults. Enforced MDM settings
+        # use only the shared source and administrator values, never local JSON.
+        config = merge_settings(shared, config)
+        if export_enforced(mdm):
+            mdm = merge_settings(shared, mdm)
     if _safe_bool(os.getenv("IDE_OTEL_SKIP_MDM", "")):
-        mdm = {key: value for key, value in mdm.items() if key in {"capture", "logs"}}
+        mdm = {key: value for key, value in mdm.items()
+               if key in {"capture", "logs"} or export_enforced(mdm)}
     if mdm:
         config = merge_settings(config, mdm)
         config["_managed"] = mdm
+    if mdm or sources:
+        config["_policy_sources"] = {
+            "managed": bool(mdm), "export_enforced": export_enforced(mdm),
+            "claude_settings": sorted(set(sources.values())),
+        }
     return config
 
 
 def _apply_config_env(config: dict) -> None:
-    global _CAPTURE_POLICY
+    global _CAPTURE_POLICY, _POLICY_SOURCES
+    _POLICY_SOURCES = config.get("_policy_sources", {})
     managed = config.get("_managed", {})
     settings = environment_settings(config)
     settings.update(environment_settings(managed))
     for key, value in settings.items():
         os.environ.setdefault(key, _coerce_env_value(key, value))
+    enforce_export_environment(managed)
     # Managed capture/log restrictions cannot be loosened by local environment.
     restrictions = {key: value for key, value in managed.items() if key in {"capture", "logs"}}
     if isinstance(restrictions.get("capture"), dict) and "mode" in restrictions["capture"]:
@@ -2559,6 +2581,11 @@ def main() -> int:
     original_data = data = _normalize_input_data(input_data)
     raw_event = _get_event_name(data, override=_CLI_HOOK_EVENT)
     ide = _detect_ide(data)
+    from otel_hooks.managed import should_skip
+    if should_skip(ide, _CLI_REGISTRATION_SCOPE, raw_event):
+        event = _event_adapter_for(ide).canonical_event_name(raw_event)
+        _emit_stdout_response(event, ide, data)
+        return 0
     captured_payload = _CAPTURE_POLICY.filter(input_data)
     # Never trust incoming private keys as runtime-generated state.
     parser_input = {k: v for k, v in captured_payload.items() if not k.startswith("_")}

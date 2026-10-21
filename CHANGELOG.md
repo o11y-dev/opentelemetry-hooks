@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Added
+- Jamf/Intune offline hash-locked deployment, explicit machine/user registration, SDK-independent detection, shared Claude managed telemetry configuration, enforced exporter policy and operator lifecycle documentation.
 - Telemetry schema v2: original observation/event timing, provider-aware inclusive token accounting, UTF-8 payload facts, capture-policy provenance, protected identity/usage mappings and shared canonical/recursive attribute budgets.
 - Optional `logs.max_body_bytes` and bounded `batch.max_export_attempts` with retained policy-local quarantine records.
 - Persisted replay identities, branch-local buffered boundaries, streaming generation/tool/subagent scopes and nanosecond native log correlation with failure severity.

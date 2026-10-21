@@ -59,7 +59,7 @@ jobs:
         run: python -m pytest tests/ -v
 
   build:
-    needs: [lint, test, plugin-test, windows]
+    needs: [lint, test, plugin-test, windows, macos-managed]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -97,9 +97,14 @@ jobs:
           python -m build
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $venv = Join-Path $env:RUNNER_TEMP "hook environment-é"
+          $bundle = Join-Path $env:RUNNER_TEMP "mdm-bundle"
+          python scripts/build_mdm_bundle.py --wheel (Get-Item dist/*.whl).FullName --constraints examples/mdm/runtime-constraints.txt --platform win_amd64 --output $bundle
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -m venv $venv
           $python = Join-Path $venv "Scripts/python.exe"
-          & $python -m pip install pytest (Get-Item dist/*.whl).FullName
+          & $python -m pip install pytest
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $python -m pip install --no-index --find-links "$bundle/wheels" --require-hashes -r "$bundle/requirements.lock"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $tests = Join-Path $env:RUNNER_TEMP "hook-wheel-tests"
           New-Item -ItemType Directory -Force $tests | Out-Null
@@ -113,7 +118,9 @@ jobs:
             "tests/test_cli_boundaries.py",
             "tests/test_module_boundaries.py",
             "tests/test_lifecycle.py",
-            "tests/test_telemetry_v2.py"
+            "tests/test_telemetry_v2.py",
+            "tests/test_managed_deployment.py",
+            "tests/test_mdm_artifacts.py"
           )
           Copy-Item $testFiles $tests
           Copy-Item tests/fixtures $tests -Recurse
@@ -121,3 +128,21 @@ jobs:
           Set-Location $tests
           & $python -m pytest -q --import-mode=importlib .
           exit $LASTEXITCODE
+
+  macos-managed:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Validate managed policy and packaged deployment templates
+        run: |
+          python -m pip install -r requirements-dev.txt build
+          python -m build
+          platform_tag=$(python -c "import platform; print('macosx_11_0_arm64' if platform.machine() == 'arm64' else 'macosx_10_15_x86_64')")
+          python scripts/build_mdm_bundle.py --wheel dist/*.whl --constraints examples/mdm/runtime-constraints.txt --platform "$platform_tag" --output "$RUNNER_TEMP/mdm-bundle"
+          python -m venv "$RUNNER_TEMP/mdm-runtime"
+          "$RUNNER_TEMP/mdm-runtime/bin/python" -m pip install --no-index --find-links "$RUNNER_TEMP/mdm-bundle/wheels" --require-hashes -r "$RUNNER_TEMP/mdm-bundle/requirements.lock"
+          python -m pip install --no-deps --force-reinstall dist/*.whl
+          python -m pytest -q tests/test_managed_deployment.py tests/test_mdm_artifacts.py

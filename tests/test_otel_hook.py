@@ -669,10 +669,11 @@ class TestLoadMdmConfigMacOS:
         with mock.patch("os.path.exists", return_value=False):
             assert otel_hook._load_mdm_config_macos() == {}
 
-    def test_returns_empty_on_read_error(self):
+    def test_rejects_unreadable_managed_preferences(self):
         with mock.patch("os.path.exists", return_value=True):
             with mock.patch("builtins.open", side_effect=OSError("permission denied")):
-                assert otel_hook._load_mdm_config_macos() == {}
+                with pytest.raises(ValueError, match="managed preferences"):
+                    otel_hook._load_mdm_config_macos()
 
 
 class TestLoadMdmConfigWindows:

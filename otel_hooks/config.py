@@ -6,11 +6,66 @@ the public JSON format; arbitrary JSON keys are never exported to the environmen
 import json
 import logging
 import os
+import sys
 import urllib.parse
 
 _MDM_DOMAIN = "dev.o11y.opentelemetry-hook"
 _MDM_REGISTRY_PATH = r"SOFTWARE\Policies\OpenTelemetryHook"
 _LOGGER = logging.getLogger("otel_hook")
+
+# Only telemetry configuration is imported from another application's settings.
+_SHARED_KEYS = {"OTEL_RESOURCE_ATTRIBUTES", "OTEL_SERVICE_NAME"}
+
+
+def claude_settings_paths() -> list[str]:
+    if sys.platform == "darwin":
+        machine = "/Library/Application Support/ClaudeCode/managed-settings.json"
+    elif sys.platform == "win32":
+        machine = os.path.join(os.getenv("ProgramFiles", r"C:\Program Files"), "ClaudeCode", "managed-settings.json")
+    else:
+        machine = "/etc/claude-code/managed-settings.json"
+    home = os.path.expanduser("~/.claude")
+    return [machine, os.path.join(home, "remote-settings.json"), os.path.join(home, "settings.json")]
+
+
+def shared_claude_settings(*, managed_only: bool = False) -> tuple[dict, dict]:
+    """Read the same env block as Claude, without executing it or importing hooks."""
+    result, sources = {}, {}
+    paths = claude_settings_paths()
+    for path in paths[:2] if managed_only else paths:
+        doc = _load_json_config(path)
+        env = doc.get("env", {})
+        if not isinstance(env, dict):
+            raise ValueError("Claude telemetry env must be an object")
+        for key, value in env.items():
+            if key not in _SHARED_KEYS and not key.startswith("OTEL_EXPORTER_OTLP"):
+                continue
+            if key not in result and isinstance(value, str) and value:
+                result[key], sources[key] = value, path
+    return result, sources
+
+
+def export_enforced(managed: dict) -> bool:
+    value = managed.get("enforce_export", False)
+    if type(value) is not bool:
+        raise ValueError("managed enforce_export must be a boolean")
+    return value
+
+
+def enforce_export_environment(managed: dict) -> None:
+    """Clear alternate per-signal destinations/auth before applying trusted values."""
+    if not export_enforced(managed):
+        return
+    endpoint = managed.get("OTEL_EXPORTER_OTLP_ENDPOINT")
+    protocol = managed.get("OTEL_EXPORTER_OTLP_PROTOCOL")
+    if not isinstance(endpoint, str) or not endpoint or protocol not in {"grpc", "http/protobuf"}:
+        raise ValueError("enforced export requires a managed endpoint and grpc or http/protobuf protocol")
+    for key in list(os.environ):
+        if key.startswith("OTEL_EXPORTER_OTLP"):
+            del os.environ[key]
+    for key, value in managed.items():
+        if key.startswith("OTEL_EXPORTER_OTLP"):
+            os.environ[key] = _coerce_env_value(key, value)
 
 
 ALIASES = {
@@ -81,16 +136,22 @@ def _load_mdm_config_macos() -> dict:
         managed_path = f"/Library/Managed Preferences/{_MDM_DOMAIN}.plist"
         if os.path.exists(managed_path):
             with open(managed_path, "rb") as fh:
-                return plistlib.load(fh) or {}
+                result = plistlib.load(fh)
+                if not isinstance(result, dict):
+                    raise ValueError("managed preferences must be an object")
+                return result
         # Fall back to current-user managed preferences
         user_managed = os.path.expanduser(
             f"~/Library/Managed Preferences/{_MDM_DOMAIN}.plist"
         )
         if os.path.exists(user_managed):
             with open(user_managed, "rb") as fh:
-                return plistlib.load(fh) or {}
-    except Exception:
-        _LOGGER.debug("MDM: unable to read macOS managed preferences")
+                result = plistlib.load(fh)
+                if not isinstance(result, dict):
+                    raise ValueError("managed preferences must be an object")
+                return result
+    except Exception as exc:
+        raise ValueError("unable to read macOS managed preferences") from exc
     return {}
 
 
@@ -109,11 +170,15 @@ def _load_mdm_config_windows() -> dict:
                             if name and value is not None:
                                 result[name] = str(value)
                             idx += 1
+                        except PermissionError as exc:
+                            raise ValueError("unable to enumerate Windows managed policy") from exc
                         except OSError:
                             break
+            except PermissionError as exc:
+                raise ValueError("unable to read Windows managed policy") from exc
             except OSError:
                 continue
-        for name in ("capture", "logs"):
+        for name in ("capture", "logs", "claude", "enforce_export"):
             if name in result:
                 try:
                     result[name] = json.loads(result[name])
@@ -124,8 +189,8 @@ def _load_mdm_config_windows() -> dict:
         return result
     except ImportError:
         pass
-    except Exception:
-        _LOGGER.debug("MDM: unable to read Windows registry")
+    except Exception as exc:
+        raise ValueError("unable to read Windows managed policy") from exc
     return {}
 
 

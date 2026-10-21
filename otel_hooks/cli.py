@@ -646,6 +646,7 @@ def _runtime(ctx: click.Context):
     runtime = root.obj
     runtime._CLI_HOOK_SOURCE = root.params.get("hook_source")
     runtime._CLI_HOOK_EVENT = root.params.get("hook_event")
+    runtime._CLI_REGISTRATION_SCOPE = "machine" if root.params.get("managed") else root.params.get("registration_scope")
     return runtime
 
 
@@ -658,8 +659,10 @@ def _runtime(ctx: click.Context):
 @click.option("--codex", "hook_source", flag_value="codex", help="Run hook as Codex CLI.")
 @click.option("--opencode", "hook_source", flag_value="opencode", help="Run hook as OpenCode.")
 @click.option("--event", "hook_event", default=None, help="Hook event name for runners that omit it from stdin.")
+@click.option("--managed", is_flag=True, help="Run a machine-managed registration.")
+@click.option("--registration-scope", type=click.Choice(["user"]), default=None, help="Run a managed user registration.")
 @click.pass_context
-def cli(ctx: click.Context, hook_source: Optional[str], hook_event: Optional[str]) -> None:
+def cli(ctx: click.Context, hook_source: Optional[str], hook_event: Optional[str], managed: bool, registration_scope: Optional[str]) -> None:
     """otel-hook — OpenTelemetry hook runner and setup CLI for AI coding agents.
 
     When called with no subcommand and piped stdin, runs as the hook runner
@@ -764,15 +767,22 @@ def _pending_state_summary(runtime) -> dict:
 
 
 def _doctor_report(runtime, agents: tuple, global_: bool, cwd: str) -> tuple[dict, int]:
+    from . import managed
     targets = list(agents) or list(_SUPPORTED_AGENTS)
     paths = _agent_config_paths(global_, cwd)
     registrations = []
     for agent in targets:
         path = paths[agent]
-        enabled_events = _registered_hook_events(agent, path)
+        scope = "user" if global_ else "project"
+        if managed.active(agent, "machine"):
+            path, scope = managed.registration_path(agent, "machine"), "machine"
+            enabled_events = sorted(managed._events(agent))
+        else:
+            enabled_events = _registered_hook_events(agent, path)
         registrations.append({
             "agent": agent,
             "path": path,
+            "scope": scope,
             "registered_events": len(enabled_events),
             "enabled_events": enabled_events,
         })
@@ -844,6 +854,7 @@ def _doctor_report(runtime, agents: tuple, global_: bool, cwd: str) -> tuple[dic
             "headers_present": bool(os.getenv("OTEL_EXPORTER_OTLP_HEADERS")),
         },
         "state": _pending_state_summary(runtime),
+        "configuration_sources": getattr(runtime, "_POLICY_SOURCES", {}),
         "recent_delivery_failures": failures,
     }
     warnings = []
@@ -858,6 +869,70 @@ def _doctor_report(runtime, agents: tuple, global_: bool, cwd: str) -> tuple[dic
         report["warnings"] = warnings
         return report, 1
     return report, 0
+
+
+@cli.group("managed")
+def managed_group() -> None:
+    """Stage registration separately from package installation (no SDK initialization)."""
+
+
+def _managed_options(function):
+    function = click.option("--agent", required=True, type=click.Choice(["claude", "cursor"]))(function)
+    return click.option("--scope", required=True, type=click.Choice(["machine", "user"]))(function)
+
+
+@managed_group.command("register")
+@_managed_options
+@click.option("--executable", required=True, type=click.Path(dir_okay=False))
+def managed_register(agent: str, scope: str, executable: str) -> None:
+    """Merge owned registrations, preserving unrelated settings. Machine scope needs admin rights."""
+    from .managed import register
+    try:
+        click.echo(json.dumps(register(agent, scope, executable), sort_keys=True))
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+@managed_group.command("unregister")
+@_managed_options
+def managed_unregister(agent: str, scope: str) -> None:
+    """Remove only marked entries; keep credentials, unrelated hooks and per-user state."""
+    from .managed import unregister
+    try:
+        unregister(agent, scope)
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+@managed_group.command("status")
+@_managed_options
+@click.option("--executable", type=click.Path(dir_okay=False))
+@click.option("--expected-version", default=None)
+def managed_status(agent: str, scope: str, executable: Optional[str], expected_version: Optional[str]) -> None:
+    """Machine-readable installation detection; does not claim backend delivery."""
+    import importlib.metadata
+    from .managed import inspect
+    try:
+        report = inspect(agent, scope, executable)
+        try:
+            version = importlib.metadata.version("opentelemetry-hooks")
+        except importlib.metadata.PackageNotFoundError:
+            version = "source-checkout"
+        report["version"] = version
+        if expected_version and version != expected_version:
+            report["issues"].append("unexpected_version")
+        # Distribution metadata does not initialize the SDK or trigger provisioning.
+        for dependency in ("click", "opentelemetry-sdk", "opentelemetry-exporter-otlp-proto-http", "opentelemetry-exporter-otlp-proto-grpc"):
+            try:
+                importlib.metadata.version(dependency)
+            except importlib.metadata.PackageNotFoundError:
+                report["issues"].append("missing_dependency:" + dependency)
+        report["status"] = "degraded" if report["issues"] else "installed"
+    except (OSError, ValueError):
+        report = {"status": "degraded", "issues": ["unreadable_or_invalid_registration"], "backend_delivery": "unverified"}
+    click.echo(json.dumps(report, sort_keys=True))
+    if report["status"] != "installed":
+        raise SystemExit(1)
 
 
 def _doctor_human_lines(report: dict) -> list[str]:

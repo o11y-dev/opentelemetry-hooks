@@ -1,5 +1,12 @@
 # Upgrade and rollback
 
+Managed fleets use the [Jamf/Intune procedures](managed-deployment.md#rotation-and-lifecycle).
+Stage an approved hash-locked bundle, verify registration and backend delivery,
+then expand the pilot. The deployment scripts retain the previous complete runtime
+for rollback; restore matching managed policy separately. Uninstall unregisters
+owned hooks before removing the launcher and retains credentials, runtime versions,
+per-user queues and quarantine for explicit administrator cleanup.
+
 This capture pipeline changes defaults and consumer contracts. Before upgrading:
 
 1. Record the package version and installer, and back up `otel_config.json`,
