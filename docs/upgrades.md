@@ -33,9 +33,9 @@ and verify which batches replay before resuming collection. See
 [configuration and state behavior](configuration.md).
 
 
-## Schema version 2 rollout
+## Schema version 3 rollout
 
-Review the [schema-v2 contract](telemetry-reference.md#schema-version-2) and
+Review the [current schema contract](telemetry-reference.md#schema-version-3) and
 [validation record](telemetry-v2-validation.md). Rebuild consumers that used
 capture mappings to redefine identity/status/usage: those targets now fail closed.
 Use a consumer-side derived field or an unprotected custom mapping instead.
@@ -50,12 +50,17 @@ the approved capture policy. Rerun setup after upgrading callback registrations.
 Compare a full session and concurrent subagent session before expanding rollout.
 No live vendor canary or production rollout is implied by fixture replay.
 
-The [Coralogix/OTel audit](coralogix-compatibility.md) records current naming and
-remaining conformance checks. Cache writes now also emit
-`gen_ai.usage.cache_write.input_tokens`; `cache_creation.input_tokens` retains
-the same value. Tool names now also emit `gen_ai.tool.name`. Existing hook span
-names and legacy fields remain; do not sum aliases or interpret `gen_ai.system`
-as the provider. `gen_ai.request.top_k` is now emitted as an integer.
+Schema 3 adopts the [OTel semantic contract](semantic-conventions.md) without
+compatibility aliases. Cache writes emit only
+`gen_ai.usage.cache_write.input_tokens`; the derived total uses
+`o11y.usage.total_tokens`. `gen_ai.system`, `gen_ai.usage.total_tokens` and
+`gen_ai.usage.cache_creation.input_tokens` are removed. Hook-specific
+`gen_ai.client.*` fields move to `o11y.client.*`. Invocation scopes use
+`execute_tool <tool>` / `invoke_agent [agent]`; callbacks have no GenAI operation
+label. Agent invocation IDs stay in the project namespace; `gen_ai.agent.id`
+requires an explicit hosted resource ID. Update consumers directly; no alias
+mode is provided. The schema revision is included in the policy fingerprint,
+so pending earlier-schema records are isolated rather than translated.
 
 For rollback, stop the canary, preserve policy-specific queues/quarantine for
 investigation, restore the prior package and configuration, rerun setup, and

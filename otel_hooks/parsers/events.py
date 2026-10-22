@@ -96,6 +96,7 @@ _INPUT_ALIASES = {
     "eventId": "event_id",
     "hookEventId": "hook_event_id",
     "agentId": "agent_id",
+    "agentResourceId": "agent_resource_id",
     "parentAgentId": "parent_agent_id",
     "agentName": "agent_name",
     "agentVersion": "agent_version",

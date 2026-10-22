@@ -25,10 +25,10 @@ turn_id trajectory_id execution_id event_id hook_event_id callback_id version
 model model_id model_name request_model response_model provider_name provider model_provider vendor status
 reason final_status trigger composer_mode tool_name tool_type tool_id tool_use_id
 tool_call_id call_id subagent_id agent_id parent_agent_id parent_conversation_id parent_tool_call_id
-agent_type subagent_type agent_engine client_name client_version agent_name agent_version
+agent_type subagent_type agent_engine client_name client_version agent_name agent_version agent_resource_id
 permission_mode permission_request_id permission_response elicitation_id action mode
 mcp_server mcp_server_name mcp_tool server_name tool duration duration_ms exit_code
-is_interrupt stop_hook_active loop_count response_id message_id index final
+is_interrupt stop_hook_active loop_count response_id message_id index final choice_count output_type response_format finish_reasons stop_sequences
 task_id source notification_type error_type error_code from_model to_model
 requested_model context_tokens context_usage_percent context_window_size
 message_count messages_to_compact is_first_compaction load_reason expansion_type
@@ -111,14 +111,8 @@ class CapturePolicy:
         ):
             raise ValueError("capture.mappings must map paths to lowercase attribute names")
         # Canonical identity, status and accounting semantics are runtime-owned.
-        protected = ('gen_ai.usage.', 'gen_ai.tool.', 'gen_ai.client.hook', 'gen_ai.agent.',
-                     'gen_ai.conversation.', 'error.', 'o11y.', 'otel.')
-        if any(v.startswith(protected) or v in {'trace_id', 'span_id', 'parent_span_id', 'gen_ai.tool.call.id',
-                         'gen_ai.client.session_id', 'gen_ai.client.generation_id',
-                         'gen_ai.client.turn_id', 'gen_ai.client.status', 'gen_ai.client.tool_use_id',
-                         'gen_ai.client.name', 'gen_ai.client.agent_engine', 'gen_ai.client.exit_code',
-                         'gen_ai.provider.name', 'gen_ai.request.model', 'gen_ai.response.model',
-                         'gen_ai.operation.name', 'gen_ai.system'} for v in mappings.values()):
+        protected = ('gen_ai.', 'error.', 'o11y.', 'otel.')
+        if any(v.startswith(protected) or v in {'trace_id', 'span_id', 'parent_span_id'} for v in mappings.values()):
             raise ValueError("capture.mappings cannot overwrite protected telemetry fields")
         limit = logs.get('max_body_bytes')
         if limit is not None and (type(limit) is not int or limit < 1):
@@ -141,7 +135,7 @@ class CapturePolicy:
 
     @property
     def fingerprint(self) -> str:
-        return hashlib.sha256(json.dumps(self.__dict__, sort_keys=True).encode()).hexdigest()[:16]
+        return hashlib.sha256(json.dumps({'schema_version': 3, **self.__dict__}, sort_keys=True).encode()).hexdigest()[:16]
 
     def filter(self, payload: dict, *, span_only: bool = False) -> dict:
         """Select permitted payload fields, or strictly select extra span fields."""
@@ -167,6 +161,10 @@ class CapturePolicy:
                         result[key] = item
                 return result if result or selected else _MISSING
             if isinstance(value, list):
+                if not span_only and not selected and path in {
+                    'finish_reasons', 'stop_sequences', 'metadata.finish_reasons', 'metadata.stop_sequences',
+                } and all(isinstance(item, str) for item in value):
+                    return [item for i, item in enumerate(value) if not _matches(f'{path}.{i}', self.exclude)]
                 items = [visit(item, f"{path}.{i}") for i, item in enumerate(value)]
                 if selected or any(item is not _MISSING for item in items):
                     return [None if item is _MISSING else item for item in items]

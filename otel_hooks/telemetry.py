@@ -1,4 +1,4 @@
-"""Schema-v2 facts and bounded canonical attributes (independent of the SDK)."""
+"""Semantic-convention facts and bounded attributes, independent of the SDK."""
 import json
 import math
 
@@ -33,15 +33,13 @@ def usage_attributes(data, provider):
     if inp is not None and out is not None:
         total = inp + out
     result = {}
-    for key, value in [('input_tokens', inp), ('output_tokens', out), ('total_tokens', total),
+    for key, value in [('input_tokens', inp), ('output_tokens', out),
                        ('cache_read.input_tokens', read), ('cache_write.input_tokens', write),
-                       ('cache_creation.input_tokens', write),
                        ('reasoning.output_tokens', reasoning)]:
         if value is not None:
             result['gen_ai.usage.' + key] = value
     if total is not None:
-        # total_tokens is not in the OTel registry. Keep the historical name as
-        # an alias while identifying the derived total in our own namespace.
+        # Combined usage has no GenAI semantic-convention attribute.
         result['o11y.usage.total_tokens'] = total
     if result:
         result['o11y.usage.basis'] = basis
@@ -71,21 +69,30 @@ class AttributeBudget:
         # Identity and numerical facts survive before bulky content.
         def priority(item):
             key, value = item
-            return (0 if key.startswith(('gen_ai.client.hook.', 'o11y.', 'gen_ai.usage.'))
-                    or key.endswith(('_id', '.id')) or type(value) in (bool, int, float) else 1)
+            return (0 if key in {'gen_ai.operation.name', 'gen_ai.provider.name', 'gen_ai.request.model',
+                                 'gen_ai.tool.name', 'gen_ai.tool.call.id'} else
+                    1 if key.startswith(('o11y.client.hook.', 'o11y.', 'gen_ai.usage.'))
+                    or key.endswith(('_id', '.id')) or type(value) in (bool, int, float) else 2)
         for key, value in sorted(self.attributes.items(), key=priority) + list(extras.items()):
             if key in extras and key in self.attributes and value != self.attributes[key]:
                 dropped += 1
                 continue
             shortened = False
-            protected_string = key.endswith(('_id', '.id', '.sha256')) or key.startswith('gen_ai.client.hook.') or key in {'o11y.capture.policy_id', 'o11y.capture.mode'}
-            if isinstance(value, str) and key in {'gen_ai.input.messages', 'gen_ai.output.messages', 'gen_ai.tool.definitions'} and len(value) > self.policy.max_string_length:
+            protected_string = key.endswith(('_id', '.id', '.sha256')) or key.startswith('o11y.client.hook.') or key in {
+                'o11y.capture.policy_id', 'o11y.capture.mode', 'gen_ai.operation.name', 'gen_ai.provider.name',
+                'gen_ai.request.model', 'gen_ai.response.model', 'gen_ai.tool.name', 'gen_ai.tool.type', 'gen_ai.agent.name'}
+            if isinstance(value, str) and key in {'gen_ai.input.messages', 'gen_ai.output.messages', 'gen_ai.tool.definitions',
+                                                 'gen_ai.system_instructions', 'gen_ai.tool.call.arguments', 'gen_ai.tool.call.result'} and len(value) > self.policy.max_string_length:
                 dropped += 1
                 continue
             if isinstance(value, str) and not protected_string:
                 shortened = len(value) > self.policy.max_string_length
                 value = value[:self.policy.max_string_length]
             elif isinstance(value, (list, tuple)):
+                if key.startswith('gen_ai.') and (len(value) > self.policy.max_array_length or
+                                                 any(isinstance(v, str) and len(v) > self.policy.max_string_length for v in value)):
+                    dropped += 1
+                    continue
                 shortened = len(value) > self.policy.max_array_length
                 value = [v[:self.policy.max_string_length] if isinstance(v, str) else v
                          for v in value[:self.policy.max_array_length]]

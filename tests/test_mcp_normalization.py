@@ -43,10 +43,10 @@ def test_parsed_identity_reaches_span_without_reinterpreting_raw_fields(
     hook._populate_span(span, parsed.event_name, data, provider)
 
     attrs = dict(call.args for call in span.set_attribute.call_args_list)
-    assert attrs["gen_ai.client.mcp_server"] == server
-    assert attrs["gen_ai.client.mcp_tool"] == tool
+    assert attrs["o11y.client.mcp_server"] == server
+    assert attrs["o11y.client.mcp_tool"] == tool
     if provider == "cursor":
-        assert attrs["gen_ai.client.mcp.duration_ms"] == 123.0
+        assert attrs["o11y.client.mcp.duration_ms"] == 123.0
     assert payload == original
     assert mcp_runtime.handle.call_args.args[0].msg == original
 
@@ -99,14 +99,14 @@ def test_cursor_correlation_preserves_duration_identity_and_raw_logs(mcp_runtime
             emit(event_name, lifecycle.enrich_buffered_event(data, session))
 
     post = emitted[-1]
-    assert post["gen_ai.client.mcp_server"] == "real-server"
-    assert post["gen_ai.client.mcp_tool"] == "search"
-    assert post["gen_ai.client.tool_use_id"] == "call-1"
-    assert post["gen_ai.client.mcp.duration_ms"] == 1979.0
-    assert post["gen_ai.client.status"] == "success"
-    assert post["gen_ai.client.mcp.output.sha256"] == hook._hash_text('{"result": "found"}')
+    assert post["o11y.client.mcp_server"] == "real-server"
+    assert post["o11y.client.mcp_tool"] == "search"
+    assert post["o11y.client.tool_use_id"] == "call-1"
+    assert post["o11y.client.mcp.duration_ms"] == 1979.0
+    assert post["o11y.client.status"] == "success"
+    assert post["o11y.client.mcp.output.sha256"] == hook._hash_text('{"result": "found"}')
     if buffered:
-        assert {attrs["gen_ai.client.mcp_server"] for attrs in emitted} == {"real-server"}
+        assert {attrs["o11y.client.mcp_server"] for attrs in emitted} == {"real-server"}
     assert [call.args[0].msg for call in mcp_runtime.handle.call_args_list] == [data for _, data in expected_raw]
     assert raw_events == expected_raw
 
@@ -123,9 +123,9 @@ def test_invocation_merge_preserves_callback_identity_and_failure(mcp_runtime):
     })
 
     attrs = enrichment._mcp_observability_attributes(parsed.event_name, merged, capture_policy=hook._CAPTURE_POLICY)
-    assert attrs["gen_ai.client.mcp_server"] == "callback-server"
-    assert attrs["gen_ai.client.mcp_tool"] == "query__all"
-    assert attrs["gen_ai.client.mcp.duration_ms"] == 0
-    assert attrs["gen_ai.client.status"] == "error"
-    assert attrs["gen_ai.client.error.sha256"] == hook._hash_text("failed")
+    assert attrs["o11y.client.mcp_server"] == "callback-server"
+    assert attrs["o11y.client.mcp_tool"] == "query__all"
+    assert attrs["o11y.client.mcp.duration_ms"] == 0
+    assert attrs["o11y.client.status"] == "error"
+    assert attrs["o11y.client.error.sha256"] == hook._hash_text("failed")
     assert "mcp_status" not in data

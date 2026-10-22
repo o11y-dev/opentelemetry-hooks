@@ -4,10 +4,9 @@ Spans contain canonical attributes and bounded recursive `hook.*` fields.
 Optional logs carry the permitted original callback JSON. All configurations use
 this one pipeline; see [configuration](configuration.md).
 
-See the [Coralogix and OTel compatibility audit](coralogix-compatibility.md) for
-the pinned convention revision, retained legacy aliases and conformance limits.
-`gen_ai.client.*` fields describe this project's hook contract, not the OTel
-GenAI registry merely because they share its prefix.
+See the [OTel semantic contract](semantic-conventions.md) for the pinned
+convention revision, operation boundaries and conformance checks. Standard
+GenAI fields use `gen_ai.*`; project hook facts use `o11y.*`.
 
 ## Span Attributes
 
@@ -15,21 +14,20 @@ GenAI registry merely because they share its prefix.
 
 | Attribute | Description |
 |-----------|-------------|
-| `gen_ai.client.hook.event` | Canonical event name (PascalCase) |
-| `gen_ai.client.hook.event_id` | Provider callback ID, or a UUID generated once on observation and retained on replay |
-| `gen_ai.client.telemetry_source` / `gen_ai.client.hook_schema_version` | Explicit hook provenance and contract version |
-| `gen_ai.client.name` | Canonical harness/engine identity (`codex`, `cursor`, `copilot`, `claude`, `opencode`, etc.) |
-| `gen_ai.client.agent_engine` | Inner agent engine when it differs from the outer harness (for example Cursor running Claude Code) |
-| `gen_ai.client.session_id` | Session identifier |
-| `gen_ai.client.generation_id` | Generation identifier (Cursor) |
-| `gen_ai.client.workspace` | Workspace / working directory |
-| `gen_ai.client.cwd` / `gen_ai.client.repository_root` | Event working directory and resolved repository root |
+| `o11y.client.hook.event` | Canonical event name (PascalCase) |
+| `o11y.client.hook.event_id` | Provider callback ID, or a UUID generated once on observation and retained on replay |
+| `o11y.client.telemetry_source` / `o11y.client.hook_schema_version` | Explicit hook provenance and contract version |
+| `o11y.client.name` | Canonical harness/engine identity (`codex`, `cursor`, `copilot`, `claude`, `opencode`, etc.) |
+| `o11y.client.agent_engine` | Inner agent engine when it differs from the outer harness (for example Cursor running Claude Code) |
+| `o11y.client.session_id` | Session identifier |
+| `o11y.client.generation_id` | Generation identifier (Cursor) |
+| `o11y.client.workspace` | Workspace / working directory |
+| `o11y.client.cwd` / `o11y.client.repository_root` | Event working directory and resolved repository root |
 | `vcs.repository.name` / `vcs.ref.head.name` | Repository and Git branch identity |
-| `gen_ai.client.repository.remote.sha256` | SHA-256 of the credential-free normalized Git remote |
-| `gen_ai.client.native_trace_id` / `gen_ai.client.native_span_id` | Valid explicit native source identifiers; generic trace fields are reserved for upstream parenting |
-| `gen_ai.client.timestamp` | Original hook observation timestamp (ISO 8601), retained on replay |
-| `gen_ai.system` | Deprecated legacy harness identity retained for backward compatibility; use `gen_ai.provider.name` for the model provider |
-| `gen_ai.operation.name` | `chat`, `execute_tool`, or `invoke_agent` |
+| `o11y.client.repository.remote.sha256` | SHA-256 of the credential-free normalized Git remote |
+| `o11y.client.native_trace_id` / `o11y.client.native_span_id` | Valid explicit native source identifiers; generic trace fields are reserved for upstream parenting |
+| `o11y.client.timestamp` | Original hook observation timestamp (ISO 8601), retained on replay |
+| `gen_ai.operation.name` | `execute_tool` or `invoke_agent` on reconstructed invocation scopes; omitted on callback observations |
 | `telemetry.distro.name` / `telemetry.distro.version` | Hook package provenance on the OTel resource and in the local JSON span's `resource` object. The version is resolved from installed package metadata rather than duplicated in hook logic; neither field overwrites agent `service.name` or `service.version` |
 
 ### GenAI (When Available)
@@ -43,34 +41,34 @@ GenAI registry merely because they share its prefix.
 | `gen_ai.usage.input_tokens` | Input token count |
 | `gen_ai.usage.output_tokens` | Output token count |
 | `gen_ai.usage.cache_write.input_tokens` | Current standard cache-write input token count when provided |
-| `gen_ai.usage.cache_creation.input_tokens` | Historical cache-write alias retained for our existing queries; same count, do not sum aliases |
 | `gen_ai.usage.cache_read.input_tokens` | Cache-read input token count when provided |
 | `gen_ai.request.temperature` | Temperature setting |
 | `gen_ai.request.max_tokens` | Max tokens setting |
 | `gen_ai.request.choice.count` | Requested number of choices/candidates |
 | `gen_ai.output.type` | Requested output modality (`text`, `json`, `image`, `speech`) |
-| `gen_ai.agent.id` / `gen_ai.agent.name` | Agent identity when the hook payload includes agent metadata |
-| `gen_ai.tool.name` / `gen_ai.tool.type` | Tool identity when provided, alongside legacy `gen_ai.client.tool_name` / MCP fields |
+| `gen_ai.agent.id` / `gen_ai.agent.name` | Explicit hosted resource ID (`agent_resource_id`) and available agent name; invocation IDs use `o11y.client.agent_id` |
+| `gen_ai.tool.name` / `gen_ai.tool.type` | Canonical tool identity when provided; MCP names use the normalized tool name |
 | `gen_ai.response.finish_reasons` | Finish reasons array |
 | `gen_ai.system_instructions` | System instructions (opt-in text capture) |
 | `gen_ai.input.messages` | Input messages (opt-in) |
 | `gen_ai.output.messages` | Output messages (opt-in) |
+| `gen_ai.tool.call.arguments` / `gen_ai.tool.call.result` | JSON-serialized arguments and successful results, subject to capture policy; invalid or locally truncated structured values are omitted |
 
 ### Event-Specific
 
 | Event | Key Attributes |
 |-------|---------------|
-| `UserPromptSubmit` | `gen_ai.client.composer_mode`, `gen_ai.request.model` |
-| `PreToolUse` / `PostToolUse` | `gen_ai.client.tool_name`, `gen_ai.client.tool_id`, `gen_ai.client.tool_use_id`, `gen_ai.client.duration_ms`, and explicit MCP identity when encoded |
-| `PostToolUseFailure` | `gen_ai.client.tool_name`, `gen_ai.client.tool_use_id`, `gen_ai.client.status=error`, privacy-safe error length/hash, and explicit MCP identity when encoded |
-| `BeforeShellExecution` / `AfterShellExecution` | `gen_ai.client.command`, `gen_ai.client.cwd`, `gen_ai.client.exit_code` |
-| `BeforeMCPExecution` / `AfterMCPExecution` | `gen_ai.client.mcp_server`, `gen_ai.client.mcp_tool` |
-| `BeforeReadFile` / `AfterFileEdit` | `gen_ai.client.file_path`, `gen_ai.client.edits` |
-| `SubagentStart` / `SubagentStop` | `gen_ai.client.subagent_type`, `gen_ai.client.agent_id`, `gen_ai.client.parent_agent_id`, ID source, delegation length/hash, and status |
-| `Stop` | `gen_ai.client.status`, `gen_ai.client.loop_count` |
-| `ErrorOccurred` | `error.type`, `error.code`, `gen_ai.client.error.length`, `gen_ai.client.error.sha256`, and `gen_ai.client.is_interrupt` |
+| `UserPromptSubmit` | `o11y.client.composer_mode`, `gen_ai.request.model` |
+| `PreToolUse` / `PostToolUse` | `o11y.client.tool_name`, `o11y.client.tool_id`, `o11y.client.tool_use_id`, `o11y.client.duration_ms`, and explicit MCP identity when encoded |
+| `PostToolUseFailure` | `o11y.client.tool_name`, `o11y.client.tool_use_id`, `o11y.client.status=error`, privacy-safe error length/hash, and explicit MCP identity when encoded |
+| `BeforeShellExecution` / `AfterShellExecution` | `o11y.client.command`, `o11y.client.cwd`, `o11y.client.exit_code` |
+| `BeforeMCPExecution` / `AfterMCPExecution` | `o11y.client.mcp_server`, `o11y.client.mcp_tool` |
+| `BeforeReadFile` / `AfterFileEdit` | `o11y.client.file_path`, `o11y.client.edits` |
+| `SubagentStart` / `SubagentStop` | `o11y.client.subagent_type`, `o11y.client.agent_id`, `o11y.client.parent_agent_id`, ID source, delegation length/hash, and status |
+| `Stop` | `o11y.client.status`, `o11y.client.loop_count` |
+| `ErrorOccurred` | `error.type`, `o11y.error.code`, `o11y.client.error.length`, `o11y.client.error.sha256`, and `o11y.client.is_interrupt` |
 
-Real error and failure callbacks set the OpenTelemetry span status to `ERROR` without placing raw error content in the status description. Intentional callbacks marked `is_interrupt=true` retain `UNSET` status and use `gen_ai.client.status=interrupted`.
+Real error and failure callbacks set the OpenTelemetry span status to `ERROR` without placing raw error content in the status description. Intentional callbacks marked `is_interrupt=true` retain `UNSET` status and use `o11y.client.status=interrupted`.
 
 ## Hook logs
 
@@ -83,10 +81,10 @@ Shell, MCP, tool and conversation callbacks use this same record format.
 Canonical span attributes retain their semantics; recursively extracted fields
 cover additional permitted callback data. There are no separate per-tool or
 per-conversation log emitters. Consumer queries should use the log body for
-provider fields and `gen_ai.client.hook.event` for the event category.
+provider fields and `o11y.client.hook.event` for the event category.
 
 Logs also carry available hook event, session, conversation, generation and turn
-IDs. Retry can duplicate logs; use `gen_ai.client.hook.event_id` to deduplicate.
+IDs. Retry can duplicate logs; use `o11y.client.hook.event_id` to deduplicate.
 
 ### Endpoint Derivation
 
@@ -98,9 +96,9 @@ The logs endpoint is derived automatically:
 
 Example: `https://ingress.us1.coralogix.com:443/v1/traces` → `https://ingress.us1.coralogix.com:443/v1/logs`
 
-## Schema version 2
+## Schema version 3
 
-`gen_ai.client.hook_schema_version` is the string `"2"`. `o11y.*` attributes are
+`o11y.client.hook_schema_version` is the string `"3"`. `o11y.*` attributes are
 project extensions, not OpenTelemetry semantic conventions. Unknown facts are
 omitted; measured zero values are retained. Service and SDK attributes remain on
 the shared Resource. `telemetry.distro.name/version` identify this hook package;
@@ -108,7 +106,7 @@ trace and log instrumentation scopes carry its installed package version.
 
 | Attribute | Type / units | Meaning |
 |---|---|---|
-| `o11y.span.role` | string | `callback`, buffered `callback_scope`, or streaming/session `generation`, `tool`, `subagent`, `session`; distinguishes observations from operation scopes |
+| `o11y.span.role` | string | `callback`, `generation`, `tool`, `subagent`, or `session`; distinguishes observations from operation scopes in buffered and streaming modes |
 | `o11y.time.event_ns` | integer, Unix nanoseconds | Explicit callback `timestamp_ns`, otherwise original hook observation time |
 | `o11y.time.observed_ns` | integer, Unix nanoseconds | Time this hook first received the callback |
 | `o11y.timing.basis` | string | `matching_callback`, `next_callback`, `observation`, `hook_execution`, `generation_end`, `session_end`, `timeout`, or `state_limit` |
@@ -118,7 +116,7 @@ trace and log instrumentation scopes carry its installed package version.
 | `o11y.model.basis` | string | `provider`, `session`, `generation`, or `configuration` |
 | `o11y.usage.basis` / `input_basis` / `output_basis` | string | Provider-reported accounting, or normalized inclusive input |
 | `o11y.usage.semantics` | string | Explicit `per_call`, `cumulative`, `delta`, or `correction`; omitted if unspecified |
-| `o11y.usage.total_tokens` / `gen_ai.usage.total_tokens` | integer, tokens | Project total and historical alias, not a standard total attribute; inclusive input plus output when both are available |
+| `o11y.usage.total_tokens` | integer, tokens | Project total; inclusive input plus output when both are available |
 | `gen_ai.usage.reasoning.output_tokens` | integer, tokens | Reasoning subset of output; never added a second time |
 | `gen_ai.tool.call.id` | string | Available invocation ID, distinct from the callback ID |
 | `o11y.capture.mode` / `policy_id` | string | Effective capture mode and policy fingerprint |
@@ -128,10 +126,10 @@ trace and log instrumentation scopes carry its installed package version.
 | `o11y.result.provider_truncated` | boolean | Explicit provider `truncated` fact, independent of local preview limits |
 
 For conversation facts and canonical `tool_input`, `tool_output`, `tool_response`,
-`mcp_input`, and `mcp_output` payloads, the `gen_ai.client.<label>` family includes:
+`mcp_input`, and `mcp_output` payloads, the `o11y.client.<label>` family includes:
 
-- `length` (integer): original legacy text/serialization character count.
-- `sha256` (string): original legacy fingerprint; existing queries retain its meaning.
+- `length` (integer): original text/serialization character count.
+- `sha256` (string): original text/serialization fingerprint.
 - `bytes` (integer): UTF-8 bytes, using compact, sorted, Unicode JSON for objects/arrays.
 - `hash_basis` and `serialization_version` (strings): text or legacy stringify basis and version `1`.
 - Payload `fingerprint.sha256` / `fingerprint.basis`: new canonical UTF-8 fingerprint,
@@ -139,8 +137,8 @@ For conversation facts and canonical `tool_input`, `tool_output`, `tool_response
 - Conversation `preview_truncated` (boolean): local text preview was shortened;
   this does not assert that the provider result was partial.
 
-Legacy `gen_ai.client.tool.input/response.length/sha256` retain their original
-pre-preview facts. Bytes are measured from parsed content, not original transport
+`o11y.client.tool.input/response.length/sha256` describe pre-preview facts.
+Bytes are measured from parsed content, not original transport
 whitespace. Excluded text can still contribute permitted size/hash facts. Missing
 content does not become empty content.
 

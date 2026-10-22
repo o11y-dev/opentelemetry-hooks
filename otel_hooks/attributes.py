@@ -3,30 +3,29 @@
 _EVENT_ATTR_MAP = {
     # Common
     "UserPromptSubmit": {
-        "composer_mode": "gen_ai.client.composer_mode",
-        "model": "gen_ai.request.model",
+        "composer_mode": "o11y.client.composer_mode",
     },
     "SessionStart": {
-        "source": "gen_ai.client.session_source", "composer_mode": "gen_ai.client.composer_mode",
-        "model": "gen_ai.request.model", "agent_type": "gen_ai.client.agent_type",
+        "source": "o11y.client.session_source", "composer_mode": "o11y.client.composer_mode",
+        "agent_type": "o11y.client.agent_type",
     },
-    "SessionEnd": {"status": "gen_ai.client.status", "reason": "gen_ai.client.session_end_reason"},
-    "PreToolUse": {"tool_name": "gen_ai.client.tool_name", "tool_id": "gen_ai.client.tool_id", "tool_use_id": "gen_ai.client.tool_use_id"},
-    "PostToolUse": {"tool_name": "gen_ai.client.tool_name", "tool_id": "gen_ai.client.tool_id", "tool_use_id": "gen_ai.client.tool_use_id", "duration_ms": "gen_ai.client.duration_ms"},
-    "PostToolUseFailure": {"tool_name": "gen_ai.client.tool_name", "tool_id": "gen_ai.client.tool_id", "tool_use_id": "gen_ai.client.tool_use_id", "is_interrupt": "gen_ai.client.is_interrupt"},
-    "PermissionRequest": {"tool_name": "gen_ai.client.tool_name", "tool_id": "gen_ai.client.tool_id", "tool_use_id": "gen_ai.client.tool_use_id", "turn_id": "gen_ai.client.turn_id"},
-    "SubagentStart": {"subagent_type": "gen_ai.client.subagent_type", "agent_id": "gen_ai.client.agent_id", "parent_agent_id": "gen_ai.client.parent_agent_id", "agent_id_source": "gen_ai.client.agent_id_source", "agent_type": "gen_ai.client.agent_type"},
-    "SubagentStop": {"subagent_type": "gen_ai.client.subagent_type", "status": "gen_ai.client.status", "agent_id": "gen_ai.client.agent_id", "parent_agent_id": "gen_ai.client.parent_agent_id", "agent_id_source": "gen_ai.client.agent_id_source", "agent_type": "gen_ai.client.agent_type"},
-    "Stop": {"status": "gen_ai.client.status", "loop_count": "gen_ai.client.loop_count", "stop_hook_active": "gen_ai.client.stop_hook_active"},
+    "SessionEnd": {"status": "o11y.client.status", "reason": "o11y.client.session_end_reason"},
+    "PreToolUse": {"tool_name": "o11y.client.tool_name", "tool_id": "o11y.client.tool_id", "tool_use_id": "o11y.client.tool_use_id"},
+    "PostToolUse": {"tool_name": "o11y.client.tool_name", "tool_id": "o11y.client.tool_id", "tool_use_id": "o11y.client.tool_use_id", "duration_ms": "o11y.client.duration_ms"},
+    "PostToolUseFailure": {"tool_name": "o11y.client.tool_name", "tool_id": "o11y.client.tool_id", "tool_use_id": "o11y.client.tool_use_id", "is_interrupt": "o11y.client.is_interrupt"},
+    "PermissionRequest": {"tool_name": "o11y.client.tool_name", "tool_id": "o11y.client.tool_id", "tool_use_id": "o11y.client.tool_use_id", "turn_id": "o11y.client.turn_id"},
+    "SubagentStart": {"subagent_type": "o11y.client.subagent_type", "agent_id": "o11y.client.agent_id", "parent_agent_id": "o11y.client.parent_agent_id", "agent_id_source": "o11y.client.agent_id_source", "agent_type": "o11y.client.agent_type"},
+    "SubagentStop": {"subagent_type": "o11y.client.subagent_type", "status": "o11y.client.status", "agent_id": "o11y.client.agent_id", "parent_agent_id": "o11y.client.parent_agent_id", "agent_id_source": "o11y.client.agent_id_source", "agent_type": "o11y.client.agent_type"},
+    "Stop": {"status": "o11y.client.status", "loop_count": "o11y.client.loop_count", "stop_hook_active": "o11y.client.stop_hook_active"},
     # Cursor-specific
-    "BeforeShellExecution": {"command": "gen_ai.client.command", "cwd": "gen_ai.client.cwd"},
-    "AfterShellExecution": {"command": "gen_ai.client.command", "cwd": "gen_ai.client.cwd", "exit_code": "gen_ai.client.exit_code", "duration_ms": "gen_ai.client.duration_ms"},
-    "BeforeMCPExecution": {"mcp_server_name": "gen_ai.client.mcp_server", "mcp_server": "gen_ai.client.mcp_server", "mcp_tool": "gen_ai.client.mcp_tool", "tool_name": "gen_ai.client.mcp_tool", "tool_use_id": "gen_ai.client.tool_use_id"},
-    "AfterMCPExecution": {"mcp_server_name": "gen_ai.client.mcp_server", "mcp_server": "gen_ai.client.mcp_server", "mcp_tool": "gen_ai.client.mcp_tool", "tool_name": "gen_ai.client.mcp_tool", "tool_use_id": "gen_ai.client.tool_use_id", "duration_ms": "gen_ai.client.duration_ms", "duration": "gen_ai.client.duration_ms", "status": "gen_ai.client.status"},
-    "BeforeReadFile": {"file_path": "gen_ai.client.file_path"},
-    "AfterFileEdit": {"file_path": "gen_ai.client.file_path", "edits": "gen_ai.client.edits"},
+    "BeforeShellExecution": {"command": "o11y.client.command", "cwd": "o11y.client.cwd"},
+    "AfterShellExecution": {"command": "o11y.client.command", "cwd": "o11y.client.cwd", "exit_code": "o11y.client.exit_code", "duration_ms": "o11y.client.duration_ms"},
+    "BeforeMCPExecution": {"mcp_server_name": "o11y.client.mcp_server", "mcp_server": "o11y.client.mcp_server", "mcp_tool": "o11y.client.mcp_tool", "tool_name": "o11y.client.mcp_tool", "tool_use_id": "o11y.client.tool_use_id"},
+    "AfterMCPExecution": {"mcp_server_name": "o11y.client.mcp_server", "mcp_server": "o11y.client.mcp_server", "mcp_tool": "o11y.client.mcp_tool", "tool_name": "o11y.client.mcp_tool", "tool_use_id": "o11y.client.tool_use_id", "duration_ms": "o11y.client.duration_ms", "duration": "o11y.client.duration_ms", "status": "o11y.client.status"},
+    "BeforeReadFile": {"file_path": "o11y.client.file_path"},
+    "AfterFileEdit": {"file_path": "o11y.client.file_path", "edits": "o11y.client.edits"},
     # Copilot-specific
-    "ErrorOccurred": {"error_type": "error.type", "error_code": "error.code", "is_interrupt": "gen_ai.client.is_interrupt"},
+    "ErrorOccurred": {"error_type": "error.type", "error_code": "o11y.error.code", "is_interrupt": "o11y.client.is_interrupt"},
 }
 
 # Metadata-only observations shared by current harness contracts. Never flatten
@@ -60,7 +59,7 @@ _OBSERVATION_FIELDS = {
 }
 for _observation_event, _observation_fields in _OBSERVATION_FIELDS.items():
     _EVENT_ATTR_MAP.setdefault(_observation_event, {}).update({
-        field: f"gen_ai.client.{field}" for field in _observation_fields
+        field: f"o11y.client.{field}" for field in _observation_fields
     })
 
 
@@ -69,8 +68,8 @@ for _observation_event, _observation_fields in _OBSERVATION_FIELDS.items():
 # not agent IDs, and a triggering tool call is not the subagent's invocation.
 for event in ("SubagentStart", "SubagentStop"):
     _EVENT_ATTR_MAP[event].update({
-        "parent_conversation_id": "gen_ai.client.parent_conversation_id",
-        "tool_call_id": "gen_ai.client.parent_tool_call_id",
-        "stop_hook_active": "gen_ai.client.stop_hook_active",
+        "parent_conversation_id": "o11y.client.parent_conversation_id",
+        "tool_call_id": "o11y.client.parent_tool_call_id",
+        "stop_hook_active": "o11y.client.stop_hook_active",
     })
-_EVENT_ATTR_MAP["PostToolUseFailure"]["duration_ms"] = "gen_ai.client.duration_ms"
+_EVENT_ATTR_MAP["PostToolUseFailure"]["duration_ms"] = "o11y.client.duration_ms"

@@ -105,9 +105,9 @@ def test_conversation_content_is_hash_only_by_default(monkeypatch):
     lifecycle_data = event.to_lifecycle_data()
     span = RecordingSpan()
     enrichment._apply_conversation_attributes(span, event.event_name, lifecycle_data, capture_policy=otel_hook._CAPTURE_POLICY)
-    assert span.attributes["gen_ai.client.prompt.length"] == 16
-    assert span.attributes["gen_ai.client.prompt.sha256"] == hashlib.sha256(b"synthetic prompt").hexdigest()
-    assert "gen_ai.client.prompt.text" not in span.attributes
+    assert span.attributes["o11y.client.prompt.length"] == 16
+    assert span.attributes["o11y.client.prompt.sha256"] == hashlib.sha256(b"synthetic prompt").hexdigest()
+    assert "o11y.client.prompt.text" not in span.attributes
     assert event.conversation[0].text is None
     assert "prompt" not in lifecycle_data
     assert "text" not in lifecycle_data["_conversation_records"][0]
@@ -122,7 +122,7 @@ def test_conversation_content_uses_explicit_policy(monkeypatch, mode):
     )
     span = RecordingSpan()
     enrichment._apply_conversation_attributes(span, event.event_name, event.to_lifecycle_data(), capture_policy=otel_hook._CAPTURE_POLICY)
-    assert span.attributes["gen_ai.client.response.text"] == "fixture response"
+    assert span.attributes["o11y.client.response.text"] == "fixture response"
 
 
 def test_hook_logs_require_enabled_logging_and_a_captured_body(monkeypatch):
@@ -265,8 +265,8 @@ def test_native_context_attributes_require_valid_ids():
         "native_source": "gemini-native",
         "_hook_provider_adapter": "gemini",
     })
-    assert attrs["gen_ai.client.native_source"] == "gemini-native"
-    assert attrs["gen_ai.client.native_trace_id"] == "1" * 32
+    assert attrs["o11y.client.native_source"] == "gemini-native"
+    assert attrs["o11y.client.native_trace_id"] == "1" * 32
     assert enrichment._native_telemetry_attributes({"native_trace_id": "not-hex"}) == {}
 
 
@@ -332,7 +332,7 @@ def test_native_links_require_explicit_native_identifiers():
         "native_source": "gemini-native",
     })
     assert len(links) == 1
-    assert links[0].attributes["gen_ai.client.native_source"] == "gemini-native"
+    assert links[0].attributes["o11y.client.native_source"] == "gemini-native"
 
 
 def test_real_failure_sets_otel_error_but_interrupt_stays_unset():
@@ -349,7 +349,7 @@ def test_real_failure_sets_otel_error_but_interrupt_stays_unset():
         "PostToolUseFailure",
         {"error_type": "FixtureError"},
     )
-    assert failed.attributes["gen_ai.client.status"] == "error"
+    assert failed.attributes["o11y.client.status"] == "error"
     assert failed.status.status_code == otel_hook.StatusCode.ERROR
     assert not failed.status.description
 
@@ -357,7 +357,7 @@ def test_real_failure_sets_otel_error_but_interrupt_stays_unset():
     data = {"is_interrupt": True, "error_type": "Interrupted"}
     enrichment._apply_conversation_attributes(interrupted, "PostToolUseFailure", data, capture_policy=otel_hook._CAPTURE_POLICY)
     otel_hook._apply_operation_status(interrupted, "PostToolUseFailure", data)
-    assert interrupted.attributes["gen_ai.client.status"] == "interrupted"
+    assert interrupted.attributes["o11y.client.status"] == "interrupted"
     assert interrupted.status is None
 
 
@@ -468,7 +468,7 @@ def test_claude_batch_and_compaction_content_not_persisted(monkeypatch, isolated
         span = RecordingSpan()
         enrichment._apply_conversation_attributes(span, name, persisted, capture_policy=otel_hook._CAPTURE_POLICY)
         label = "instructions" if name == "PreCompact" else "summary"
-        assert span.attributes[f"gen_ai.client.compaction.{label}.length"] == len("PRIVATE_FIXTURE")
+        assert span.attributes[f"o11y.client.compaction.{label}.length"] == len("PRIVATE_FIXTURE")
 
 
 def test_claude_batch_capture_is_explicit_masked_and_bounded(monkeypatch):

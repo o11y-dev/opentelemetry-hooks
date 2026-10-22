@@ -138,7 +138,7 @@ def test_primary_log_body_and_trace_correlation_without_legacy_fanout(monkeypatc
     hook._emit_event_log("PreToolUse", {"_hook_attributes": {}, "_hook_log_body": body, "session_id": "s"})
     record = logger.handle.call_args.args[0]
     assert record.msg == body
-    assert record.__dict__["gen_ai.client.session_id"] == "s"
+    assert record.__dict__["o11y.client.session_id"] == "s"
 
 
 @pytest.mark.parametrize("mode", ["metadata_only", "selected_content", "full"])
@@ -162,7 +162,7 @@ def test_conversation_enrichment_reuses_persisted_facts(isolated_runtime, monkey
         hook._populate_span(span, event, data, "claude")
     writes = [call.args for call in span.set_attribute.call_args_list]
     attrs = dict(writes)
-    prefix = f"gen_ai.client.{kind}"
+    prefix = f"o11y.client.{kind}"
     assert writes.count((f"{prefix}.length", record.length)) == 1
     assert writes.count((f"{prefix}.sha256", record.sha256)) == 1
     if capture.content_enabled:
@@ -183,9 +183,9 @@ def test_conversation_enrichment_derives_missing_facts(isolated_runtime, monkeyp
     span = Mock()
     hook._populate_span(span, "UserPromptSubmit", data, "claude")
     attrs = dict(call.args for call in span.set_attribute.call_args_list)
-    assert attrs["gen_ai.client.prompt.length"] == 5
-    assert attrs["gen_ai.client.prompt.sha256"] == "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
-    assert attrs["gen_ai.client.prompt.text"] == "hello"
+    assert attrs["o11y.client.prompt.length"] == 5
+    assert attrs["o11y.client.prompt.sha256"] == "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+    assert attrs["o11y.client.prompt.text"] == "hello"
     assert json.loads(attrs["gen_ai.input.messages"])[0]["parts"][0]["content"] == "hello"
 
 
@@ -304,14 +304,14 @@ def test_batched_lifecycle_replay_with_real_sdk(tmp_path, mode, logs_enabled, se
         assert "SECRET" not in serialized
     elif selection:
         assert "hook.tool_input.nested.2.camel_case" not in serialized
-        assert "gen_ai.client.command" in serialized
-        assert "gen_ai.client.tool_use_id" in serialized
+        assert "o11y.client.command" in serialized
+        assert "o11y.client.tool_use_id" in serialized
         assert ("hook.tool_input.command" in serialized) == bool(selection["span_include"])
     else:
         assert "hook.tool_input.nested.2.camel_case" in serialized
     assert "_hook_log_body" not in serialized
-    assert "gen_ai.client.response.length" in serialized
-    assert "gen_ai.client.response.sha256" in serialized
+    assert "o11y.client.response.length" in serialized
+    assert "o11y.client.response.sha256" in serialized
     log_file = tmp_path / "exported_logs.jsonl"
     if not logs_enabled:
         assert not log_file.exists()
@@ -392,11 +392,11 @@ def test_large_payload_cannot_evict_canonical_correlation(isolated_runtime):
     data["_hook_attributes"] = hook._CAPTURE_POLICY.attributes(data)
     with provider.get_tracer("test").start_as_current_span("hook") as span:
         hook._populate_span(span, "PreToolUse", data, "codex")
-    assert span.attributes["gen_ai.client.hook.event_id"] == "event"
-    assert span.attributes["gen_ai.client.session_id"] == "s"
-    assert span.attributes["gen_ai.client.generation_id"] == "g"
-    assert span.attributes["gen_ai.client.turn_id"] == "t"
-    assert span.attributes["gen_ai.client.tool_use_id"] == "call"
+    assert span.attributes["o11y.client.hook.event_id"] == "event"
+    assert span.attributes["o11y.client.session_id"] == "s"
+    assert span.attributes["o11y.client.generation_id"] == "g"
+    assert span.attributes["o11y.client.turn_id"] == "t"
+    assert span.attributes["o11y.client.tool_use_id"] == "call"
     assert span.attributes["gen_ai.request.model"] == "example"
     assert span.attributes["gen_ai.usage.input_tokens"] == 123
     provider.shutdown()
@@ -404,13 +404,13 @@ def test_large_payload_cannot_evict_canonical_correlation(isolated_runtime):
 
 @pytest.mark.parametrize("provider,event,fields,expected", [
     ("cursor", "AfterShellExecution", {"command": "pwd", "stdout": "/workspace", "exit_code": 0}, {
-        "gen_ai.client.command": "pwd", "hook.stdout": "/workspace", "gen_ai.client.exit_code": 0,
+        "o11y.client.command": "pwd", "hook.stdout": "/workspace", "o11y.client.exit_code": 0,
     }),
     ("cursor", "AfterMCPExecution", {"mcp_server_name": "search", "tool_name": "lookup", "result_json": {"hits": 3}}, {
-        "gen_ai.client.mcp_server": "search", "gen_ai.client.mcp_tool": "lookup", "hook.result_json.hits": 3,
+        "o11y.client.mcp_server": "search", "o11y.client.mcp_tool": "lookup", "hook.result_json.hits": 3,
     }),
     ("claude", "Stop", {"last_assistant_message": "Done"}, {
-        "gen_ai.client.response.text": "Done", "hook.last_assistant_message": "Done",
+        "o11y.client.response.text": "Done", "hook.last_assistant_message": "Done",
     }),
 ])
 @pytest.mark.parametrize("logs_enabled", [False, True])
@@ -603,24 +603,22 @@ def test_reflect_config_replays_supported_harnesses(tmp_path, provider, config_k
              for line in path.read_text().splitlines()]
     assert spans
     attrs = {key: value for span in spans for key, value in span["attributes"].items()}
-    assert attrs["gen_ai.client.tool.input.file_path"] == args["file_path"]
-    assert attrs["gen_ai.client.tool.input.path"] == args["path"]
-    assert attrs["gen_ai.client.command"] == args["command"]
-    assert attrs["gen_ai.client.session_id"] == "fixture"
+    assert attrs["o11y.client.tool.input.file_path"] == args["file_path"]
+    assert attrs["o11y.client.tool.input.path"] == args["path"]
+    assert attrs["o11y.client.command"] == args["command"]
+    assert attrs["o11y.client.session_id"] == "fixture"
     assert "LOG_ONLY" not in json.dumps(spans)
     if provider == "windsurf":
-        assert attrs["gen_ai.client.file_path"] == args["file_path"]
-        assert attrs["gen_ai.client.cwd"] == args["path"]
+        assert attrs["o11y.client.file_path"] == args["file_path"]
+        assert attrs["o11y.client.cwd"] == args["path"]
         if config_kind != "shared":
             assert "hook.tool_info.command_line" not in attrs  # canonical command needs no extra field
     if config_kind == "shared":
         if provider != "copilot":
             assert attrs["process.exit.code"] == (1 if provider == "opencode" else 0)
-            assert attrs["gen_ai.client.tool.input"] == args["command"]
-        else:
-            assert attrs["gen_ai.client.tool.output"] == "fixture output"
-        assert attrs["gen_ai.client.prompt"] == "fixture prompt"
-        assert attrs["gen_ai.client.output"] == "fixture response"
+            assert json.loads(attrs['gen_ai.tool.call.arguments'])['command'] == args['command']
+        assert attrs["o11y.client.prompt.text"] == "fixture prompt"
+        assert attrs["o11y.client.response.text"] == "fixture response"
         assert "hook.tool_args" not in attrs
     elif not agent_capture or provider == "copilot":
         assert not any(key.startswith("hook.") for key in attrs)
@@ -654,8 +652,8 @@ def test_config_does_not_translate_capture_policy_into_process_flags(isolated_ru
 
 
 def test_span_workspace_and_native_enrichment_is_computed_once(isolated_runtime, monkeypatch):
-    workspace = Mock(return_value={"gen_ai.client.workspace_path": "/fixture"})
-    native = Mock(return_value={"gen_ai.client.native.source": "fixture"})
+    workspace = Mock(return_value={"o11y.client.workspace_path": "/fixture"})
+    native = Mock(return_value={"o11y.client.native.source": "fixture"})
     monkeypatch.setattr(enrichment, "_workspace_observability_attributes", workspace)
     monkeypatch.setattr(enrichment, "_native_telemetry_attributes", native)
     span = Mock()
@@ -663,5 +661,5 @@ def test_span_workspace_and_native_enrichment_is_computed_once(isolated_runtime,
     workspace.assert_called_once()
     native.assert_called_once()
     attrs = {call.args[0]: call.args[1] for call in span.set_attribute.call_args_list}
-    assert attrs["gen_ai.client.workspace_path"] == "/fixture"
-    assert attrs["gen_ai.client.native.source"] == "fixture"
+    assert attrs["o11y.client.workspace_path"] == "/fixture"
+    assert attrs["o11y.client.native.source"] == "fixture"

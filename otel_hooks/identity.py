@@ -150,8 +150,7 @@ def _detect_payload_client_name(data: dict, include_session_fallback: bool = Fal
         return reported
 
     semantic_signals = [
-        _normalize_ide_name(_first_present(data, ("gen_ai.client.name",))),
-        _normalize_ide_name(_first_present(data, ("gen_ai.system",))),
+        _normalize_ide_name(_first_present(data, ("o11y.client.name",))),
         _normalize_ide_name(_first_present(data, ("service.name", "service_name"))),
     ]
     semantic_counts: dict[str, int] = {}
@@ -226,8 +225,7 @@ def _has_strong_engine_signal(data: dict, resolved_engine: str) -> bool:
     if reported == resolved_engine:
         return True
     semantic_signals = [
-        _normalize_ide_name(_first_present(data, ("gen_ai.client.name",))),
-        _normalize_ide_name(_first_present(data, ("gen_ai.system",))),
+        _normalize_ide_name(_first_present(data, ("o11y.client.name",))),
         _normalize_ide_name(_first_present(data, ("service.name", "service_name"))),
     ]
     if sum(1 for signal in semantic_signals if signal == resolved_engine) >= 2:
@@ -288,9 +286,9 @@ def _set_client_identity_attributes(
     """
     resolved_engine = agent_engine if agent_engine is not None else _resolved_agent_engine(data, session_ctx, ide=ide)
     client_name = _resolve_client_name(ide, data=data, agent_engine=resolved_engine, session_ctx=session_ctx)
-    span.set_attribute("gen_ai.client.name", client_name)
+    span.set_attribute("o11y.client.name", client_name)
     if resolved_engine and resolved_engine != ide:
-        span.set_attribute("gen_ai.client.wrapper", ide)
-        span.set_attribute("gen_ai.client.agent_engine", resolved_engine)
+        span.set_attribute("o11y.client.wrapper", ide)
+        span.set_attribute("o11y.client.agent_engine", resolved_engine)
         return resolved_engine
     return None

@@ -256,6 +256,6 @@ correlation, agent identity and workspace discovery. Capture policy is passed
 explicitly to enrichment and correlation. Setup, diagnostics and uninstall live
 in `otel_hooks/cli.py`; source-checkout provisioning lives in `bootstrap.py`.
 See [contribution guide](CONTRIBUTING.md), [telemetry reference](docs/telemetry-reference.md),
-[Coralogix/OTel compatibility](docs/coralogix-compatibility.md), and [CHANGELOG.md](CHANGELOG.md).
+[OTel semantic conventions](docs/semantic-conventions.md), and [CHANGELOG.md](CHANGELOG.md).
 
 Released under the [MIT license](LICENSE).

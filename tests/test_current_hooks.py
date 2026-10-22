@@ -97,7 +97,7 @@ def test_new_response_text_capture_opt_in(monkeypatch):
     item = event("cursor", "afterAgentResponse", text="fixture response")
     span = RecordingSpan()
     enrichment._apply_conversation_attributes(span, item.event_name, item.to_lifecycle_data(), capture_policy=hook._CAPTURE_POLICY)
-    assert span.attributes["gen_ai.client.response.text"] == "fixture response"
+    assert span.attributes["o11y.client.response.text"] == "fixture response"
 
 
 @pytest.mark.usefixtures("isolated_state")

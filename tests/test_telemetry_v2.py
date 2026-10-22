@@ -1,10 +1,11 @@
-"""Schema-v2 acceptance checks against SDK spans and decoded OTLP protobuf."""
+"""Semantic-convention acceptance checks against SDK spans and decoded OTLP."""
 import json
 import logging
 from pathlib import Path
 import sysconfig
 
 import pytest
+from jsonschema import validate as validate_json_schema
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
@@ -24,12 +25,13 @@ def runtime(tmp_path, monkeypatch):
         monkeypatch.setattr(hook, name, str(tmp_path / name))
     monkeypatch.setattr(hook, '_CAPTURE_POLICY', CapturePolicy())
     monkeypatch.setattr(hook, '_LOGS_INITIALIZED', False)
+    monkeypatch.setenv('IDE_OTEL_MASK_PROMPTS', 'false')
     monkeypatch.setattr(hook, '_force_flush_provider', lambda **kwargs: True)
     monkeypatch.setattr(hook, '_resolve_repository_context', lambda data: {})
     exporter = InMemorySpanExporter()
     provider = TracerProvider(id_generator=PersistedIdGenerator())
     provider.add_span_processor(SimpleSpanProcessor(exporter))
-    yield provider.get_tracer('ide-hooks', '2'), exporter
+    yield provider.get_tracer('ide-hooks', '3'), exporter
     provider.shutdown()
 
 
@@ -38,12 +40,12 @@ def test_usage_inclusive_cache_and_reasoning_with_real_zeros():
                                'cache_creation_input_tokens': 100, 'output_tokens': 200,
                                'reasoning_tokens': 50}, 'anthropic')
     assert result['gen_ai.usage.input_tokens'] == 1000
-    assert result['gen_ai.usage.total_tokens'] == 1200
+    assert result['o11y.usage.total_tokens'] == 1200
     assert result['gen_ai.usage.reasoning.output_tokens'] == 50
-    assert usage_attributes({'input_tokens': 0, 'output_tokens': 0}, 'openai')['gen_ai.usage.total_tokens'] == 0
+    assert usage_attributes({'input_tokens': 0, 'output_tokens': 0}, 'openai')['o11y.usage.total_tokens'] == 0
     assert 'gen_ai.usage.input_tokens' not in usage_attributes({'input_tokens': True}, None)
     assert usage_attributes({'input_tokens': 1000, 'output_tokens': 200,
-                             'cache_read_input_tokens': 600}, 'openai')['gen_ai.usage.total_tokens'] == 1200
+                             'cache_read_input_tokens': 600}, 'openai')['o11y.usage.total_tokens'] == 1200
 
 
 @pytest.mark.parametrize('details', [
@@ -74,28 +76,29 @@ def test_default_capture_preserves_openai_usage_details_in_otlp(runtime, monkeyp
     decoded = type(encoded).FromString(encoded.SerializeToString())
     attrs = {a.key: a.value for a in decoded.resource_spans[0].scope_spans[0].spans[0].attributes}
     for key, value in {'input_tokens': 1000, 'output_tokens': 200,
-                       'cache_read.input_tokens': 600, 'reasoning.output_tokens': 50,
-                       'total_tokens': 1200}.items():
+                       'cache_read.input_tokens': 600, 'reasoning.output_tokens': 50}.items():
         attr = attrs['gen_ai.usage.' + key]
         assert attr.WhichOneof('value') == 'int_value'
         assert attr.int_value == value
     assert attrs['o11y.usage.total_tokens'].int_value == 1200
     assert attrs['gen_ai.provider.name'].string_value == 'openai'
-    assert attrs['gen_ai.system'].string_value == 'cursor'  # retained legacy harness alias
+    assert attrs['o11y.client.name'].string_value == 'cursor'
+    assert 'gen_ai.system' not in attrs
+    assert 'gen_ai.usage.total_tokens' not in attrs
     assert not any(key.startswith('hook.') for key in attrs)
 
 
 @pytest.mark.parametrize('write_key', ['cache_creation_input_tokens', 'cache_write_input_tokens'])
 @pytest.mark.parametrize('write', [0, 100])
-def test_cache_write_standard_and_legacy_aliases_preserve_inclusive_accounting(write_key, write):
+def test_provider_cache_write_inputs_emit_only_the_standard_attribute(write_key, write):
     permitted = CapturePolicy().filter({'usage': {
         'input_tokens': 300, 'cache_read_input_tokens': 600, write_key: write, 'output_tokens': 200,
     }})
     attrs = usage_attributes(permitted, 'anthropic')
     assert attrs['gen_ai.usage.cache_write.input_tokens'] == write
-    assert attrs['gen_ai.usage.cache_creation.input_tokens'] == write
+    assert 'gen_ai.usage.cache_creation.input_tokens' not in attrs
     assert attrs['gen_ai.usage.input_tokens'] == 900 + write
-    assert attrs['o11y.usage.total_tokens'] == attrs['gen_ai.usage.total_tokens'] == 1100 + write
+    assert attrs['o11y.usage.total_tokens'] == 1100 + write
 
 
 @pytest.mark.parametrize('value', [True, -1, 1.5, '50'])
@@ -109,25 +112,141 @@ def test_usage_details_reject_non_integer_token_counts(value):
 
 
 @pytest.mark.parametrize('event,fields,legacy', [
-    ('PreToolUse', {'tool_name': 'Read', 'tool_type': 'function'}, 'gen_ai.client.tool_name'),
-    ('AfterMCPExecution', {'mcp_tool': 'search', 'tool_type': 'extension'}, 'gen_ai.client.mcp_tool'),
+    ('PreToolUse', {'tool_name': 'Read', 'tool_type': 'function'}, 'o11y.client.tool_name'),
+    ('AfterMCPExecution', {'mcp_tool': 'search', 'tool_type': 'extension'}, 'o11y.client.mcp_tool'),
 ])
-def test_default_tool_semantics_keep_legacy_names(runtime, event, fields, legacy):
+def test_callback_tool_identity_does_not_claim_an_execution_scope(runtime, event, fields, legacy):
     tracer, _ = runtime
     with tracer.start_as_current_span('callback') as span:
         hook._populate_span(span, event, CapturePolicy().filter(fields), 'cursor')
     assert span.attributes['gen_ai.tool.name'] == span.attributes[legacy]
     assert span.attributes['gen_ai.tool.type'] == fields['tool_type']
-    assert span.attributes['gen_ai.operation.name'] == 'execute_tool'
+    assert 'gen_ai.operation.name' not in span.attributes
 
 
 def test_context_occupancy_is_not_billed_usage_and_top_k_is_integer(runtime):
     tracer, _ = runtime
     with tracer.start_as_current_span('callback') as span:
         hook._populate_span(span, 'PreCompact', {'context_tokens': 1000, 'top_k': 40}, 'cursor')
-    assert span.attributes['gen_ai.client.context_tokens'] == 1000
+    assert span.attributes['o11y.client.context_tokens'] == 1000
     assert not any(key.startswith('gen_ai.usage.') for key in span.attributes)
     assert type(span.attributes['gen_ai.request.top_k']) is int
+
+
+@pytest.mark.parametrize('streaming', [False, True])
+@pytest.mark.parametrize('failure', [False, True])
+def test_emitted_operations_follow_pinned_registry_and_terminal_status(runtime, monkeypatch, streaming, failure):
+    tracer, exporter = runtime
+    from opentelemetry.trace import SpanKind
+    from opentelemetry.trace.status import StatusCode
+    registry = json.loads((Path(__file__).parent / 'fixtures/semconv/gen-ai-9ffc7e0.json').read_text())['attributes']
+    content_schemas = {key: json.loads((Path(__file__).parent / 'fixtures/semconv' / filename).read_text())
+                       for key, filename in {
+                           'gen_ai.input.messages': 'gen-ai-input-messages.json',
+                           'gen_ai.output.messages': 'gen-ai-output-messages.json',
+                           'gen_ai.system_instructions': 'gen-ai-system-instructions.json',
+                           'gen_ai.tool.definitions': 'gen-ai-tool-definitions.json',
+                           'gen_ai.tool.call.arguments': 'gen-ai-tool-call-arguments.json',
+                           'gen_ai.tool.call.result': 'gen-ai-tool-call-result.json',
+                       }.items()}
+    policy = CapturePolicy(mode='full')
+    monkeypatch.setattr(hook, '_CAPTURE_POLICY', policy)
+    original_sampler = tracer.sampler
+    created = []
+
+    class ObservedSampler:
+        def should_sample(self, parent_context, trace_id, name, kind=None, attributes=None, links=None, trace_state=None):
+            created.append((name, dict(attributes or {})))
+            return original_sampler.should_sample(parent_context, trace_id, name, kind, attributes, links, trace_state)
+
+    monkeypatch.setattr(tracer, 'sampler', ObservedSampler())
+    context = hook._create_session_context('s', {'session_id': 's', 'conversation_id': 'conversation'}, 'claude')
+    terminal = ('PostToolUseFailure', {'error': 'fixture failure', 'error_type': 'tool_error',
+                                     'tool_output': {'should_not_be_a_result': True}}) if failure else (
+                'PostToolUse', {'tool_output': {'ok': True}})
+    events = [
+        ('UserPromptSubmit', {'agent_name': 'assistant', 'model': 'claude-sonnet', 'provider_name': 'anthropic',
+                              'prompt': 'read file', 'system_instructions': 'Use tools'}),
+        ('PreToolUse', {'tool_name': 'Read', 'tool_type': 'function', 'tool_use_id': 'call',
+                        'tool_input': {'file_path': '/fixture/file'}, 'model': 'claude-sonnet'}),
+        (terminal[0], {'tool_name': 'Read', 'tool_use_id': 'call', **terminal[1]}),
+        ('SubagentStart', {'agent_id': 'invocation-only', 'subagent_type': 'planner'}),
+        ('SubagentStop', {'agent_id': 'invocation-only', 'subagent_type': 'planner'}),
+        ('Stop', {'response': 'done', 'provider_name': 'anthropic', 'usage': {
+            'input_tokens': 300, 'cache_read_input_tokens': 600, 'cache_creation_input_tokens': 100,
+            'output_tokens': 200, 'reasoning_tokens': 50}}),
+    ]
+    for index, (event, payload) in enumerate(events):
+        permitted = policy.filter({'session_id': 's', 'conversation_id': 'conversation', **payload})
+        data = hook.ClaudeEventAdapter(capture_policy=policy).parse(event, permitted).to_lifecycle_data()
+        data.update(_hook_event_time_ns=100 + index * 10, _hook_observed_time_ns=100 + index * 10)
+        if streaming:
+            assert hook._emit_streaming_event(tracer, 's', event, data, 'claude', 'g')
+        else:
+            hook._append_batch_event('g', event, data)
+    if not streaming:
+        assert hook._flush_generation(tracer, 'g', context, 'claude')
+    hook._flush_session(tracer, 's', context, 'claude')
+    spans = exporter.get_finished_spans()
+    assert spans
+    expected_types = {'string': lambda v: isinstance(v, str), 'int': lambda v: type(v) is int,
+                      'double': lambda v: type(v) is float, 'boolean': lambda v: type(v) is bool,
+                      'string[]': lambda v: isinstance(v, (tuple, list)) and all(isinstance(s, str) for s in v),
+                      'any': lambda v: isinstance(v, str) and json.loads(v) is not None}
+    for span in spans:
+        attrs = span.attributes
+        assert attrs['gen_ai.conversation.id'] == 'conversation'
+        for key, value in attrs.items():
+            if key.startswith('gen_ai.'):
+                assert key in registry, key
+                assert expected_types[registry[key]](value), (key, value)
+                if key in content_schemas:
+                    validate_json_schema(json.loads(value), content_schemas[key])
+        assert 'gen_ai.agent.id' not in attrs  # run IDs are not hosted resources
+        if attrs['o11y.span.role'] in {'callback', 'session'}:
+            assert 'gen_ai.operation.name' not in attrs
+        operation = attrs.get('gen_ai.operation.name')
+        if operation:
+            assert span.kind == SpanKind.INTERNAL
+            assert span.name.startswith(operation)
+            creation = next(attributes for name, attributes in created if name == span.name)
+            assert creation['gen_ai.operation.name'] == operation
+            if operation == 'execute_tool':
+                assert creation['gen_ai.tool.name'] == attrs['gen_ai.tool.name']
+                assert creation['gen_ai.request.model'] == 'claude-sonnet'
+    tool, = [s for s in spans if s.attributes['o11y.span.role'] == 'tool']
+    assert tool.name == 'execute_tool Read'
+    assert tool.end_time == 120
+    assert tool.status.status_code == (StatusCode.ERROR if failure else StatusCode.UNSET)
+    assert json.loads(tool.attributes['gen_ai.tool.call.arguments']) == {'file_path': '/fixture/file'}
+    if failure:
+        assert tool.attributes['error.type'] == 'tool_error'
+        assert 'gen_ai.tool.call.result' not in tool.attributes
+    else:
+        assert json.loads(tool.attributes['gen_ai.tool.call.result']) == {'ok': True}
+    usage, = [s for s in spans if s.attributes.get('gen_ai.usage.input_tokens') is not None]
+    assert usage.attributes['gen_ai.usage.input_tokens'] == 1000
+    assert usage.attributes['gen_ai.usage.cache_write.input_tokens'] == 100
+
+
+def test_standard_content_and_mapping_namespace_are_strict(runtime, monkeypatch):
+    tracer, _ = runtime
+    monkeypatch.setattr(hook, '_CAPTURE_POLICY', CapturePolicy(mode='full'))
+    with tracer.start_as_current_span('callback') as span:
+        hook._populate_span(span, 'PostToolUse', {'tool_name': 'Read', 'tool_output': '42',
+                            'tool_input': '{"file_path":"/fixture/file"}',
+                            'tool_definitions': [{'type': 'function', 'function': {'name': 'Read', 'parameters': {'type': 'object'}}}],
+                            'system_instructions': 'Use tools', 'temperature': True,
+                            'max_tokens': '100', 'seed': 1.5}, 'cursor')
+    assert 'gen_ai.tool.call.result' not in span.attributes
+    assert span.attributes['o11y.client.tool_output.text'] == '42'
+    assert json.loads(span.attributes['gen_ai.tool.call.arguments']) == {'file_path': '/fixture/file'}
+    assert json.loads(span.attributes['gen_ai.tool.definitions']) == [{'type': 'function', 'name': 'Read'}]
+    assert json.loads(span.attributes['gen_ai.system_instructions']) == [{'type': 'text', 'content': 'Use tools'}]
+    assert not any(key in span.attributes for key in ('gen_ai.request.temperature', 'gen_ai.request.max_tokens', 'gen_ai.request.seed'))
+    for key in ('gen_ai.system', 'gen_ai.client.prompt', 'gen_ai.future.custom_field'):
+        with pytest.raises(ValueError, match='protected'):
+            CapturePolicy.from_config({'capture': {'mappings': {'metadata.foo': key}}})
 
 
 def test_parallel_boundaries_and_final_callback():
@@ -160,9 +279,9 @@ def test_buffered_retry_preserves_export_ids_times_and_session_parent(runtime, m
     second = exporter.get_finished_spans()
     assert [(s.context.span_id, s.start_time, s.end_time) for s in first] == [
         (s.context.span_id, s.start_time, s.end_time) for s in second]
-    generation = next(s for s in second if s.name == 'gen_ai.client.generation')
+    generation = next(s for s in second if s.name == 'invoke_agent')
     assert f'{generation.parent.span_id:016x}' == context['session_span_id']
-    pre, post, stop = [s for s in second if '.hook.' in s.name]
+    pre, post, stop = [s for s in second if s.attributes.get('o11y.client.hook.event')]
     assert post.parent.span_id == pre.context.span_id
     assert pre.start_time == 100 and pre.end_time == 200
     assert stop.start_time == stop.end_time == generation.end_time == 300
@@ -190,11 +309,11 @@ def test_streaming_parallel_async_scopes_and_retry(runtime, monkeypatch):
         assert hook._emit_streaming_event(tracer, 's', event, {'session_id': 's', '_hook_event_time_ns': ts,
                                           '_hook_observed_time_ns': ts, **extra}, 'claude', 'g')
     spans = exporter.get_finished_spans()
-    by_name = {s.name: s for s in spans}
-    assert by_name['gen_ai.client.tool'].end_time == 60
-    assert by_name['gen_ai.client.subagent'].end_time == 70
-    assert by_name['gen_ai.client.generation'].end_time == 40
-    assert by_name['gen_ai.client.tool'].parent.span_id == by_name['gen_ai.client.subagent'].context.span_id
+    by_role = {s.attributes['o11y.span.role']: s for s in spans}
+    assert by_role['tool'].end_time == 60
+    assert by_role['subagent'].end_time == 70
+    assert by_role['generation'].end_time == 40
+    assert by_role['tool'].parent.span_id == by_role['subagent'].context.span_id
     monkeypatch.setattr(hook, '_force_flush_provider', lambda **kwargs: False)
     assert not hook._emit_streaming_event(tracer, 's', 'Notification', {'session_id': 's',
                                          '_hook_observed_time_ns': 80}, 'claude', None)
@@ -239,7 +358,7 @@ def test_decoded_otlp_log_body_type_timestamp_status_and_native_context(runtime,
 
 
 def test_policy_protected_fields_and_log_limit_validation():
-    for target in ('gen_ai.usage.input_tokens', 'gen_ai.client.session_id', 'gen_ai.client.status',
+    for target in ('gen_ai.usage.input_tokens', 'o11y.client.session_id', 'o11y.client.status',
                    'gen_ai.tool.call.id', 'gen_ai.tool.name', 'gen_ai.tool.type'):
         with pytest.raises(ValueError, match='protected'):
             CapturePolicy.from_config({'capture': {'mappings': {'x': target}}})
@@ -257,9 +376,9 @@ def test_unicode_original_facts_and_bounded_preview(runtime, monkeypatch):
     data = hook.ClaudeEventAdapter(capture_policy=policy).parse('UserPromptSubmit', {'prompt': original}).to_lifecycle_data()
     with tracer.start_as_current_span('hook') as span:
         hook._populate_span(span, 'UserPromptSubmit', data, 'claude')
-    assert span.attributes['gen_ai.client.prompt.bytes'] == 200
-    assert span.attributes['gen_ai.client.prompt.length'] == 100
-    assert len(span.attributes['gen_ai.client.prompt.text']) == 10
+    assert span.attributes['o11y.client.prompt.bytes'] == 200
+    assert span.attributes['o11y.client.prompt.length'] == 100
+    assert len(span.attributes['o11y.client.prompt.text']) == 10
     assert 'o11y.capture.shortened_or_dropped_fields' in span.attributes
 
 
@@ -267,7 +386,7 @@ def test_streaming_missing_end_is_explicit():
     state = {'trace_id': '1' * 32, 'session_span_id': '2' * 16}
     plan(state, 'PreToolUse', {'session_id': 's', 'tool_use_id': 't', '_hook_observed_time_ns': 10}, 'g')
     records = plan(state, 'SessionEnd', {'session_id': 's', '_hook_observed_time_ns': 30}, None)
-    tool = next(r for r in records if r['name'] == 'gen_ai.client.tool')
+    tool = next(r for r in records if r['name'] == 'o11y.client.tool')
     assert tool['basis'] == 'session_end' and tool['missing']
     assert tool['start'] == 10 and tool['end'] == 30
     assert json.dumps(state)
@@ -333,9 +452,9 @@ def test_small_preview_limit_never_shortens_identity_or_fingerprint(runtime, mon
     assert bounded['session_id'] == 'session-long'
     with tracer.start_as_current_span('hook') as span:
         hook._populate_span(span, 'PreToolUse', bounded, 'claude')
-    assert span.attributes['gen_ai.client.hook.event_id'] == 'callback-long'
+    assert span.attributes['o11y.client.hook.event_id'] == 'callback-long'
     assert span.attributes['gen_ai.tool.call.id'] == 'invocation-long'
-    assert len(span.attributes['gen_ai.client.tool_input.sha256']) == 64
+    assert len(span.attributes['o11y.client.tool_input.sha256']) == 64
 
 
 def test_retry_budget_quarantines_records_with_original_identity(runtime, monkeypatch):
@@ -363,10 +482,10 @@ def test_streaming_timeout_closes_scopes_without_invented_callback_logs(runtime)
                               '_hook_observed_time_ns': 100}, 'claude', 'g')
     assert hook._finalize_session(tracer, 's', None, 'claude')
     spans = exporter.get_finished_spans()
-    tool = next(s for s in spans if s.name == 'gen_ai.client.tool')
+    tool = next(s for s in spans if s.name == 'o11y.client.tool')
     assert tool.attributes['o11y.timing.basis'] == 'timeout'
     assert tool.attributes['o11y.timing.missing_end'] is True
-    assert not any(s.name == 'gen_ai.client.hook.SessionEnd' for s in spans)
+    assert not any(s.name == 'o11y.client.hook.SessionEnd' for s in spans)
 
 
 def test_exporter_initialization_failure_preserves_passive_response(runtime, monkeypatch):
@@ -393,9 +512,9 @@ def test_original_unicode_payload_facts_survive_metadata_only_capture(runtime, m
     assert 'tool_input' not in filtered
     with tracer.start_as_current_span('metadata') as span:
         hook._populate_span(span, 'PreToolUse', filtered, 'claude')
-    assert span.attributes['gen_ai.client.tool_input.bytes'] == len('{"command":"é"}'.encode())
-    assert 'gen_ai.client.tool.input' not in span.attributes
-    assert len(span.attributes['gen_ai.client.tool.input.sha256']) == 64
+    assert span.attributes['o11y.client.tool_input.bytes'] == len('{"command":"é"}'.encode())
+    assert 'o11y.client.tool.input' not in span.attributes
+    assert len(span.attributes['o11y.client.tool.input.sha256']) == 64
 
 
 def test_identical_mcp_payloads_use_observation_identity_not_content():
@@ -416,7 +535,7 @@ def test_structured_message_attribute_is_omitted_instead_of_cut_into_invalid_jso
     with tracer.start_as_current_span('hook') as span:
         hook._populate_span(span, 'UserPromptSubmit', {'prompt': 'x' * 1000}, 'claude')
     assert 'gen_ai.input.messages' not in span.attributes
-    assert len(span.attributes['gen_ai.client.prompt.text']) == 40
+    assert len(span.attributes['o11y.client.prompt.text']) == 40
 
 
 def test_streaming_state_limit_emits_explicit_inferred_scope_closure():
@@ -426,7 +545,7 @@ def test_streaming_state_limit_emits_explicit_inferred_scope_closure():
                        '_hook_observed_time_ns': 100 + i}, 'g')
         state['stream_outbox'] = []  # emulate successful delivery
     assert len(state['stream_scopes']) == 128
-    closed = next(r for r in records if r['name'] == 'gen_ai.client.tool')
+    closed = next(r for r in records if r['name'] == 'o11y.client.tool')
     assert closed['basis'] == 'state_limit' and closed['missing']
 
 
@@ -441,8 +560,8 @@ def test_correlated_mcp_alias_callbacks_do_not_create_extra_invocation_scopes():
         if invocation:
             data['tool_use_id'] = invocation
         records = plan(state, event, data, 'g')
-    assert sum(record['name'] == 'gen_ai.client.tool' for record in records) == 1
-    assert sum(record['name'].startswith('gen_ai.client.hook.') for record in records) == 5
+    assert sum(record['name'] == 'o11y.client.tool' for record in records) == 1
+    assert sum(record['name'].startswith('o11y.client.hook.') for record in records) == 5
 
 
 def test_effective_privacy_and_log_settings_partition_pending_queues(runtime, monkeypatch):

@@ -5,7 +5,7 @@
 ### Added
 - Current OTel cache-write and tool identity attributes alongside legacy names, an explicit project total-token attribute, and a source-pinned Coralogix/OTel compatibility audit with remaining conformance validation.
 - Jamf/Intune offline hash-locked deployment, explicit machine/user registration, SDK-independent detection, shared Claude managed telemetry configuration, enforced exporter policy and operator lifecycle documentation.
-- Telemetry schema v2: original observation/event timing, provider-aware inclusive token accounting, UTF-8 payload facts, capture-policy provenance, protected identity/usage mappings and shared canonical/recursive attribute budgets.
+- Original observation/event timing, provider-aware inclusive token accounting, UTF-8 payload facts, capture-policy provenance, protected identity/usage mappings and shared canonical/recursive attribute budgets.
 - Optional `logs.max_body_bytes` and bounded `batch.max_export_attempts` with retained policy-local quarantine records.
 - Persisted replay identities, branch-local buffered boundaries, streaming generation/tool/subagent scopes and nanosecond native log correlation with failure severity.
 - Enterprise upgrade/rollback guidance, explicit Reflect integration requirements, and security reporting and community support documentation.
@@ -18,6 +18,7 @@
 - Native Windows installed-wheel CI covering parser contracts, UTF-8 input, local session capture and PowerShell/cmd command execution.
 
 ### Changed
+- Adopt semantic schema 3 without backward aliases: reserve `gen_ai.*` for current OTel fields, move hook metadata to `o11y.*`, remove deprecated system/cache/total attributes, and name reconstructed tool/agent invocations with their semantic operation. Validate structured content against pinned upstream JSON schemas and propagate matching terminal failures to invocation spans.
 - Use one capture pipeline for every configuration; metadata-only capture and disabled hook logs are the defaults.
 - Remove separate MCP, shell, tool and conversation log emitters and duplicate tool/metadata flattening. Consumers must migrate old log queries and configure their own attribute mappings.
 - Retire per-content and per-event log switches; capture mode and path selection govern content, while `logs.enabled` controls hook logs.

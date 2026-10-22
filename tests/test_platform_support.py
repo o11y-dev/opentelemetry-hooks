@@ -195,6 +195,8 @@ def test_installed_cli_replays_unicode_session_outside_checkout(tmp_path):
              for line in path.read_text(encoding="utf-8").splitlines()]
     assert spans, "Installed CLI must persist real spans"
     assert len({span["trace_id"] for span in spans}) == 1
+    assert all(not any(key.startswith('gen_ai.') for key in span['resource']) for span in spans)
+    assert all(span['resource']['o11y.client.hook_schema_version'] == '3' for span in spans)
     assert "résumé" not in json.dumps(spans, ensure_ascii=False)
 
 

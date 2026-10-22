@@ -96,23 +96,22 @@ and changing it isolates pending state like any other capture policy change.
 The default and gateway examples use metadata-only capture with logs disabled.
 The main [Reflect example](../examples/otel_config.reflect.example.json) is one
 shared configuration for all eight parsers. It enables full JSON logs, selects
-workspace/tool/model/usage/relationship evidence for spans, maps known scalar
-previews and typed tool fields to names read by Reflect, and explicitly sets
+workspace/tool/model/usage/relationship evidence for spans, maps reported process
+exit codes, and explicitly sets
 extraction limits. It does not attach the original JSON object to a span.
-`OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT: 256` gives the SDK room for the 96 additional
-fields plus canonical enrichment; backend limits can still differ.
+`OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT: 256` is an SDK ceiling; the capture budget
+allows 96 total span attributes. Backend limits can still differ.
 
 The [minimal Reflect example](../examples/otel_config.reflect.minimal.example.json)
 keeps `span_include: []`: canonical fields and full JSON logs only. Canonical
 command, tool file/path, model and ID attributes do not need extraction mappings.
-The main example selects additional callback evidence and legacy scalar aliases
-for existing Reflect readers, rather than requiring a complete config per agent.
+The main example selects additional original callback evidence. Both profiles
+emit the same [semantic schema 3](semantic-conventions.md).
 
-**A shared capture config is not complete backward compatibility with Reflect.**
-Current Reflect also needs setup/dependency and consumer changes for new tool
-hashes, previews, encoded Copilot arguments and legacy log assumptions. See the
-[Reflect compatibility review](reflect-compatibility.md) for tested behavior,
-remaining gaps and integration requirements. Neither example updates Reflect.
+Reflect must update its setup, dependencies and consumers directly; no alias
+layer preserves older telemetry readers. See the
+[Reflect integration requirements](reflect-compatibility.md). Neither example
+updates Reflect.
 
 ### Agent capture examples
 
@@ -149,9 +148,8 @@ sharing one config, combine the needed paths and mappings, or use
 The snippet files alone do not configure an exporter or enable logs.
 
 Separate-process SDK replays check the shared profile, minimal baseline and each
-agent snippet, preserving complete correlated logs. The compatibility review
-also exercises current Reflect ingestion in temporary databases; these checks do
-not verify a live agent installation or a deployed Reflect upgrade.
+agent snippet, preserving complete correlated logs. These checks do not verify
+current Reflect ingestion, a live agent installation or a deployed Reflect upgrade.
 
 ### Attribute names and limits
 
@@ -207,7 +205,7 @@ still carry tool, MCP, model and permitted conversation evidence. Log attributes
 carry hook identity and session/generation/turn correlation; query the body for
 provider fields. Record counts and old log-attribute queries require migration. Correlated Cursor
 MCP callbacks are retained in batches with
-`gen_ai.client.mcp.correlated_evidence=true`; they are callback evidence, not
+`o11y.client.mcp.correlated_evidence=true`; they are callback evidence, not
 additional tool invocations. A terminal callback can establish an incomplete
 session/generation when its start callback was unavailable.
 
@@ -218,7 +216,7 @@ buffering; an oversized body becomes a small correlated reason body containing
 into invalid fragments. The default is no body limit; backend limits still apply. The original JSON log body is buffered only when logs are enabled.
 Policy-permitted parsed fields and extracted attributes are buffered for spans.
 Logs are best effort. A retained trace batch can replay its log on retry, so use
-`gen_ai.client.hook.event_id` for deduplication.
+`o11y.client.hook.event_id` for deduplication.
 
 Operational diagnostics use `diagnostics.level`, `diagnostics.file`,
 `diagnostics.events` and `diagnostics.console`. They are separate from hook payload
@@ -305,14 +303,15 @@ IDs and failure duration are retained. OpenCode plugin invocation IDs normalize
 to `tool_use_id`. Codex retains its tool/turn/session IDs and short callback export
 deadline. See [provider contracts](hook-coverage.md) for first-party sources.
 
-### Schema-v2 persistence and retry settings
+### Schema persistence and retry settings
 
 `batch.max_export_attempts` is a positive integer (default 3). It bounds automatic
 application-level export attempts per buffered generation or streaming record.
 Exhausted records are retained in policy-local `*.quarantine.json` files with
 original IDs/timestamps and an `export_attempts_exhausted` reason. Changing this
 setting, the log-body limit, effective masking, user-identity capture or log
-enablement changes the policy fingerprint and isolates queues.
+enablement changes the policy fingerprint and isolates queues. The telemetry
+schema version is part of the fingerprint, so schema 3 isolates earlier records.
 Quarantined files require operator review and are not removed by stale cleanup.
 
 `capture.mask` masks canonical text previews before persistence and on spans.

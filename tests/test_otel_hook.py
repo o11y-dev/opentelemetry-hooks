@@ -109,7 +109,9 @@ class TestIntOrNone:
 class TestFloatOrNone:
     def test_valid(self):
         assert enrichment._float_or_none(3.14) == 3.14
-        assert enrichment._float_or_none("2.5") == 2.5
+        assert enrichment._float_or_none(2.5) == 2.5
+        assert enrichment._float_or_none("2.5") is None
+        assert enrichment._float_or_none(True) is None
 
     def test_none(self):
         assert enrichment._float_or_none(None) is None
@@ -428,7 +430,7 @@ class TestDetectAgentEngine:
 
     def test_detects_gemini_from_corroborated_semantic_fields(self):
         assert identity._detect_agent_engine({
-            "gen_ai.client.name": "gemini",
+            "o11y.client.name": "gemini",
             "service.name": "gemini-cli",
         }) == "gemini"
 
@@ -790,16 +792,19 @@ class TestGenerationKey:
 
 class TestGenAIOperation:
     def test_tool_events(self):
+        from otel_hooks.semconv import operation_attributes
         for evt in ("PreToolUse", "PostToolUse", "BeforeShellExecution", "AfterMCPExecution"):
-            assert enrichment._genai_operation(evt) == "execute_tool"
+            assert operation_attributes('tool', evt, {'tool_name': 'Read'})['gen_ai.operation.name'] == 'execute_tool'
 
     def test_agent_events(self):
-        for evt in ("SessionStart", "SessionEnd", "SubagentStart", "PreCompact", "PostCompact"):
-            assert enrichment._genai_operation(evt) == "invoke_agent"
+        from otel_hooks.semconv import operation_attributes
+        for role in ('generation', 'subagent'):
+            assert operation_attributes(role, 'SubagentStart', {})['gen_ai.operation.name'] == 'invoke_agent'
 
-    def test_chat_default(self):
-        assert enrichment._genai_operation("UserPromptSubmit") == "chat"
-        assert enrichment._genai_operation("Stop") == "chat"
+    def test_callbacks_do_not_claim_model_calls(self):
+        from otel_hooks.semconv import operation_attributes
+        for event in ('UserPromptSubmit', 'Stop', 'PreCompact', 'PostCompact', 'SessionStart', 'SessionEnd'):
+            assert operation_attributes('callback', event, {}) == {}
 
 
 # ── GenAI messages ────────────────────────────────────────────────────────
@@ -824,7 +829,7 @@ class TestGenAISemconv:
             for args, _kwargs in (call for call in span.set_attribute.call_args_list)
         }
 
-    def test_infers_provider_and_sets_v137_attributes(self, monkeypatch):
+    def test_infers_provider_and_sets_current_attributes(self, monkeypatch):
         monkeypatch.setattr(otel_hook, "_CAPTURE_POLICY", otel_hook.CapturePolicy(mode="full"))
         span = mock.MagicMock()
 
@@ -832,8 +837,9 @@ class TestGenAISemconv:
             "model": "claude-3-7-sonnet",
             "response_model": "claude-3-7-sonnet",
             "response_format": "json_schema",
-            "choice_count": "2",
+            "choice_count": 2,
             "agent_id": "agent-1",
+            "agent_resource_id": "hosted-agent-1",
             "agent_name": "planner",
             "agent_version": "2026.03",
             "agent_description": "Plans coding steps",
@@ -848,18 +854,18 @@ class TestGenAISemconv:
 
         attrs = self._attrs(span)
         assert attrs["gen_ai.provider.name"] == "anthropic"
-        assert attrs["gen_ai.system"] == "claude"
+        assert "gen_ai.system" not in attrs
         assert attrs["gen_ai.output.type"] == "json"
         assert attrs["gen_ai.request.choice.count"] == 2
-        assert attrs["gen_ai.agent.id"] == "agent-1"
+        assert attrs["gen_ai.agent.id"] == "hosted-agent-1"
         assert attrs["gen_ai.agent.name"] == "planner"
         assert attrs["gen_ai.agent.version"] == "2026.03"
         assert attrs["gen_ai.agent.description"] == "Plans coding steps"
         assert attrs["gen_ai.usage.input_tokens"] == 11
         assert attrs["gen_ai.usage.output_tokens"] == 7
-        assert attrs["gen_ai.usage.cache_creation.input_tokens"] == 3
+        assert attrs["gen_ai.usage.cache_write.input_tokens"] == 3
         assert attrs["gen_ai.usage.cache_read.input_tokens"] == 2
-        assert attrs["gen_ai.system_instructions"] == "You are a planner."
+        assert json.loads(attrs["gen_ai.system_instructions"]) == [{"type": "text", "content": "You are a planner."}]
 
     def test_explicit_provider_overrides_model_inference(self):
         span = mock.MagicMock()
@@ -871,24 +877,25 @@ class TestGenAISemconv:
 
         attrs = self._attrs(span)
         assert attrs["gen_ai.provider.name"] == "openai"
-        assert attrs["gen_ai.system"] == "cursor"
+        assert "gen_ai.system" not in attrs
 
-    def test_nested_agent_engine_becomes_genai_system(self):
+    def test_nested_agent_engine_does_not_become_model_provider(self):
         span = mock.MagicMock()
 
         enrichment._apply_genai_semconv(
             span,
             "SubagentStop",
-            {"gen_ai.client.name": "gemini", "service.name": "gemini-cli"},
+            {"o11y.client.name": "gemini", "service.name": "gemini-cli"},
             "claude",
             session_ctx={"agent_engine": "gemini"},
             capture_policy=otel_hook._CAPTURE_POLICY,
         )
 
         attrs = self._attrs(span)
-        assert attrs["gen_ai.system"] == "gemini"
+        assert "gen_ai.system" not in attrs
+        assert "gen_ai.provider.name" not in attrs
 
-    def test_cursor_with_unconfirmed_claude_engine_keeps_cursor_as_genai_system(self):
+    def test_unconfirmed_claude_engine_does_not_become_model_provider(self):
         span = mock.MagicMock()
 
         enrichment._apply_genai_semconv(
@@ -901,9 +908,10 @@ class TestGenAISemconv:
         )
 
         attrs = self._attrs(span)
-        assert attrs["gen_ai.system"] == "cursor"
+        assert "gen_ai.system" not in attrs
+        assert "gen_ai.provider.name" not in attrs
 
-    def test_single_semantic_field_does_not_change_genai_system(self):
+    def test_legacy_system_field_is_not_emitted(self):
         span = mock.MagicMock()
 
         enrichment._apply_genai_semconv(
@@ -916,7 +924,7 @@ class TestGenAISemconv:
         )
 
         attrs = self._attrs(span)
-        assert attrs["gen_ai.system"] == "cursor"
+        assert "gen_ai.system" not in attrs
 
 
 class TestClientIdentityAttributes:
@@ -938,9 +946,9 @@ class TestClientIdentityAttributes:
         )
 
         attrs = self._attrs(span)
-        assert attrs["gen_ai.client.name"] == "cursor"
-        assert "gen_ai.client.wrapper" not in attrs
-        assert "gen_ai.client.agent_engine" not in attrs
+        assert attrs["o11y.client.name"] == "cursor"
+        assert "o11y.client.wrapper" not in attrs
+        assert "o11y.client.agent_engine" not in attrs
 
     def test_promotes_cursor_over_misattributed_outer_ide_from_native_payload(self):
         span = mock.MagicMock()
@@ -952,9 +960,9 @@ class TestClientIdentityAttributes:
         )
 
         attrs = self._attrs(span)
-        assert attrs["gen_ai.client.name"] == "cursor"
-        assert attrs["gen_ai.client.wrapper"] == "claude"
-        assert attrs["gen_ai.client.agent_engine"] == "cursor"
+        assert attrs["o11y.client.name"] == "cursor"
+        assert attrs["o11y.client.wrapper"] == "claude"
+        assert attrs["o11y.client.agent_engine"] == "cursor"
 
     def test_omits_agent_engine_when_same_as_outer_ide(self):
         span = mock.MagicMock()
@@ -962,8 +970,8 @@ class TestClientIdentityAttributes:
         identity._set_client_identity_attributes(span, "claude", data={"client": "Claude Code"})
 
         attrs = self._attrs(span)
-        assert attrs["gen_ai.client.name"] == "claude"
-        assert "gen_ai.client.agent_engine" not in attrs
+        assert attrs["o11y.client.name"] == "claude"
+        assert "o11y.client.agent_engine" not in attrs
 
     def test_promotes_gemini_over_outer_claude(self):
         span = mock.MagicMock()
@@ -971,13 +979,13 @@ class TestClientIdentityAttributes:
         identity._set_client_identity_attributes(
             span,
             "claude",
-            data={"gen_ai.client.name": "gemini", "service.name": "gemini-cli"},
+            data={"o11y.client.name": "gemini", "service.name": "gemini-cli"},
         )
 
         attrs = self._attrs(span)
-        assert attrs["gen_ai.client.name"] == "gemini"
-        assert attrs["gen_ai.client.wrapper"] == "claude"
-        assert attrs["gen_ai.client.agent_engine"] == "gemini"
+        assert attrs["o11y.client.name"] == "gemini"
+        assert attrs["o11y.client.wrapper"] == "claude"
+        assert attrs["o11y.client.agent_engine"] == "gemini"
 
     def test_preserves_outer_agent_when_single_semantic_field_disagrees(self):
         span = mock.MagicMock()
@@ -985,9 +993,9 @@ class TestClientIdentityAttributes:
         identity._set_client_identity_attributes(span, "cursor", data={"gen_ai.system": "vscode"})
 
         attrs = self._attrs(span)
-        assert attrs["gen_ai.client.name"] == "cursor"
-        assert "gen_ai.client.wrapper" not in attrs
-        assert "gen_ai.client.agent_engine" not in attrs
+        assert attrs["o11y.client.name"] == "cursor"
+        assert "o11y.client.wrapper" not in attrs
+        assert "o11y.client.agent_engine" not in attrs
 
     def test_session_context_engine_promotes_nested_client_identity(self):
         span = mock.MagicMock()
@@ -1000,9 +1008,9 @@ class TestClientIdentityAttributes:
         )
 
         attrs = self._attrs(span)
-        assert attrs["gen_ai.client.name"] == "gemini"
-        assert attrs["gen_ai.client.wrapper"] == "claude"
-        assert attrs["gen_ai.client.agent_engine"] == "gemini"
+        assert attrs["o11y.client.name"] == "gemini"
+        assert attrs["o11y.client.wrapper"] == "claude"
+        assert attrs["o11y.client.agent_engine"] == "gemini"
 
     def test_legacy_session_context_engine_promotes_nested_client_identity(self):
         span = mock.MagicMock()
@@ -1015,9 +1023,9 @@ class TestClientIdentityAttributes:
         )
 
         attrs = self._attrs(span)
-        assert attrs["gen_ai.client.name"] == "gemini"
-        assert attrs["gen_ai.client.wrapper"] == "claude"
-        assert attrs["gen_ai.client.agent_engine"] == "gemini"
+        assert attrs["o11y.client.name"] == "gemini"
+        assert attrs["o11y.client.wrapper"] == "claude"
+        assert attrs["o11y.client.agent_engine"] == "gemini"
 
     def test_unconfirmed_session_context_engine_keeps_outer_client_identity(self):
         span = mock.MagicMock()
@@ -1030,9 +1038,9 @@ class TestClientIdentityAttributes:
         )
 
         attrs = self._attrs(span)
-        assert attrs["gen_ai.client.name"] == "claude"
-        assert "gen_ai.client.wrapper" not in attrs
-        assert "gen_ai.client.agent_engine" not in attrs
+        assert attrs["o11y.client.name"] == "claude"
+        assert "o11y.client.wrapper" not in attrs
+        assert "o11y.client.agent_engine" not in attrs
 
     def test_codex_payload_suppresses_stale_claude_session_engine(self):
         span = mock.MagicMock()
@@ -1051,9 +1059,9 @@ class TestClientIdentityAttributes:
         )
 
         attrs = self._attrs(span)
-        assert attrs["gen_ai.client.name"] == "codex"
-        assert "gen_ai.client.wrapper" not in attrs
-        assert "gen_ai.client.agent_engine" not in attrs
+        assert attrs["o11y.client.name"] == "codex"
+        assert "o11y.client.wrapper" not in attrs
+        assert "o11y.client.agent_engine" not in attrs
 
     def test_codex_event_suppresses_leaked_claude_env_and_session_engine(self, monkeypatch):
         monkeypatch.setenv("CLAUDE_CODE_ENTRYPOINT", "1")
@@ -1067,9 +1075,9 @@ class TestClientIdentityAttributes:
         )
 
         attrs = self._attrs(span)
-        assert attrs["gen_ai.client.name"] == "codex"
-        assert "gen_ai.client.wrapper" not in attrs
-        assert "gen_ai.client.agent_engine" not in attrs
+        assert attrs["o11y.client.name"] == "codex"
+        assert "o11y.client.wrapper" not in attrs
+        assert "o11y.client.agent_engine" not in attrs
 
 
 class TestRepositoryEnrichment:
@@ -1249,9 +1257,9 @@ class TestMCPIdentityNormalization:
         )
         attrs = enrichment._mcp_observability_attributes(event_name, data, capture_policy=otel_hook._CAPTURE_POLICY)
         assert data["tool_name"] == "mcp__reflect__reflect_context"
-        assert attrs["gen_ai.client.mcp_server"] == "reflect"
-        assert attrs["gen_ai.client.mcp_tool"] == "reflect_context"
-        assert attrs["gen_ai.client.tool_use_id"] == "tool-1"
+        assert attrs["o11y.client.mcp_server"] == "reflect"
+        assert attrs["o11y.client.mcp_tool"] == "reflect_context"
+        assert attrs["o11y.client.tool_use_id"] == "tool-1"
 
     def test_cursor_real_server_field_beats_executable_command(self):
         data = otel_hook._normalize_mcp_event_data(
@@ -1375,24 +1383,24 @@ class TestCrossAgentBatchLifecycle:
 
         tracer = self._finalize(session_id, "cursor")
         names = [span.name for span in tracer.spans]
-        assert names.count("gen_ai.client.generation") == 1
-        assert names.count("gen_ai.client.hook.PreToolUse") == 1
-        assert names.count("gen_ai.client.hook.PostToolUse") == 1
-        assert names.count("gen_ai.client.session") == 1
+        assert names.count("invoke_agent") == 1
+        assert names.count("execute_tool reflect_context") == 1
+        assert names.count("o11y.client.hook.PostToolUse") == 1
+        assert names.count("o11y.client.session") == 1
         tool_spans = [span for span in tracer.spans if ".hook." in span.name]
-        assert {span.attrs["gen_ai.client.tool_use_id"] for span in tool_spans} == {tool_use_id}
-        assert {span.attrs["gen_ai.client.mcp_server"] for span in tool_spans} == {"reflect"}
-        assert {span.attrs["gen_ai.client.mcp_tool"] for span in tool_spans} == {"reflect_context"}
+        assert {span.attrs["o11y.client.tool_use_id"] for span in tool_spans} == {tool_use_id}
+        assert {span.attrs["o11y.client.mcp_server"] for span in tool_spans} == {"reflect"}
+        assert {span.attrs["o11y.client.mcp_tool"] for span in tool_spans} == {"reflect_context"}
         post_span = next(span for span in tool_spans if span.name.endswith("PostToolUse"))
-        assert post_span.attrs["gen_ai.client.status"] == "success"
-        assert post_span.attrs["gen_ai.client.mcp.duration_ms"] == 1979.0
-        assert "gen_ai.client.mcp.output.sha256" in post_span.attrs
+        assert post_span.attrs["o11y.client.status"] == "success"
+        assert post_span.attrs["o11y.client.mcp.duration_ms"] == 1979.0
+        assert "o11y.client.mcp.output.sha256" in post_span.attrs
         assert otel_hook._load_session_context(session_id) is None
         assert not list((isolated_hook_state / "batches").glob("*.jsonl"))
 
         # Repeated SessionEnd/finalization is a no-op and cannot emit another root.
         assert otel_hook._finalize_session(tracer, session_id, None, "cursor")
-        assert [span.name for span in tracer.spans].count("gen_ai.client.session") == 1
+        assert [span.name for span in tracer.spans].count("o11y.client.session") == 1
 
     def test_stop_then_session_end_flushes_generation_once(self, isolated_hook_state):
         session_id = "cursor-stop-session"
@@ -1428,8 +1436,8 @@ class TestCrossAgentBatchLifecycle:
         assert otel_hook._load_session_context(session_id) is not None
         assert otel_hook._finalize_session(tracer, session_id, ctx, "cursor")
         names = [span.name for span in tracer.spans]
-        assert names.count("gen_ai.client.generation") == 1
-        assert names.count("gen_ai.client.session") == 1
+        assert names.count("invoke_agent") == 1
+        assert names.count("o11y.client.session") == 1
 
     def test_session_end_discovers_unregistered_owned_batch(self, isolated_hook_state):
         session_id = "discovered-batch-session"
@@ -1440,8 +1448,8 @@ class TestCrossAgentBatchLifecycle:
             {"session_id": session_id, "tool_name": "read", "tool_use_id": "read-2"},
         )
         tracer = self._finalize(session_id, "cursor")
-        assert [span.name for span in tracer.spans].count("gen_ai.client.generation") == 1
-        assert [span.name for span in tracer.spans].count("gen_ai.client.session") == 1
+        assert [span.name for span in tracer.spans].count("invoke_agent") == 1
+        assert [span.name for span in tracer.spans].count("o11y.client.session") == 1
         assert not list((isolated_hook_state / "batches").glob("*.jsonl"))
 
     def test_equal_no_id_mcp_callbacks_remain_distinct(self, isolated_hook_state):
@@ -1644,22 +1652,22 @@ class TestCrossAgentBatchLifecycle:
             assert otel_hook._load_session_context(session_id) is not None
 
         permission_spans = [span for span in tracer.spans if span.name.endswith("PermissionRequest")]
-        assert {span.attrs["gen_ai.client.tool_use_id"] for span in permission_spans} == {
+        assert {span.attrs["o11y.client.tool_use_id"] for span in permission_spans} == {
             "codex-tool-1",
             "codex-tool-2",
         }
-        assert {span.attrs["gen_ai.client.mcp_server"] for span in permission_spans} == {"reflect"}
+        assert {span.attrs["o11y.client.mcp_server"] for span in permission_spans} == {"reflect"}
 
         session_path = Path(otel_hook._session_path(session_id))
         old = time.time() - 10
         os.utime(session_path, (old, old))
         monkeypatch.setenv("IDE_OTEL_STATE_TTL_SECONDS", "1")
         otel_hook._flush_stale_sessions(tracer)
-        assert [span.name for span in tracer.spans].count("gen_ai.client.generation") == 2
-        assert [span.name for span in tracer.spans].count("gen_ai.client.session") == 1
+        assert [span.name for span in tracer.spans].count("invoke_agent") == 2
+        assert [span.name for span in tracer.spans].count("o11y.client.session") == 1
         assert otel_hook._load_session_context(session_id) is None
         otel_hook._flush_stale_sessions(tracer)
-        assert [span.name for span in tracer.spans].count("gen_ai.client.session") == 1
+        assert [span.name for span in tracer.spans].count("o11y.client.session") == 1
 
     def test_codex_ambiguous_permission_does_not_invent_id(self, isolated_hook_state):
         session_id = "codex-ambiguous-session"
@@ -1729,13 +1737,13 @@ class TestCrossAgentBatchLifecycle:
 
         ctx = otel_hook._load_session_context(session_id)
         assert otel_hook._finalize_session(tracer, session_id, ctx, "claude")
-        assert [span.name for span in tracer.spans].count("gen_ai.client.generation") == 1
-        assert [span.name for span in tracer.spans].count("gen_ai.client.session") == 1
+        assert [span.name for span in tracer.spans].count("invoke_agent") == 1
+        assert [span.name for span in tracer.spans].count("o11y.client.session") == 1
         failure = next(span for span in tracer.spans if span.name.endswith("PostToolUseFailure"))
-        assert failure.attrs["gen_ai.client.tool_use_id"] == tool_id
-        assert failure.attrs["gen_ai.client.mcp_server"] == "reflect"
-        assert failure.attrs["gen_ai.client.mcp_tool"] == "reflect_context"
-        assert failure.attrs["gen_ai.client.status"] == "error"
+        assert failure.attrs["o11y.client.tool_use_id"] == tool_id
+        assert failure.attrs["o11y.client.mcp_server"] == "reflect"
+        assert failure.attrs["o11y.client.mcp_tool"] == "reflect_context"
+        assert failure.attrs["o11y.client.status"] == "error"
         assert failure.status.status_code == otel_hook.StatusCode.ERROR
 
 
@@ -1743,7 +1751,7 @@ class TestCrossAgentBatchLifecycle:
 
 
 class TestLocalTracePersistence:
-    def _make_mock_span(self, name="gen_ai.client.generation", session_key="sess-1", trace_id=0xABCD, span_id=0x1234):
+    def _make_mock_span(self, name="invoke_agent", session_key="sess-1", trace_id=0xABCD, span_id=0x1234):
         span = mock.MagicMock()
         span.name = name
         ctx = mock.MagicMock()
@@ -1754,8 +1762,8 @@ class TestLocalTracePersistence:
         span.start_time = 1_000_000_000
         span.end_time = 2_000_000_000
         span.attributes = {
-            "gen_ai.client.session.key": session_key,
-            "gen_ai.client.session_id": session_key,
+            "o11y.client.session.key": session_key,
+            "o11y.client.session_id": session_key,
         }
         span.resource = mock.MagicMock()
         span.resource.attributes = {
@@ -1775,8 +1783,8 @@ class TestLocalTracePersistence:
         assert os.path.exists(out_file)
         with open(out_file) as f:
             rec = json.loads(f.read().strip())
-        assert rec["name"] == "gen_ai.client.generation"
-        assert rec["attributes"]["gen_ai.client.session.key"] == "sess-1"
+        assert rec["name"] == "invoke_agent"
+        assert rec["attributes"]["o11y.client.session.key"] == "sess-1"
         assert rec["resource"] == span.resource.attributes
         assert rec["status"] == "OK"
 
@@ -2068,9 +2076,9 @@ class TestFlushAggregateIdentity:
         otel_hook._flush_generation(tracer, "sess-1_gen_1", session_ctx, "codex", flush=False)
 
         attrs = tracer.spans[0].attrs
-        assert attrs["gen_ai.client.name"] == "codex"
-        assert "gen_ai.client.wrapper" not in attrs
-        assert "gen_ai.client.agent_engine" not in attrs
+        assert attrs["o11y.client.name"] == "codex"
+        assert "o11y.client.wrapper" not in attrs
+        assert "o11y.client.agent_engine" not in attrs
 
     def test_session_span_uses_codex_session_payload_over_stale_claude_session_engine(self, monkeypatch):
         tracer = _AggregateFakeTracer()
@@ -2099,9 +2107,9 @@ class TestFlushAggregateIdentity:
         otel_hook._flush_session(tracer, "sess-1", session_ctx, "codex", flush=False)
 
         attrs = tracer.spans[0].attrs
-        assert attrs["gen_ai.client.name"] == "codex"
-        assert "gen_ai.client.wrapper" not in attrs
-        assert "gen_ai.client.agent_engine" not in attrs
+        assert attrs["o11y.client.name"] == "codex"
+        assert "o11y.client.wrapper" not in attrs
+        assert "o11y.client.agent_engine" not in attrs
 
 
 # ── Flush stale sessions ─────────────────────────────────────────────────
@@ -2137,7 +2145,7 @@ class TestFlushStaleSessions:
 
         # Session span should have been emitted
         tracer.start_span.assert_called_once()
-        assert tracer.start_span.call_args[0][0] == "gen_ai.client.session"
+        assert tracer.start_span.call_args[0][0] == "o11y.client.session"
         # File should be removed
         assert not sess_file.exists()
 
@@ -2752,8 +2760,8 @@ class TestToolPayloadAttributes:
 
         span = _FakeSpan()
         enrichment._set_tool_payload_attributes(span, "PostToolUse", data)
-        assert span.attrs["gen_ai.client.tool.response.length"] == len(original_text)
-        assert span.attrs["gen_ai.client.tool.response.sha256"] == hashlib.sha256(
+        assert span.attrs["o11y.client.tool.response.length"] == len(original_text)
+        assert span.attrs["o11y.client.tool.response.sha256"] == hashlib.sha256(
             original_text.encode()
         ).hexdigest()
 
@@ -2763,15 +2771,15 @@ class TestToolPayloadAttributes:
         data = {"tool_input": {"command": "ls", "path": "/tmp"}, "tool_response": {"output": "file.txt"}}
         enrichment._set_tool_payload_attributes(span, "PreToolUse", data)
         # This helper receives fields already permitted by capture policy.
-        assert span.attrs.get("gen_ai.client.command") == "ls"
+        assert span.attrs.get("o11y.client.command") == "ls"
         # content should NOT be flattened by default
-        assert "gen_ai.client.tool.input.command" not in span.attrs
-        assert "gen_ai.client.tool.response.output" not in span.attrs
+        assert "o11y.client.tool.input.command" not in span.attrs
+        assert "o11y.client.tool.response.output" not in span.attrs
         # length + digest should be present
-        assert "gen_ai.client.tool.input.length" in span.attrs
-        assert "gen_ai.client.tool.input.sha256" in span.attrs
-        assert "gen_ai.client.tool.response.length" in span.attrs
-        assert "gen_ai.client.tool.response.sha256" in span.attrs
+        assert "o11y.client.tool.input.length" in span.attrs
+        assert "o11y.client.tool.input.sha256" in span.attrs
+        assert "o11y.client.tool.response.length" in span.attrs
+        assert "o11y.client.tool.response.sha256" in span.attrs
 
 
     def test_permission_request_handled(self, monkeypatch):
@@ -2779,7 +2787,7 @@ class TestToolPayloadAttributes:
         span = _FakeSpan()
         data = {"tool_input": {"description": "need access"}}
         enrichment._set_tool_payload_attributes(span, "PermissionRequest", data)
-        assert span.attrs.get("gen_ai.client.approval.description") == "need access"
+        assert span.attrs.get("o11y.client.approval.description") == "need access"
 
     def test_non_dict_response_does_not_emit_text_when_evidence_present(self, monkeypatch):
         monkeypatch.setenv("IDE_OTEL_CAPTURE_TEXT", "1")
@@ -2790,9 +2798,9 @@ class TestToolPayloadAttributes:
             "tool_response_sha256": "abc123",
         }
         enrichment._set_tool_payload_attributes(span, "PostToolUse", data)
-        assert "gen_ai.client.tool_response.text" not in span.attrs
-        assert span.attrs["gen_ai.client.tool.response.length"] == 18
-        assert span.attrs["gen_ai.client.tool.response.sha256"] == "abc123"
+        assert "o11y.client.tool_response.text" not in span.attrs
+        assert span.attrs["o11y.client.tool.response.length"] == 18
+        assert span.attrs["o11y.client.tool.response.sha256"] == "abc123"
 
 
 
@@ -2821,14 +2829,14 @@ class TestEventEnrichmentAttributes:
         })
         assert attrs["user.id"] == "user-1"
         assert attrs["user.email"] == "user@example.com"
-        assert attrs["gen_ai.client.permission_mode"] == "acceptEdits"
-        assert attrs["gen_ai.client.approval.decision"] == "approved"
-        assert attrs["gen_ai.client.approval.policy"] == "manual"
-        assert attrs["gen_ai.client.approval.required"] is True
-        assert attrs["gen_ai.client.sandbox.mode"] == "workspace-write"
-        assert attrs["gen_ai.client.sandbox.policy"] == "strict"
-        assert attrs["gen_ai.client.tool_choice"] == "required"
-        assert attrs["gen_ai.client.tool_decision"] == "auto"
+        assert attrs["o11y.client.permission_mode"] == "acceptEdits"
+        assert attrs["o11y.client.approval.decision"] == "approved"
+        assert attrs["o11y.client.approval.policy"] == "manual"
+        assert attrs["o11y.client.approval.required"] is True
+        assert attrs["o11y.client.sandbox.mode"] == "workspace-write"
+        assert attrs["o11y.client.sandbox.policy"] == "strict"
+        assert attrs["o11y.client.tool_choice"] == "required"
+        assert attrs["o11y.client.tool_decision"] == "auto"
 
     def test_nested_user_id_wins_over_top_level_object_id(self, monkeypatch):
         monkeypatch.setenv("IDE_OTEL_CAPTURE_USER_IDENTITY", "1")
@@ -2853,8 +2861,8 @@ class TestEventEnrichmentAttributes:
             session_ctx={"vcs.repository.name": "opentelemetry-hooks"},
         )
         assert span.attrs["user.id"] == "user-1"
-        assert span.attrs["gen_ai.client.permission_mode"] == "acceptEdits"
-        assert span.attrs["gen_ai.client.sandbox.mode"] == "workspace-write"
+        assert span.attrs["o11y.client.permission_mode"] == "acceptEdits"
+        assert span.attrs["o11y.client.sandbox.mode"] == "workspace-write"
         assert span.attrs["vcs.repository.name"] == "opentelemetry-hooks"
 
 

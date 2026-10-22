@@ -102,7 +102,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -m venv $venv
           $python = Join-Path $venv "Scripts/python.exe"
-          & $python -m pip install pytest
+          & $python -m pip install pytest 'jsonschema>=4.23'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & $python -m pip install --no-index --find-links "$bundle/wheels" --require-hashes -r "$bundle/requirements.lock"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

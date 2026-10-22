@@ -30,7 +30,8 @@ from typing import Optional
 
 from otel_hooks import bootstrap, enrichment
 from otel_hooks.streaming import plan as plan_streaming
-from otel_hooks.timing import PersistedIdGenerator, export_identity, new_span_id, boundaries
+from otel_hooks.semconv import completed_data, operation_attributes, scope_role, span_name as operation_span_name
+from otel_hooks.timing import PersistedIdGenerator, export_identity, new_span_id, boundaries, matching_terminal, branch as event_branch
 from otel_hooks.lifecycle import BufferedEventDecision, ToolInvocationCorrelator, enrich_buffered_event
 from otel_hooks.workspace import _collect_repository_attributes, _resolve_repository_context
 from otel_hooks.identity import (
@@ -286,7 +287,7 @@ _HEX_DIGITS = frozenset("0123456789abcdef")
 # runners and workflow adapters that forward Claude- or Antigravity-style
 # events may supply camelCase fields instead.
 
-# Canonical gen_ai.client.name values accepted directly from IDE_OTEL_IDE_NAME or
+# Canonical o11y.client.name values accepted directly from IDE_OTEL_IDE_NAME or
 # self-reported payload metadata before alias fallback.
 _MANAGED_HOOK_SOURCE_ENV = "IDE_OTEL_HOOK_SOURCE"
 _CLI_HOOK_SOURCE: Optional[str] = None
@@ -457,7 +458,7 @@ def _cleanup_state() -> None:
 
 
 def _flush_stale_sessions(tracer) -> None:
-    """Emit ``gen_ai.client.session`` root spans for stale sessions that were never closed.
+    """Emit ``o11y.client.session`` root spans for stale sessions that were never closed.
 
     When an IDE crashes or fails to send ``SessionEnd``, the session context
     file lingers on disk.  This function finds sessions older than the
@@ -1023,7 +1024,7 @@ class _FileSpanExporter:
                     for span in spans:
                         if self._expected_session_key is not None:
                             attributes = dict(span.attributes or {})
-                            if attributes.get("gen_ai.client.session_id") != self._expected_session_key:
+                            if attributes.get("o11y.client.session_id") != self._expected_session_key:
                                 continue
                         fh.write(json.dumps(_span_to_dict(span), ensure_ascii=True, default=str) + "\n")
             return SpanExportResult.SUCCESS
@@ -1133,13 +1134,12 @@ def _init_tracing(
             if key and value is not None:
                 resource_attrs.setdefault(key, value)
     resource_attrs.setdefault("service.name", app_name)
-    resource_attrs.setdefault("gen_ai.client.name", resolved_client_name)
-    resource_attrs.setdefault("gen_ai.system", resolved_client_name)
+    resource_attrs.setdefault("o11y.client.name", resolved_client_name)
     if ide != resolved_client_name:
-        resource_attrs.setdefault("gen_ai.client.wrapper", ide)
+        resource_attrs.setdefault("o11y.client.wrapper", ide)
     resource_attrs.update(_hook_distro_attributes())
-    resource_attrs.setdefault("gen_ai.client.telemetry_source", _TELEMETRY_SOURCE)
-    resource_attrs["gen_ai.client.hook_schema_version"] = _HOOK_SCHEMA_VERSION
+    resource_attrs.setdefault("o11y.client.telemetry_source", _TELEMETRY_SOURCE)
+    resource_attrs["o11y.client.hook_schema_version"] = _HOOK_SCHEMA_VERSION
 
     # OS / host resource attributes (OTel semantic conventions)
     os_info = _get_os_info()
@@ -1192,6 +1192,9 @@ def _event_adapter_for(ide: str) -> ProviderEventAdapter:
 def _apply_operation_status(span, event_name: str, data: dict) -> None:
     """Set OTel status for real failures without leaking error descriptions."""
     if _operation_failed(event_name, data) and Status is not None and StatusCode is not None and hasattr(span, "set_status"):
+        error = data.get('error')
+        error_type = data.get('error_type') or (error.get('type') if isinstance(error, dict) else None)
+        span.set_attribute('error.type', error_type if isinstance(error_type, str) and error_type else '_OTHER')
         span.set_status(Status(StatusCode.ERROR))
 
 
@@ -1199,7 +1202,7 @@ def _operation_failed(event_name: str, data: dict) -> bool:
     if data.get('is_interrupt'):
         return False
     status = _lower_or_none(data.get('status') or data.get('mcp_status'))
-    return bool(data.get('_hook_failure_observed') or event_name in {'ErrorOccurred', 'PostToolUseFailure'}
+    return bool(data.get('_hook_failure_observed') or event_name in {'ErrorOccurred', 'PostToolUseFailure', 'StopFailure'}
                 or data.get('error') is not None
                 or (type(data.get('error_length')) in (int, float) and data['error_length'] > 0)
                 or status in {'error', 'failed', 'failure'}
@@ -1251,17 +1254,17 @@ def _emit_event_log(event_name: str, data: dict) -> None:
     if not _LOGS_INITIALIZED or body is None:
         return
     attrs = {
-        "gen_ai.client.hook.event": event_name,
-        "gen_ai.client.telemetry_source": _TELEMETRY_SOURCE,
+        "o11y.client.hook.event": event_name,
+        "o11y.client.telemetry_source": _TELEMETRY_SOURCE,
     }
     for source, target in (("_hook_event_id", "hook.event_id"), ("session_id", "session_id"),
                            ("conversation_id", "conversation_id"), ("turn_id", "turn_id"),
                            ("generation_id", "generation_id")):
         if data.get(source) is not None:
-            attrs[f"gen_ai.client.{target}"] = data[source]
+            attrs[f"o11y.client.{target}"] = data[source]
     _inject_trace_context(attrs)
     if data.get('_hook_provider_adapter'):
-        attrs['gen_ai.client.hook.provider_adapter'] = data['_hook_provider_adapter']
+        attrs['o11y.client.hook.provider_adapter'] = data['_hook_provider_adapter']
     invocation = data.get('tool_use_id') or data.get('tool_call_id') or data.get('call_id')
     if invocation is not None:
         attrs['gen_ai.tool.call.id'] = invocation
@@ -1269,12 +1272,12 @@ def _emit_event_log(event_name: str, data: dict) -> None:
         value = data.get('_hook_' + ('event_time_ns' if key == 'event' else 'observed_time_ns'))
         if type(value) is int:
             attrs['o11y.time.' + key + '_ns'] = value
-    attrs['gen_ai.client.hook_schema_version'] = _HOOK_SCHEMA_VERSION
+    attrs['o11y.client.hook_schema_version'] = _HOOK_SCHEMA_VERSION
     attrs['o11y.capture.mode'] = _CAPTURE_POLICY.mode
     attrs['o11y.capture.policy_id'] = _CAPTURE_POLICY.fingerprint
     for key in ('tool_use_id', 'tool_call_id', 'agent_id'):
         if data.get(key) is not None:
-            attrs['gen_ai.client.' + key] = data[key]
+            attrs['o11y.client.' + key] = data[key]
     record = logging.LogRecord('otel_hook.hooks', logging.ERROR if _operation_failed(event_name, data) else logging.INFO,
                                '', 0, body, (), None)
     if data.get('_hook_event_time_ns') is not None:
@@ -1423,6 +1426,8 @@ def _new_session_context(data: dict, ide: str) -> dict:
         ctx["context_origin"] = "upstream"
     if model := _first_present(data, ("request_model", "model", "model_name")):
         ctx["last_known_model"] = model
+    if isinstance(data.get('conversation_id'), str) and data['conversation_id']:
+        ctx['conversation_id'] = data['conversation_id']
 
     repository_context = _resolve_repository_context(data)
     ctx.update(repository_context)
@@ -1499,7 +1504,7 @@ def _maybe_enrich_session_context(session_key: Optional[str], session_ctx: Optio
             "vcs.repository.name",
             "vcs.ref.head.name",
             "vcs.ref.head.type",
-            "gen_ai.client.repository.remote.sha256",
+            "o11y.client.repository.remote.sha256",
         ):
             value = repo_ctx.get(key)
             if value:
@@ -1935,10 +1940,13 @@ def _emit_streaming_event(tracer, session_key, event_name, data, ide, generation
     if not current or records is None:
         return False
     for record in records:
+        role = record.get('role', 'callback')
         parent = _make_trace_context(record['trace_id'], record['parent_span_id'],
                                      current.get('trace_flags', '01'), current.get('tracestate'))
         with export_identity(record['trace_id'], record['span_id']):
             span = tracer.start_span(record['name'], context=parent, start_time=record['start'],
+                                     kind=SpanKind.INTERNAL,
+                                     attributes=_initial_span_attributes(role, record['event'], record['data']),
                                      links=_event_span_links(record['data'], current))
         span.set_attribute('o11y.timing.basis', record['basis'])
         span.set_attribute('o11y.timing.inferred', record['basis'] != 'matching_callback')
@@ -1947,12 +1955,12 @@ def _emit_streaming_event(tracer, session_key, event_name, data, ide, generation
         with _span_context(span):
             if record.get('scope_only'):
                 enrichment.populate_span(span, record['event'], record['data'], ide,
-                                         session_ctx=current, capture_policy=_CAPTURE_POLICY)
+                                         session_ctx=current, capture_policy=_CAPTURE_POLICY, span_role=role)
                 _apply_operation_status(span, record['event'], record['data'])
             else:
                 _populate_span(span, record['event'], record['data'], ide, session_ctx=current)
                 _remember_agent_span_context(session_key, current, record['event'], record['data'], span)
-        span.set_attribute('o11y.span.role', record['name'].rsplit('.', 1)[-1] if record.get('scope_only') else 'callback')
+        span.set_attribute('o11y.span.role', role)
         if record['end'] < record['start']:
             span.set_attribute('o11y.timing.end_before_start', True)
         span.end(end_time=record['end'])
@@ -2190,7 +2198,7 @@ def _native_span_links(data: dict) -> list:
             trace_state=TraceState(),
         )
         return [Link(native_context, attributes={
-            "gen_ai.client.native_source": (
+            "o11y.client.native_source": (
                 data.get("native_source") or data.get("_hook_provider_adapter", "unknown")
             )
         })]
@@ -2228,7 +2236,7 @@ def _agent_relationship_links(data: dict, session_ctx: Optional[dict]) -> list:
             trace_flags=TraceFlags(TraceFlags.SAMPLED),
             trace_state=TraceState(),
         )
-        return [Link(context, attributes={"gen_ai.client.link.type": "delegation"})]
+        return [Link(context, attributes={"o11y.client.link.type": "delegation"})]
     except (TypeError, ValueError):
         return []
 
@@ -2285,11 +2293,27 @@ def _remember_agent_span_context(
 # ---------------------------------------------------------------------------
 # Span population
 # ---------------------------------------------------------------------------
-def _populate_span(span, event_name: str, data: dict, ide: str, session_ctx: Optional[dict] = None, batch_model: Optional[str] = None) -> None:
+def _initial_span_attributes(role, event, data, model=None):
+    """Make known semantic identity available when the SDK samples a span."""
+    attrs = operation_attributes(role, event, data)
+    model = _first_present(data, ('request_model', 'model', 'model_name')) or model
+    provider = enrichment._infer_genai_provider(data if not model else {**data, 'request_model': model})
+    if provider:
+        attrs['gen_ai.provider.name'] = provider
+    if isinstance(model, str) and model:
+        attrs['gen_ai.request.model'] = model
+    conversation = data.get('conversation_id') or data.get('session_id')
+    if isinstance(conversation, str) and conversation:
+        attrs['gen_ai.conversation.id'] = conversation
+    return attrs
+
+
+def _populate_span(span, event_name: str, data: dict, ide: str, session_ctx: Optional[dict] = None, batch_model: Optional[str] = None, *, span_role: str = 'callback') -> None:
     """Enrich the active span, emit its correlated hook log, then set status."""
     enrichment.populate_span(
         span, event_name, data, ide, session_ctx=session_ctx, batch_model=batch_model,
         capture_policy=_CAPTURE_POLICY, attach_os_attributes=_ATTACH_OS_ATTRIBUTES_PER_SPAN,
+        span_role=span_role,
     )
     _emit_event_log(event_name, data)
     _apply_operation_status(span, event_name, data)
@@ -2353,7 +2377,8 @@ def _flush_generation_unlocked(tracer, gen_key: str, session_ctx: Optional[dict]
     span_kind = SpanKind.INTERNAL if SpanKind is not None else None
     with export_identity(identity['trace_id'], identity['span_id']):
         gen_span = tracer.start_span(
-            "gen_ai.client.generation", kind=span_kind,
+            operation_span_name('generation', 'UserPromptSubmit', first_event_data), kind=span_kind,
+            attributes=_initial_span_attributes('generation', 'UserPromptSubmit', first_event_data, batch_model),
             context=parent_ctx, start_time=first_ts,
         )
     gen_ctx = trace.set_span_in_context(gen_span)
@@ -2365,16 +2390,18 @@ def _flush_generation_unlocked(tracer, gen_key: str, session_ctx: Optional[dict]
                     if item.get('tool_use_id') and item.get('start_span_id')}
     with _span_context(gen_span):
         gen_span.set_attribute("o11y.span.role", "generation")
-        gen_span.set_attribute("gen_ai.client.generation_id", gen_key)
+        gen_span.set_attribute("o11y.client.generation_id", gen_key)
         _set_if_present(
             gen_span,
-            "gen_ai.client.session_id",
+            "o11y.client.session_id",
             _session_key(first_event_data) or (session_ctx or {}).get("session_id"),
         )
-        gen_span.set_attribute("gen_ai.client.event.count", len(batch))
-        _set_if_present(gen_span, "gen_ai.agent.id", (session_ctx or {}).get("root_agent_id"))
+        gen_span.set_attribute("o11y.client.event.count", len(batch))
+        _set_if_present(gen_span, "o11y.client.agent_id", (session_ctx or {}).get("root_agent_id"))
+        _set_if_present(gen_span, "gen_ai.conversation.id", first_event_data.get('conversation_id') or
+                        (session_ctx or {}).get('conversation_id') or _session_key(first_event_data) or (session_ctx or {}).get("session_id"))
         _set_if_present(gen_span, "gen_ai.request.model", batch_model)
-        _apply_memory_summary_attrs(gen_span, "gen_ai.client.memory", memory_summary)
+        _apply_memory_summary_attrs(gen_span, "o11y.client.memory", memory_summary)
         _set_client_identity_attributes(gen_span, ide, data=first_event_data, session_ctx=session_ctx)
         _apply_enrichment_attributes(gen_span, first_event_data, session_ctx=session_ctx)
         _log_with_span(_LOGGER, logging.INFO, gen_span, "Generation span: gen_key=%s events=%d", gen_key, len(batch))
@@ -2398,8 +2425,10 @@ def _flush_generation_unlocked(tracer, gen_key: str, session_ctx: Optional[dict]
             if evt in {'PreToolUse', 'BeforeMCPExecution', 'BeforeShellExecution'} and tool_id:
                 tool_parents[(agent_id, tool_id)] = entry['span_id']
             with export_identity(identity['trace_id'], entry['span_id']):
+                role = ('callback' if evt_data.get('_mcp_correlated_evidence') else scope_role(evt))
                 span = tracer.start_span(
-                    f"gen_ai.client.hook.{evt}", kind=span_kind,
+                    operation_span_name(role, evt, evt_data), kind=span_kind,
+                    attributes=_initial_span_attributes(role, evt, evt_data, batch_model),
                     context=callback_parent, start_time=ts,
                     links=_event_span_links(evt_data, session_ctx),
                 )
@@ -2408,7 +2437,9 @@ def _flush_generation_unlocked(tracer, gen_key: str, session_ctx: Optional[dict]
             if missing_end:
                 span.set_attribute('o11y.timing.missing_end', True)
             with _span_context(span):
-                _populate_span(span, evt, evt_data, ide, session_ctx=session_ctx, batch_model=batch_model)
+                terminal = matching_terminal(batch, idx) if role in {'tool', 'subagent'} else None
+                scope_data = completed_data(evt_data, terminal['data'], terminal['event']) if terminal else evt_data
+                _populate_span(span, evt, scope_data, ide, session_ctx=session_ctx, batch_model=batch_model, span_role=role)
                 _remember_agent_span_context(
                     _session_key(evt_data),
                     session_ctx,
@@ -2416,9 +2447,13 @@ def _flush_generation_unlocked(tracer, gen_key: str, session_ctx: Optional[dict]
                     evt_data,
                     span,
                 )
-            span.set_attribute('o11y.span.role', 'callback_scope' if evt in {'PreToolUse', 'SubagentStart', 'BeforeShellExecution', 'BeforeMCPExecution'} else 'callback')
+            span.set_attribute('o11y.span.role', role)
             span.end(end_time=next_ts)
 
+        terminal = next((entry for entry in reversed(batch) if entry.get('event') in {'Stop', 'StopFailure', 'Interrupt'}
+                         and event_branch(entry.get('data') or {}) == event_branch(first_event_data)), None)
+        if terminal:
+            _apply_operation_status(gen_span, terminal['event'], terminal['data'])
         gen_span.end(end_time=last_ts)
 
     success = not flush or _force_flush_provider(authoritative_signal="traces")
@@ -2475,7 +2510,7 @@ def _flush_session(tracer, session_key: str, session_ctx: dict, ide: str, flush:
                   if session_ctx.get('upstream_parent_span_id') else None)
     with export_identity(session_ctx['trace_id'], session_ctx.get('session_span_id') or new_span_id()):
         session_span = tracer.start_span(
-            "gen_ai.client.session", kind=span_kind,
+            "o11y.client.session", kind=span_kind,
             context=parent_ctx, start_time=start_ns,
         )
     with _span_context(session_span):
@@ -2485,25 +2520,26 @@ def _flush_session(tracer, session_key: str, session_ctx: dict, ide: str, flush:
             timestamp = entry.get("timestamp_ns") or end_ns
             with export_identity(session_ctx['trace_id'], entry.get('span_id') or new_span_id()):
                 hook_span = tracer.start_span(
-                    f"gen_ai.client.hook.{event}", kind=span_kind,
+                    f"o11y.client.hook.{event}", kind=span_kind,
                     context=trace.set_span_in_context(session_span), start_time=timestamp,
                 )
             with _span_context(hook_span):
                 _populate_span(hook_span, event, data, ide, session_ctx=session_ctx)
             hook_span.end(end_time=timestamp)
         session_span.set_attribute("o11y.span.role", "session")
-        session_span.set_attribute("gen_ai.client.session_id", session_key)
-        _set_if_present(session_span, "gen_ai.agent.id", session_ctx.get("root_agent_id"))
+        session_span.set_attribute("o11y.client.session_id", session_key)
+        _set_if_present(session_span, "o11y.client.agent_id", session_ctx.get("root_agent_id"))
+        session_span.set_attribute("gen_ai.conversation.id", session_ctx.get("conversation_id") or session_ctx.get("session_id") or session_key)
         _set_if_present(
             session_span,
-            "gen_ai.client.agent_id_source",
+            "o11y.client.agent_id_source",
             session_ctx.get("root_agent_id_source"),
         )
         _set_client_identity_attributes(session_span, ide, data=first_event_data, session_ctx=session_ctx)
-        session_span.set_attribute("gen_ai.client.generation_count", session_ctx.get("generation_count", 0))
-        session_span.set_attribute("gen_ai.client.session.duration_ms", (end_ns - start_ns) // 1_000_000)
+        session_span.set_attribute("o11y.client.generation_count", session_ctx.get("generation_count", 0))
+        session_span.set_attribute("o11y.client.session.duration_ms", (end_ns - start_ns) // 1_000_000)
         _apply_enrichment_attributes(session_span, first_event_data, session_ctx=session_ctx)
-        _apply_memory_summary_attrs(session_span, "gen_ai.client.memory", session_ctx.get("memory", {}))
+        _apply_memory_summary_attrs(session_span, "o11y.client.memory", session_ctx.get("memory", {}))
         _log_with_span(_LOGGER, logging.INFO, session_span, "Session span: session=%s", session_key)
         session_span.end(end_time=end_ns)
 
@@ -2744,7 +2780,7 @@ def main() -> int:
             # Sessionless runners cannot use the persisted batch lifecycle.
             parent_ctx = _event_parent_trace_context(data, session_ctx)
             with tracer.start_as_current_span(
-                f"gen_ai.client.hook.{event_name}", kind=SpanKind.INTERNAL,
+                f"o11y.client.hook.{event_name}", kind=SpanKind.INTERNAL,
                 context=parent_ctx,
                 links=_event_span_links(data, session_ctx),
             ) as span:
@@ -2791,7 +2827,7 @@ def main() -> int:
                 return 0
         else:
             with tracer.start_as_current_span(
-                f"gen_ai.client.hook.{event_name}", kind=SpanKind.INTERNAL,
+                f"o11y.client.hook.{event_name}", kind=SpanKind.INTERNAL,
                 context=parent_ctx, links=_event_span_links(data, session_ctx),
             ) as span:
                 span.set_attribute('o11y.timing.basis', 'hook_execution')

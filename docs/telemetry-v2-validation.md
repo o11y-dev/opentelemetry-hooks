@@ -1,6 +1,6 @@
-# Telemetry schema v2 validation
+# Telemetry validation
 
-Baseline: PR #99 at `73a8590d377d41793b0279a646a5d6f5357ccf45`.
+Historical schema-v2 benchmark baseline: PR #99 at `73a8590d377d41793b0279a646a5d6f5357ccf45`.
 Validation environment: Linux, Python 3.12.14, OTel SDK 1.45.1.
 
 ## Reproducible checks
@@ -13,7 +13,7 @@ python -m build
 bun test tests/opencode.test.ts
 ```
 
-The schema-v2 tests inspect real SDK spans and decoded trace/log OTLP protobuf.
+The acceptance tests inspect real SDK spans and decoded trace/log OTLP protobuf.
 They verify branch-local boundaries, native log correlation/types/severity,
 original nanosecond timestamps, UNSET ordinary status, matching tool scopes,
 asynchronous subagents, original UTF-8 facts, shared preview budgets, protected
@@ -22,20 +22,26 @@ failure responses, replay identity, retry quarantine and timeout closure.
 Existing tests additionally cover provider parsing, MCP correlation, capture
 modes and aliases, SDK-free CLI boundaries, process-separated lifecycle replay,
 policy isolation, native Windows registration and installed-command execution.
-Windows CI now includes the v2 acceptance tests against the installed wheel.
+Windows CI includes the acceptance tests against the installed wheel.
 
-### Coralogix and current OTel naming audit
+### Current semantic schema 3
 
-The [source-pinned compatibility audit](coralogix-compatibility.md) records the
-2026-10-22 comparison. Fifteen additional cases cover OpenAI Responses and Chat
-Completions usage under the default policy, cache-write aliases and inclusive
-accounting, invalid counts, standard/legacy tool identity and context occupancy.
-The schema-v2, capture and runtime suites pass 431 tests. Contract, current-hook
-and managed-deployment checks pass 123 tests with one Windows-only skip; two
-setup tests use the explicit temporary project roots described below because
-of sandbox ancestor markers. The rebuilt installed wheel passes all 35 schema-v2
-cases outside the checkout. Ruff, whitespace checks and wheel/sdist builds pass.
-No live Coralogix payload or AI Center recognition test was performed.
+The [semantic contract](semantic-conventions.md) pins OTel GenAI revision
+`9ffc7e0`, with no backward attribute aliases. All 40 acceptance cases pass.
+The checks include actual emitted attribute names and types against the upstream
+79-field registry, structured content against six upstream JSON schemas, sampled
+creation attributes, operation span names/kinds, buffered and streaming terminal
+failure propagation, hosted resource versus run identity, inclusive token
+accounting, invalid counts and context occupancy.
+
+The broader local suite passes 725 cases with three platform skips. The three
+unchanged shell tests described below remain incompatible with sandbox ancestor
+markers. Local setup tests use explicit temporary project roots outside the
+repository; the installed-CLI check uses the virtual environment's executable on
+PATH. The rebuilt installed wheel also passes all 40 acceptance cases outside
+the checkout. Ruff, whitespace checks and wheel/sdist builds pass. JSON Schema
+validation is a test dependency only, not a runtime or MDM bundle dependency.
+No live vendor harness, collector or backend conformance canary was performed.
 
 The managed sandbox injects empty agent/project marker directories above test
 folders. Setup autodetection tests can therefore discover `/tmp` as a project.
@@ -46,7 +52,7 @@ the parent tree remain incompatible with the sandbox; they are unchanged and run
 normally in GitHub Actions. No production root-discovery behavior was changed to
 accommodate this environment.
 
-## Synthetic before/after comparison
+## Historical schema-v2 before/after comparison
 
 Run against separate baseline and current checkouts using the same interpreter:
 
@@ -54,7 +60,7 @@ Run against separate baseline and current checkouts using the same interpreter:
 python scripts/benchmark_telemetry.py /path/to/baseline /path/to/current
 ```
 
-[Recorded measurements](telemetry-v2-benchmark.json) compare three six-callback
+[Recorded measurements](telemetry-v2-benchmark.json) predate semantic schema 3 and compare three six-callback
 sessions for each profile/revision (18 CLI processes per cell). Each session
 contains a prompt, a tool invocation, Unicode payloads and explicit termination.
 The runner uses the real SDK and protobuf encoders, with collector-free exporter
@@ -68,7 +74,7 @@ large/concurrent session memory, Windows latency or production backend limits.
 
 ## Live coverage and rollout limits
 
-### Managed deployment extension
+### Earlier managed deployment validation
 
 The MDM extension adds explicit machine/user registration, per-event overlap
 suppression, enforced export policy, shared Claude settings, offline bundle
@@ -104,7 +110,7 @@ runner. Per-record collector rejections are not exposed by the SDK's export enum
 collector-side rejection metrics remain necessary. Span/log delivery is
 independent and replay can duplicate accepted records.
 
-Before rollout, perform the [schema-v2 canary procedure](upgrades.md#schema-version-2-rollout)
+Before rollout, perform the [current canary procedure](upgrades.md#schema-version-3-rollout)
 on the actual harness/OS/backend and compare hook latency, queue/quarantine growth,
 memory and exported bytes. Canary execution and deployment are operational rollout
 steps, not claimed by these local checks.

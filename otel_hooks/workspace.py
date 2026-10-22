@@ -156,7 +156,7 @@ def _resolve_repository_context(data: Optional[dict] = None, session_ctx: Option
             "vcs.repository.name",
             "vcs.ref.head.name",
             "vcs.ref.head.type",
-            "gen_ai.client.repository.remote.sha256",
+            "o11y.client.repository.remote.sha256",
         ):
             value = session_ctx.get(key)
             if isinstance(value, str) and value.strip():
@@ -188,7 +188,7 @@ def _resolve_repository_context(data: Optional[dict] = None, session_ctx: Option
         if (
             "vcs.repository.name" not in repo_ctx
             or "vcs.repository.owner" not in repo_ctx
-            or "gen_ai.client.repository.remote.sha256" not in repo_ctx
+            or "o11y.client.repository.remote.sha256" not in repo_ctx
         ):
             remote_url = _git_command_output(
                 ["git", "config", "--get", "remote.origin.url"],
@@ -201,7 +201,7 @@ def _resolve_repository_context(data: Optional[dict] = None, session_ctx: Option
                 repo_ctx["vcs.repository.name"] = name
             normalized_remote = _normalize_repository_remote(remote_url)
             if normalized_remote:
-                repo_ctx["gen_ai.client.repository.remote.sha256"] = _hash_text(normalized_remote)
+                repo_ctx["o11y.client.repository.remote.sha256"] = _hash_text(normalized_remote)
         if "vcs.repository.name" not in repo_ctx:
             repo_name = os.path.basename(git_root.rstrip(os.sep))
             if repo_name:
@@ -224,7 +224,7 @@ def _collect_repository_attributes(data: Optional[dict] = None, session_ctx: Opt
         "vcs.repository.name",
         "vcs.ref.head.name",
         "vcs.ref.head.type",
-        "gen_ai.client.repository.remote.sha256",
+        "o11y.client.repository.remote.sha256",
     ):
         value = repo_ctx.get(key)
         if value:
@@ -241,17 +241,17 @@ def _workspace_observability_attributes(data: Optional[dict], session_ctx: Optio
     workspace = workspace or repo_ctx.get("repo_root") or cwd
     attrs = {}
     if workspace:
-        attrs["gen_ai.client.workspace"] = os.path.abspath(os.path.expanduser(str(workspace)))
+        attrs["o11y.client.workspace"] = os.path.abspath(os.path.expanduser(str(workspace)))
     if cwd:
-        attrs["gen_ai.client.cwd"] = os.path.abspath(os.path.expanduser(cwd))
+        attrs["o11y.client.cwd"] = os.path.abspath(os.path.expanduser(cwd))
     if repo_ctx.get("repo_root"):
-        attrs["gen_ai.client.repository_root"] = repo_ctx["repo_root"]
+        attrs["o11y.client.repository_root"] = repo_ctx["repo_root"]
     for key in (
         "vcs.repository.owner",
         "vcs.repository.name",
         "vcs.ref.head.name",
         "vcs.ref.head.type",
-        "gen_ai.client.repository.remote.sha256",
+        "o11y.client.repository.remote.sha256",
     ):
         if repo_ctx.get(key):
             attrs[key] = repo_ctx[key]

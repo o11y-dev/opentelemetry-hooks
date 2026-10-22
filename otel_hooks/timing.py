@@ -52,14 +52,8 @@ def boundaries(batch):
         data = entry.get('data') or {}
         start = entry['timestamp_ns']
         later = [e for e in batch[index + 1:] if branch(e.get('data') or {}) == branch(data)]
-        invocation = data.get('tool_use_id') or data.get('tool_call_id') or data.get('call_id')
         ends = _PAIRS.get(entry.get('event'), set())
-        matched = next((e for e in later if e.get('event') in ends and (
-            (invocation and invocation == ((e.get('data') or {}).get('tool_use_id')
-                                         or (e.get('data') or {}).get('tool_call_id')
-                                         or (e.get('data') or {}).get('call_id')))
-            or (entry.get('event') == 'SubagentStart' and data.get('agent_id'))
-        )), None)
+        matched = matching_terminal(batch, index)
         if matched:
             result.append((matched['timestamp_ns'], 'matching_callback', False))
         elif later:
@@ -68,3 +62,15 @@ def boundaries(batch):
             # The terminal callback is an observation, not a fabricated 1ms interval.
             result.append((start, 'observation', bool(ends)))
     return result
+
+
+def matching_terminal(batch, index):
+    entry = batch[index]
+    data = entry.get('data') or {}
+    invocation = data.get('tool_use_id') or data.get('tool_call_id') or data.get('call_id')
+    return next((other for other in batch[index + 1:]
+                 if branch(other.get('data') or {}) == branch(data)
+                 and other.get('event') in _PAIRS.get(entry.get('event'), set())
+                 and ((invocation and invocation == ((other.get('data') or {}).get('tool_use_id')
+                       or (other.get('data') or {}).get('tool_call_id') or (other.get('data') or {}).get('call_id')))
+                      or (entry.get('event') == 'SubagentStart' and data.get('agent_id')))), None)

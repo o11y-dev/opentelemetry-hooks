@@ -12,22 +12,23 @@ Use your backend's intrinsic span fields for **span name**, **span status**, **d
 
 | Panel | Filter | Group by | Measure |
 | --- | --- | --- | --- |
-| Sessions by agent | `span.name = gen_ai.client.session` | `gen_ai.client.name` | count |
-| Generations by model | `span.name = gen_ai.client.generation` | `gen_ai.request.model` | count |
-| Hook failures | `span.name starts with gen_ai.client.hook.` and (`status.code = ERROR` or `gen_ai.client.error` exists) | `gen_ai.client.name` | error count / total hook spans |
-| Tool activity | `span.name in {gen_ai.client.hook.PreToolUse, gen_ai.client.hook.PostToolUse, gen_ai.client.hook.PostToolUseFailure}` | `gen_ai.client.tool_name` | count or p95 duration |
-| Shell + MCP activity | `gen_ai.client.command` exists or `gen_ai.client.mcp_server` exists | `gen_ai.client.command`, `gen_ai.client.mcp_server`, `gen_ai.client.mcp_tool` | count |
-| Token usage | `gen_ai.usage.input_tokens` exists or `gen_ai.usage.output_tokens` exists | `gen_ai.client.name`, `gen_ai.request.model`, `gen_ai.provider.name` | sum input tokens, sum output tokens |
+| Sessions by agent | `span.name = o11y.client.session` | `o11y.client.name` | count |
+| Generations by model | `o11y.span.role = generation` | `gen_ai.request.model` | count |
+| Hook failures | `span.name starts with o11y.client.hook.` and (`status.code = ERROR` or `o11y.client.error` exists) | `o11y.client.name` | error count / total hook spans |
+| Tool activity | `o11y.span.role = tool` and `gen_ai.operation.name = execute_tool` | `gen_ai.tool.name` | invocation count; p95 duration for matching callback boundaries |
+| Shell + MCP activity | `o11y.client.command` exists or `o11y.client.mcp_server` exists | `o11y.client.command`, `o11y.client.mcp_server`, `o11y.client.mcp_tool` | count |
+| Token usage facts | `gen_ai.usage.input_tokens` exists or `gen_ai.usage.output_tokens` exists | `o11y.client.name`, `gen_ai.request.model`, `gen_ai.provider.name` | reported input/output counts per observation |
 
 ## Useful drill-downs
 
-- **Single session trace**: filter `gen_ai.client.session.key = <session key>`
-- **Prompt lifecycle**: filter `span.name in {gen_ai.client.hook.UserPromptSubmit, gen_ai.client.generation, gen_ai.client.hook.Stop}`
-- **File edits**: filter `span.name = gen_ai.client.hook.AfterFileEdit`
-- **Wrapper vs inner engine**: compare `gen_ai.client.name`, `gen_ai.client.wrapper`, and `gen_ai.client.agent_engine`
+- **Single session trace**: filter `o11y.client.session_id = <session key>`
+- **Prompt lifecycle**: select `o11y.span.role = generation` and prompt/stop callback observations in that generation
+- **File edits**: filter `span.name = o11y.client.hook.AfterFileEdit`
+- **Wrapper vs inner engine**: compare `o11y.client.name`, `o11y.client.wrapper`, and `o11y.client.agent_engine`
 
 ## Portability notes
 
-- Prefer `service.name`, `gen_ai.client.name`, `gen_ai.provider.name`, `gen_ai.request.model`, and `gen_ai.usage.*` as reusable dimensions.
-- Treat `gen_ai.client.session.key`, file paths, cwd, and tool input/output hashes as **trace drill-down fields**, not long-lived metric dimensions.
+- Prefer `service.name`, `o11y.client.name`, `gen_ai.provider.name`, `gen_ai.request.model`, and `gen_ai.usage.*` as reusable dimensions.
+- Treat `o11y.client.session_id`, file paths, cwd, and tool input/output hashes as **trace drill-down fields**, not long-lived metric dimensions.
+- Sum token counts only after selecting one authoritative source and an explicit per-call or delta accounting policy. Do not add callback/scope/native copies or cumulative observations together.
 - Translate `count`, `sum`, and `p95 duration` into your backend's native visualization or query language; the field names above stay the same.
