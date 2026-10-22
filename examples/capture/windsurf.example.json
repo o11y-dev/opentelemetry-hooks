@@ -1,0 +1,11 @@
+{
+  "capture": {
+    "mode": "full",
+    "span_include": [
+      "tool_info.mcp_result.exit_code"
+    ],
+    "mappings": {
+      "tool_info.mcp_result.exit_code": "hook.tool_response.exit_code"
+    }
+  }
+}

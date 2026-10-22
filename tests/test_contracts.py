@@ -12,6 +12,9 @@ from unittest import mock
 import pytest
 
 import otel_hook
+from otel_hooks import enrichment
+from otel_hooks import workspace
+from otel_hooks import cli as hook_cli
 
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "contracts"
@@ -101,56 +104,43 @@ def test_conversation_content_is_hash_only_by_default(monkeypatch):
     )
     lifecycle_data = event.to_lifecycle_data()
     span = RecordingSpan()
-    otel_hook._apply_conversation_attributes(span, event.event_name, lifecycle_data)
-    assert span.attributes["gen_ai.client.prompt.length"] == 16
-    assert span.attributes["gen_ai.client.prompt.sha256"] == hashlib.sha256(b"synthetic prompt").hexdigest()
-    assert "gen_ai.client.prompt.text" not in span.attributes
+    enrichment._apply_conversation_attributes(span, event.event_name, lifecycle_data, capture_policy=otel_hook._CAPTURE_POLICY)
+    assert span.attributes["o11y.client.prompt.length"] == 16
+    assert span.attributes["o11y.client.prompt.sha256"] == hashlib.sha256(b"synthetic prompt").hexdigest()
+    assert "o11y.client.prompt.text" not in span.attributes
     assert event.conversation[0].text is None
     assert "prompt" not in lifecycle_data
     assert "text" not in lifecycle_data["_conversation_records"][0]
 
 
-def test_conversation_content_new_gate_and_legacy_gate(monkeypatch):
-    for env_name in ("IDE_OTEL_CAPTURE_CONVERSATION_CONTENT", "IDE_OTEL_CAPTURE_TEXT"):
-        monkeypatch.delenv("IDE_OTEL_CAPTURE_CONVERSATION_CONTENT", raising=False)
-        monkeypatch.delenv("IDE_OTEL_CAPTURE_TEXT", raising=False)
-        monkeypatch.setenv(env_name, "true")
-        event = otel_hook.ClaudeEventAdapter().normalize(
-            "Stop",
-            "Stop",
-            {"session_id": "session-1", "last_assistant_message": "fixture response"},
-        )
-        span = RecordingSpan()
-        otel_hook._apply_conversation_attributes(
-            span,
-            event.event_name,
-            event.to_lifecycle_data(),
-        )
-        assert span.attributes["gen_ai.client.response.text"] == "fixture response"
-
-
-def test_conversation_logs_are_explicit_opt_in(monkeypatch):
-    event = otel_hook.CopilotEventAdapter().normalize(
-        "errorOccurred",
-        "ErrorOccurred",
-        {"session_id": "session-1", "error": "synthetic failure"},
+@pytest.mark.parametrize("mode", ["selected_content", "full"])
+def test_conversation_content_uses_explicit_policy(monkeypatch, mode):
+    policy = otel_hook.CapturePolicy(mode=mode)
+    monkeypatch.setattr(otel_hook, "_CAPTURE_POLICY", policy)
+    event = otel_hook.ClaudeEventAdapter(capture_policy=policy).normalize(
+        "Stop", "Stop", {"session_id": "session-1", "last_assistant_message": "fixture response"},
     )
+    span = RecordingSpan()
+    enrichment._apply_conversation_attributes(span, event.event_name, event.to_lifecycle_data(), capture_policy=otel_hook._CAPTURE_POLICY)
+    assert span.attributes["o11y.client.response.text"] == "fixture response"
+
+
+def test_hook_logs_require_enabled_logging_and_a_captured_body(monkeypatch):
     logger = mock.MagicMock()
-    monkeypatch.setattr(otel_hook, "_LOGS_INITIALIZED", True)
     monkeypatch.setattr(otel_hook, "_get_otel_logger", lambda _name: logger)
     monkeypatch.setattr(otel_hook, "_inject_trace_context", lambda attrs: ("1", "2"))
-    monkeypatch.delenv("IDE_OTEL_CAPTURE_TEXT", raising=False)
-    monkeypatch.delenv("IDE_OTEL_CAPTURE_CONVERSATION_CONTENT", raising=False)
-    monkeypatch.delenv("IDE_OTEL_ENABLE_CONVERSATION_LOGS", raising=False)
-    otel_hook._emit_conversation_logs(event.event_name, event.to_lifecycle_data())
-    logger.error.assert_not_called()
-
-    monkeypatch.setenv("IDE_OTEL_ENABLE_CONVERSATION_LOGS", "true")
-    otel_hook._emit_conversation_logs(event.event_name, event.to_lifecycle_data())
-    logger.error.assert_called_once()
-    attrs = logger.error.call_args.kwargs["extra"]
-    assert attrs["gen_ai.client.error.length"] == 17
-    assert "gen_ai.client.error.text" not in attrs
+    monkeypatch.setattr(otel_hook, "_LOGS_INITIALIZED", False)
+    body = {"session_id": "session-1", "error": "synthetic failure"}
+    data = {"_hook_log_body": body}
+    otel_hook._emit_event_log("ErrorOccurred", data)
+    logger.handle.assert_not_called()
+    monkeypatch.setattr(otel_hook, "_LOGS_INITIALIZED", True)
+    otel_hook._emit_event_log("ErrorOccurred", {})
+    logger.handle.assert_not_called()
+    otel_hook._emit_event_log("ErrorOccurred", data)
+    logger.handle.assert_called_once()
+    assert logger.handle.call_args.args[0].msg == body
+    assert logger.handle.call_args.args[0].levelno == 40
 
 
 def test_duplicate_prompt_and_concurrent_subagents_are_handled_independently(isolated_state):
@@ -253,8 +243,8 @@ def test_error_and_compaction_callbacks_use_bounded_deduplication(isolated_state
 
 
 def test_workspace_remote_normalization_removes_credentials():
-    ssh = otel_hook._normalize_repository_remote("git@github.com:o11y-dev/opentelemetry-hooks.git")
-    https = otel_hook._normalize_repository_remote(
+    ssh = workspace._normalize_repository_remote("git@github.com:o11y-dev/opentelemetry-hooks.git")
+    https = workspace._normalize_repository_remote(
         "https://token:secret@github.com/o11y-dev/opentelemetry-hooks.git?ignored=true"
     )
     assert ssh == "github.com/o11y-dev/opentelemetry-hooks"
@@ -263,21 +253,21 @@ def test_workspace_remote_normalization_removes_credentials():
 
 
 def test_native_context_attributes_require_valid_ids():
-    assert otel_hook._native_telemetry_attributes({
+    assert enrichment._native_telemetry_attributes({
         "trace_id": "1" * 32,
         "span_id": "2" * 16,
         "_hook_provider_adapter": "gemini",
     }) == {}
-    attrs = otel_hook._native_telemetry_attributes({
+    attrs = enrichment._native_telemetry_attributes({
         "native_trace_id": "1" * 32,
         "native_span_id": "2" * 16,
         "native_parent_span_id": "3" * 16,
         "native_source": "gemini-native",
         "_hook_provider_adapter": "gemini",
     })
-    assert attrs["gen_ai.client.native_source"] == "gemini-native"
-    assert attrs["gen_ai.client.native_trace_id"] == "1" * 32
-    assert otel_hook._native_telemetry_attributes({"native_trace_id": "not-hex"}) == {}
+    assert attrs["o11y.client.native_source"] == "gemini-native"
+    assert attrs["o11y.client.native_trace_id"] == "1" * 32
+    assert enrichment._native_telemetry_attributes({"native_trace_id": "not-hex"}) == {}
 
 
 def test_adapter_separates_upstream_and_native_trace_contracts():
@@ -342,35 +332,40 @@ def test_native_links_require_explicit_native_identifiers():
         "native_source": "gemini-native",
     })
     assert len(links) == 1
-    assert links[0].attributes["gen_ai.client.native_source"] == "gemini-native"
+    assert links[0].attributes["o11y.client.native_source"] == "gemini-native"
 
 
 def test_real_failure_sets_otel_error_but_interrupt_stays_unset():
     assert otel_hook._load_otel_modules()
     failed = RecordingSpan()
-    otel_hook._apply_conversation_attributes(
+    enrichment._apply_conversation_attributes(
         failed,
         "PostToolUseFailure",
         {"error_type": "FixtureError"},
+        capture_policy=otel_hook._CAPTURE_POLICY,
     )
     otel_hook._apply_operation_status(
         failed,
         "PostToolUseFailure",
         {"error_type": "FixtureError"},
     )
-    assert failed.attributes["gen_ai.client.status"] == "error"
+    assert failed.attributes["o11y.client.status"] == "error"
     assert failed.status.status_code == otel_hook.StatusCode.ERROR
     assert not failed.status.description
 
     interrupted = RecordingSpan()
     data = {"is_interrupt": True, "error_type": "Interrupted"}
-    otel_hook._apply_conversation_attributes(interrupted, "PostToolUseFailure", data)
+    enrichment._apply_conversation_attributes(interrupted, "PostToolUseFailure", data, capture_policy=otel_hook._CAPTURE_POLICY)
     otel_hook._apply_operation_status(interrupted, "PostToolUseFailure", data)
-    assert interrupted.attributes["gen_ai.client.status"] == "interrupted"
+    assert interrupted.attributes["o11y.client.status"] == "interrupted"
     assert interrupted.status is None
 
 
 def test_trace_authoritative_flush_does_not_fail_for_log_only_failure(monkeypatch):
+    # Each real callback is a fresh process. Do not inherit exporter failures or
+    # short-hook deadlines from earlier CLI tests in this pytest process.
+    monkeypatch.setattr(otel_hook, "_EXPORT_FAILURES", set())
+    monkeypatch.setattr(otel_hook, "_EXPORT_DEADLINE", None)
     trace_provider = mock.MagicMock()
     trace_provider.force_flush.return_value = True
     log_provider = mock.MagicMock()
@@ -385,27 +380,29 @@ def test_trace_authoritative_flush_does_not_fail_for_log_only_failure(monkeypatc
 
     assert not otel_hook._force_flush_provider()
     assert otel_hook._force_flush_provider(authoritative_signal="traces")
+    otel_hook._EXPORT_FAILURES.add("traces")
+    assert not otel_hook._force_flush_provider(authoritative_signal="traces")
 
 
 def test_workspace_identity_is_not_invented_from_hook_process_cwd(monkeypatch):
-    monkeypatch.setattr(otel_hook, "_resolve_repository_context", lambda *_args, **_kwargs: {})
-    assert otel_hook._workspace_observability_attributes({}, None) == {}
+    monkeypatch.setattr(workspace, "_resolve_repository_context", lambda *_args, **_kwargs: {})
+    assert workspace._workspace_observability_attributes({}, None) == {}
 
 
 def test_doctor_reports_enabled_log_exporter_failure(monkeypatch, isolated_state):
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "https://collector.example.test:4318")
     monkeypatch.setenv("IDE_OTEL_ENABLE_LOGS", "true")
     monkeypatch.setattr(
-        otel_hook,
+        hook_cli,
         "_agent_config_paths",
-        lambda _global, _cwd: {agent: "/fixture" for agent in otel_hook._SUPPORTED_AGENTS},
+        lambda _global, _cwd: {agent: "/fixture" for agent in hook_cli._SUPPORTED_AGENTS},
     )
-    monkeypatch.setattr(otel_hook, "_registered_hook_events", lambda _agent, _path: ["Stop"])
+    monkeypatch.setattr(hook_cli, "_registered_hook_events", lambda _agent, _path: ["Stop"])
     monkeypatch.setattr(otel_hook, "_detect_ide", lambda _data: "codex")
     otel_hook._record_delivery_health("traces", True)
     otel_hook._record_delivery_health("logs", False)
 
-    report, exit_code = otel_hook._doctor_report(("codex",), True, ".")
+    report, exit_code = hook_cli._doctor_report(otel_hook, ("codex",), True, ".")
     assert exit_code == 1
     assert report["exporter"]["status"] == "failing_recent"
     assert {failure["signal"] for failure in report["recent_delivery_failures"]} == {"logs"}
@@ -469,17 +466,17 @@ def test_claude_batch_and_compaction_content_not_persisted(monkeypatch, isolated
             assert call[f"{key}_sha256"] == hashlib.sha256(text.encode()).hexdigest()
     else:
         span = RecordingSpan()
-        otel_hook._apply_conversation_attributes(span, name, persisted)
+        enrichment._apply_conversation_attributes(span, name, persisted, capture_policy=otel_hook._CAPTURE_POLICY)
         label = "instructions" if name == "PreCompact" else "summary"
-        assert span.attributes[f"gen_ai.client.compaction.{label}.length"] == len("PRIVATE_FIXTURE")
+        assert span.attributes[f"o11y.client.compaction.{label}.length"] == len("PRIVATE_FIXTURE")
 
 
 def test_claude_batch_capture_is_explicit_masked_and_bounded(monkeypatch):
-    monkeypatch.setenv("IDE_OTEL_CAPTURE_TOOL_INPUT_CONTENT", "true")
+    policy = otel_hook.CapturePolicy(mode="full")
     monkeypatch.setenv("IDE_OTEL_MASK_PROMPTS", "true")
     monkeypatch.setenv("IDE_OTEL_TEXT_MAX_CHARS", "32")
     original = "fixture@example.test " + "x" * 100
-    event = otel_hook.ClaudeEventAdapter().normalize("PostToolBatch", None, {
+    event = otel_hook.ClaudeEventAdapter(capture_policy=policy).normalize("PostToolBatch", None, {
         "tool_calls": [{"tool_response": original}],
     })
     call = event.to_lifecycle_data()["tool_calls"][0]
@@ -491,8 +488,8 @@ def test_claude_batch_capture_is_explicit_masked_and_bounded(monkeypatch):
 
 @pytest.mark.parametrize("name,field", [("PreCompact", "custom_instructions"), ("PostCompact", "compact_summary")])
 def test_compaction_content_can_be_enabled(monkeypatch, name, field):
-    monkeypatch.setenv("IDE_OTEL_CAPTURE_CONVERSATION_CONTENT", "true")
-    event = otel_hook.ClaudeEventAdapter().normalize(name, None, {field: "fixture content"})
+    policy = otel_hook.CapturePolicy(mode="full")
+    event = otel_hook.ClaudeEventAdapter(capture_policy=policy).normalize(name, None, {field: "fixture content"})
     assert event.conversation[0].text == "fixture content"
 
 
@@ -504,6 +501,7 @@ def test_codex_short_hook_bounds_sdk_export_and_preserves_failed_batches(tmp_pat
     runner = '''
 import os, time
 import otel_hook
+from otel_hooks import cli as hook_cli
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
 from opentelemetry.sdk.trace.export import SpanExportResult
@@ -517,7 +515,7 @@ def export(signal, success, failure):
     return send
 OTLPSpanExporter.export = export('traces', SpanExportResult.SUCCESS, SpanExportResult.FAILURE)
 OTLPLogExporter.export = export('logs', LogExportResult.SUCCESS, LogExportResult.FAILURE)
-otel_hook.cli()
+hook_cli.cli()
 '''
     config = tmp_path / "config.json"
     config.write_text("{}")
@@ -545,10 +543,10 @@ otel_hook.cli()
         assert result.returncode == 0, result.stderr
         assert time.monotonic() - started < 3
         assert not result.stdout.strip()
-    batches = list((tmp_path / ".state" / "batches").glob("*.jsonl"))
+    batches = list((tmp_path / ".state" / "capture").glob("*/batches/fixture_gen*.jsonl"))
     if mode in {"slow_traces", "failed_traces"}:
         assert batches, "Failed trace batches must survive for retry"
-        assert (tmp_path / ".state" / "sessions" / "fixture.json").exists()
+        assert list((tmp_path / ".state" / "capture").glob("*/sessions/fixture.json"))
         retry = subprocess.run(
             [sys.executable, "-c", runner, "--codex"],
             input=json.dumps({"session_id": "fixture", "hook_event_name": terminal}),
@@ -556,8 +554,10 @@ otel_hook.cli()
             capture_output=True, timeout=3, cwd=Path(otel_hook.__file__).parent,
         )
         assert retry.returncode == 0, retry.stderr
-        assert not list((tmp_path / ".state" / "batches").glob("*.jsonl"))
+        assert not list((tmp_path / ".state" / "capture").glob("*/batches/fixture_gen*.jsonl"))
     else:
         assert not batches, "Log failure must not replay successfully delivered traces"
+    session_batches = list((tmp_path / ".state" / "capture").glob("*/batches/fixture_session.jsonl"))
+    assert bool(session_batches) == (terminal == "Interrupt")
     spans = list((tmp_path / ".state" / "local_spans").glob("*.jsonl"))
     assert spans, "Local capture must complete even when remote export stalls"

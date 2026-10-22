@@ -1,196 +1,166 @@
 #!/usr/bin/env python3
-"""IDE Agent OpenTelemetry Hook — pure OpenTelemetry SDK.
+"""Hook runtime for Cursor, Claude Code, Codex, Copilot, Gemini, Windsurf,
+OpenCode and Antigravity.
 
-Captures hook events from Cursor IDE, GitHub Copilot, Claude Code, and
-compatible hook runners as OpenTelemetry spans and logs using GenAI
-semantic conventions.
-
-Supports:
-- Multi-IDE detection (Cursor, GitHub Copilot, Claude Code, Antigravity)
-- Session-level trace hierarchy (session -> generation -> events)
-- Structured OTel Logs for MCP, shell, and tool events (trace-correlated)
-- Cross-process trace context via file-based state
-- Generation-based batching with flush on Stop
-- Privacy masking and opt-in text capture
-- Any OTLP-compatible backend
+Coordinates capture policy, cross-process session traces, generation batching,
+OpenTelemetry export and passive harness responses. Provider parsing, span
+attributes, identity, correlation, bootstrap and CLI setup live in otel_hooks.
+Optional correlated logs retain the capture-permitted original hook JSON.
 
 Usage:
     echo '{"hook_event_name":"sessionStart","session_id":"abc"}' | python3 otel_hook.py
 """
 import contextlib
-import glob
-import hashlib
 import importlib
 import importlib.util
 import importlib.metadata
 import json
 import logging
 import os
-import platform
 import random
 import re
-import shutil
-import subprocess
 import sys
 import threading
 import time
 import urllib.parse
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from typing import Optional, Tuple
+from typing import Optional
 
-import click
+from otel_hooks import bootstrap, enrichment
+from otel_hooks.streaming import plan as plan_streaming
+from otel_hooks.semconv import completed_data, operation_attributes, scope_role, span_name as operation_span_name
+from otel_hooks.timing import PersistedIdGenerator, export_identity, new_span_id, boundaries, matching_terminal, branch as event_branch
+from otel_hooks.lifecycle import BufferedEventDecision, ToolInvocationCorrelator, enrich_buffered_event
+from otel_hooks.workspace import _collect_repository_attributes, _resolve_repository_context
+from otel_hooks.identity import (
+    _detect_payload_client_name, _get_event_name, _get_os_info, _normalize_ide_name,
+    _resolve_client_name, _resolved_agent_engine, _set_client_identity_attributes,
+)
+from otel_hooks.enrichment import (
+    _HOOK_SCHEMA_VERSION, _TELEMETRY_SOURCE, _apply_enrichment_attributes,
+    _apply_memory_summary_attrs, _set_if_present,
+)
+from otel_hooks.attributes import _OBSERVATION_FIELDS as _OBSERVATION_FIELDS
+from otel_hooks.capture import CapturePolicy, bound_runtime_payload
+from otel_hooks.config import (
+    environment_settings, merge_settings, shared_claude_settings,
+    export_enforced, enforce_export_environment,
+    _coerce_env_value as _coerce_env_value,
+    _headers_to_env as _headers_to_env,
+    _load_mdm_config_macos as _load_mdm_config_macos,
+    _load_mdm_config_windows as _load_mdm_config_windows,
+    _load_json_config as _load_json_config,
+    _parse_resource_attributes as _parse_resource_attributes,
+    _parse_otlp_headers as _parse_otlp_headers,
+)
+
+
+# Compatibility re-exports; parsing itself lives in the SDK-independent package.
+from otel_hooks.parsers.events import (
+    _CODEX_EVENTS,
+    _COPILOT_EVENTS as _COPILOT_EVENTS,
+    _WINDSURF_EVENT_ALIASES as _WINDSURF_EVENT_ALIASES,
+    _INPUT_ALIASES as _INPUT_ALIASES,
+    _GENERATION_START_EVENTS as _GENERATION_START_EVENTS,
+    _GENERATION_END_EVENTS as _GENERATION_END_EVENTS,
+    _TRACE_ID_RE as _TRACE_ID_RE,
+    _SPAN_ID_RE as _SPAN_ID_RE,
+    _MCP_EVENTS as _MCP_EVENTS,
+)
+from otel_hooks.parsers.common import (
+    _EMAIL_RE as _EMAIL_RE,
+    _TOKEN_RE as _TOKEN_RE,
+    _HOME_RE as _HOME_RE,
+    _safe_bool as _safe_bool,
+    _stringify as _stringify,
+    _first_present as _first_present,
+    _normalize_input_data as _normalize_input_data,
+    _hash_text as _hash_text,
+    _lower_or_none,
+    _mask_text as _mask_text,
+    _text_max_chars as _text_max_chars,
+    _session_key as _session_key,
+    _generation_key_from_data as _generation_key_from_data,
+    _parse_encoded_mcp_tool_name as _parse_encoded_mcp_tool_name,
+    _normalize_mcp_event_data as _normalize_mcp_event_data,
+)
+from otel_hooks.parsers.models import (
+    ConversationRecord as ConversationRecord,
+    AgentRelationship as AgentRelationship,
+    WorkspaceIdentity as WorkspaceIdentity,
+    NativeTelemetryContext as NativeTelemetryContext,
+    CanonicalHookEvent as CanonicalHookEvent,
+)
+from otel_hooks.parsers.base import (
+    ProviderEventAdapter as ProviderEventAdapter,
+)
+from otel_hooks.parsers.cursor import (
+    CursorEventAdapter as CursorEventAdapter,
+)
+from otel_hooks.parsers.windsurf import (
+    WindsurfEventAdapter as WindsurfEventAdapter,
+)
+from otel_hooks.parsers.claude import (
+    ClaudeEventAdapter as ClaudeEventAdapter,
+)
+from otel_hooks.parsers.codex import (
+    CodexEventAdapter as CodexEventAdapter,
+)
+from otel_hooks.parsers.gemini import (
+    GeminiEventAdapter as GeminiEventAdapter,
+)
+from otel_hooks.parsers.antigravity import (
+    AntigravityEventAdapter as AntigravityEventAdapter,
+)
+from otel_hooks.parsers.copilot import (
+    CopilotEventAdapter as CopilotEventAdapter,
+)
+from otel_hooks.parsers.opencode import (
+    OpenCodeEventAdapter as OpenCodeEventAdapter,
+)
+from otel_hooks.parsers import (
+    _DEFAULT_EVENT_ADAPTER as _DEFAULT_EVENT_ADAPTER,
+    _PROVIDER_EVENT_ADAPTERS as _PROVIDER_EVENT_ADAPTERS,
+    get_parser as _get_parser,
+)
+from otel_hooks.serialization import (
+    _JsonFormatter as _JsonFormatter,
+    _span_to_dict as _span_to_dict,
+)
 from enrichment_connectors import (
     aggregate_generation_memory,
-    extract_event_memory_facts,
     merge_memory_summaries,
     normalize_memory_summary,
 )
 
 # Whether to attach OS/host attributes to every span in addition to resource attributes.
 # Defaults to False to avoid duplicate data and hot-path overhead.
-_CONSOLE_EXPORTER_REGISTERED = False
-
 _ATTACH_OS_ATTRIBUTES_PER_SPAN = os.getenv("IDE_HOOK_ATTACH_OS_PER_SPAN") == "1"
 
 # ---------------------------------------------------------------------------
 # Bootstrap: auto-provision .venv and add its site-packages to sys.path.
-# Works with any python3 — Cursor's system Python, Homebrew, pyenv, etc.
+# Source checkouts reuse installed SDK dependencies or provision a compatible venv.
 # First run: venv + pip install happens in background; tracing activates next
 # invocation.
 # ---------------------------------------------------------------------------
 
 
-def _resolve_hook_home() -> str:
-    """Return the writable directory used for hook state, config, and the bootstrap venv.
-
-    Resolution order:
-    1. ``IDE_OTEL_HOOK_HOME`` environment variable (explicit override).
-    2. ``$XDG_DATA_HOME/opentelemetry-hooks`` (defaults to
-       ``~/.local/share/opentelemetry-hooks`` when ``XDG_DATA_HOME`` is unset)
-       when the hook is running from an installed package — i.e. ``__file__``
-       lives inside a *site-packages* directory.
-    3. The directory that contains ``__file__`` — legacy behaviour for a
-       source-checkout or a directly-copied script.
-    """
-    explicit = os.environ.get("IDE_OTEL_HOOK_HOME", "").strip()
-    if explicit:
-        return os.path.abspath(explicit)
-
-    # Detect installed-package mode by comparing __file__ against the known
-    # site-packages directories reported by sysconfig / site.
-    this_file = os.path.abspath(__file__)
-    in_site_packages = False
-    try:
-        import sysconfig
-        purelib = sysconfig.get_path("purelib") or ""
-        platlib = sysconfig.get_path("platlib") or ""
-        for sp in (purelib, platlib):
-            if sp and this_file.startswith(os.path.abspath(sp) + os.sep):
-                in_site_packages = True
-                break
-    except Exception:
-        pass
-    if not in_site_packages:
-        try:
-            import site
-            for sp in (site.getsitepackages() if hasattr(site, "getsitepackages") else []):
-                if sp and this_file.startswith(os.path.abspath(sp) + os.sep):
-                    in_site_packages = True
-                    break
-        except Exception:
-            pass
-
-    if in_site_packages:
-        xdg_data = os.environ.get("XDG_DATA_HOME", "").strip()
-        if not xdg_data:
-            xdg_data = os.path.join(os.path.expanduser("~"), ".local", "share")
-        return os.path.join(xdg_data, "opentelemetry-hooks")
-
-    return os.path.dirname(this_file)
-
-
-_HOOK_DIR = _resolve_hook_home()
-
-
-def _venv_site_packages_path(venv_dir: str) -> str:
-    """Return the site-packages path compatible with this Python runtime."""
-    version = f"python{sys.version_info.major}.{sys.version_info.minor}"
-    return os.path.join(venv_dir, "lib", version, "site-packages")
-
-
-def _select_bootstrap_venv_dir(hook_dir: str) -> str:
-    """Reuse a compatible legacy venv or isolate bootstrap deps by Python ABI."""
-    legacy = os.path.join(hook_dir, ".venv")
-    if os.path.isdir(_venv_site_packages_path(legacy)):
-        return legacy
-    suffix = f".venv-py{sys.version_info.major}.{sys.version_info.minor}"
-    return os.path.join(hook_dir, suffix)
-
-
-def _runtime_has_otel_dependencies() -> bool:
-    """Return whether the invoking environment already owns the hook SDK deps."""
-    required = (
-        "opentelemetry.sdk.trace.export",
-        "opentelemetry.exporter.otlp.proto.grpc.trace_exporter",
-        "opentelemetry.exporter.otlp.proto.http.trace_exporter",
-    )
-    try:
-        for module in required:
-            importlib.import_module(module)
-        return True
-    except (ImportError, AttributeError, ValueError):
-        return False
-
-
-_VENV_DIR = _select_bootstrap_venv_dir(_HOOK_DIR)
+_HOOK_DIR = bootstrap.resolve_hook_home(__file__)
+_VENV_DIR = bootstrap.select_bootstrap_venv_dir(_HOOK_DIR)
 _SETUP_LOCK = os.path.join(
     _HOOK_DIR,
     ".state",
     f"setup-py{sys.version_info.major}.{sys.version_info.minor}.lock",
 )
-
-
-def _auto_provision_venv() -> None:
-    """Create .venv and install opentelemetry-sdk + exporter in the background if missing."""
-    venv_python = os.path.join(_VENV_DIR, "bin", "python")
-    if os.path.isfile(venv_python):
-        return
-    lock_dir = os.path.dirname(_SETUP_LOCK)
-    os.makedirs(lock_dir, exist_ok=True)
-    if os.path.exists(_SETUP_LOCK):
-        return
-    try:
-        with open(_SETUP_LOCK, "w") as f:
-            f.write(str(os.getpid()))
-        setup_script = (
-            f'{sys.executable} -m venv "{_VENV_DIR}" && '
-            f'"{_VENV_DIR}/bin/pip" install --quiet --upgrade pip && '
-            f'"{_VENV_DIR}/bin/pip" install --quiet '
-            f'opentelemetry-sdk '
-            f'opentelemetry-exporter-otlp-proto-grpc '
-            f'opentelemetry-exporter-otlp-proto-http && '
-            f'rm -f "{_SETUP_LOCK}"'
-        )
-        subprocess.Popen(
-            setup_script, shell=True,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-    except Exception:
-        try:
-            os.remove(_SETUP_LOCK)
-        except OSError:
-            pass
-
-
-_RUNTIME_HAS_OTEL_DEPENDENCIES = _runtime_has_otel_dependencies()
+_RUNTIME_HAS_OTEL_DEPENDENCIES = bootstrap.runtime_has_otel_dependencies()
 if not _RUNTIME_HAS_OTEL_DEPENDENCIES:
-    _auto_provision_venv()
-    _venv_site_packages = _venv_site_packages_path(_VENV_DIR)
+    bootstrap.auto_provision_venv(_VENV_DIR, _SETUP_LOCK)
+    _venv_site_packages = bootstrap.venv_site_packages_path(_VENV_DIR)
     if os.path.isdir(_venv_site_packages) and _venv_site_packages not in sys.path:
         sys.path.insert(0, _venv_site_packages)
+
 
 class _TraceShim:
     """Small shim so tests can monkeypatch trace methods before lazy load."""
@@ -205,9 +175,9 @@ class _TraceShim:
             return _REAL_TRACE.get_tracer_provider()
         return None
 
-    def get_tracer(self, _name: str):
+    def get_tracer(self, _name: str, version=None):
         if _REAL_TRACE is not None:
-            return _REAL_TRACE.get_tracer(_name)
+            return _REAL_TRACE.get_tracer(_name, version)
         return None
 
     def get_current_span(self):
@@ -282,6 +252,7 @@ if importlib.util.find_spec("orjson") is not None:
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
+_CAPTURE_POLICY = CapturePolicy()
 _TRACING_INITIALIZED = False
 _LOGS_INITIALIZED = False
 _EXPORT_DEADLINE: Optional[float] = None
@@ -295,343 +266,40 @@ _STATE_DIR = os.path.join(_HOOK_DIR, ".state")
 _SESSION_DIR = os.path.join(_STATE_DIR, "sessions")
 _BATCH_DIR = os.path.join(_STATE_DIR, "batches")
 _LOCAL_SPANS_DIR = os.path.join(_STATE_DIR, "local_spans")
-_LOCAL_TRACE_DIR = _LOCAL_SPANS_DIR  # backward-compatible alias
 _LOCK_DIR = os.path.join(_STATE_DIR, "locks")
 _CLEANUP_MARKER = os.path.join(_STATE_DIR, "last_cleanup")
 _DELIVERY_HEALTH_PATH = os.path.join(_STATE_DIR, "delivery_health.json")
-_SESSION_EVENT_LIMIT = 512
-_SESSION_INVOCATION_LIMIT = 128
-_AGENT_INVOCATION_LIMIT = 128
-_HOOK_SCHEMA_VERSION = "1"
-_TELEMETRY_SOURCE = "hook"
 
 # MDM (Managed Device Management) configuration
 _MDM_DOMAIN = "dev.o11y.opentelemetry-hook"  # macOS managed preferences domain
 _MDM_REGISTRY_PATH = r"SOFTWARE\Policies\OpenTelemetryHook"  # Windows registry path
 
 # Privacy patterns
-_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
-_TOKEN_RE = re.compile(r"\b[A-Za-z0-9_\-]{24,}\b")
-_HOME_RE = re.compile(r"/Users/[^/\s]+")
 _HEX_DIGITS = frozenset("0123456789abcdef")
-_TRACE_ID_RE = re.compile(r"^[0-9a-f]{32}$")
-_SPAN_ID_RE = re.compile(r"^[0-9a-f]{16}$")
 
 
 # ---------------------------------------------------------------------------
 # Event name canonicalization (all IDE variants -> PascalCase)
 # ---------------------------------------------------------------------------
-_CANONICAL_EVENT = {
-    # Cursor camelCase
-    "sessionStart": "SessionStart",
-    "sessionEnd": "SessionEnd",
-    "beforeSubmitPrompt": "UserPromptSubmit",
-    "preToolUse": "PreToolUse",
-    "postToolUse": "PostToolUse",
-    "postToolUseFailure": "PostToolUseFailure",
-    "beforeShellExecution": "BeforeShellExecution",
-    "afterShellExecution": "AfterShellExecution",
-    "beforeMCPExecution": "BeforeMCPExecution",
-    "afterMCPExecution": "AfterMCPExecution",
-    "beforeReadFile": "BeforeReadFile",
-    "afterFileEdit": "AfterFileEdit",
-    "subagentStart": "SubagentStart",
-    "subagentStop": "SubagentStop",
-    "stop": "Stop",
-    "preCompact": "PreCompact",
-    "beforeTabFileRead": "BeforeReadFile",
-    "afterTabFileEdit": "AfterFileEdit",
-    "afterAgentResponse": "AfterAgentResponse",
-    "afterAgentThought": "AfterAgentThought",
-    "workspaceOpen": "WorkspaceOpen",
-    # Copilot camelCase
-    "userPromptSubmitted": "UserPromptSubmit",
-    "errorOccurred": "ErrorOccurred",
-    "agentStop": "Stop",
-    "permissionRequest": "PermissionRequest",
-    "notification": "Notification",
-    "userPromptTransformed": "UserPromptTransformed",
-    # Gemini CLI
-    "BeforeModel": "UserPromptSubmit",
-    "AfterModel": "Stop",
-    "BeforeTool": "PreToolUse",
-    "AfterTool": "PostToolUse",
-    "BeforeAgent": "SubagentStart",
-    "AfterAgent": "SubagentStop",
-    # Codex
-    "PermissionRequest": "PermissionRequest",
-}
-
-# ---------------------------------------------------------------------------
-# Setup CLI: per-agent event lists
-# ---------------------------------------------------------------------------
-_CURSOR_EVENTS = [
-    "sessionStart", "sessionEnd", "subagentStart", "subagentStop",
-    "preToolUse", "postToolUse", "postToolUseFailure",
-    "beforeShellExecution", "afterShellExecution",
-    "beforeMCPExecution", "afterMCPExecution",
-    "beforeReadFile", "afterFileEdit",
-    "beforeSubmitPrompt", "stop",
-    "preCompact", "beforeTabFileRead", "afterTabFileEdit",
-    "afterAgentResponse", "afterAgentThought", "workspaceOpen",
-]
-
-_CLAUDE_EVENTS = [
-    "SessionStart", "SessionEnd", "SubagentStart", "SubagentStop",
-    "PreToolUse", "PostToolUse", "PostToolUseFailure",
-    "UserPromptSubmit", "PreCompact", "PostCompact", "Stop",
-    "PermissionRequest", "PermissionDenied", "Notification", "StopFailure",
-    "Setup", "InstructionsLoaded", "UserPromptExpansion", "MessageDisplay",
-    "PostToolBatch", "TaskCreated", "TaskCompleted", "TeammateIdle",
-    "ConfigChange", "CwdChanged", "DirectoryAdded", "WorktreeRemove",
-    "PreModelSwitch", "PostModelSwitch", "Elicitation", "ElicitationResult",
-]
-# WorktreeCreate replaces git worktree creation; FileChanged installs watchers.
-# Neither belongs in an automatically installed telemetry observer.
-_CLAUDE_MATCHER_EVENTS = {"PreToolUse", "PostToolUse", "PostToolUseFailure"}
-
-_COPILOT_EVENTS = [
-    "sessionStart", "sessionEnd", "userPromptSubmitted",
-    "preToolUse", "postToolUse", "errorOccurred",
-    "postToolUseFailure", "agentStop", "subagentStart", "subagentStop",
-    "preCompact", "permissionRequest", "notification", "userPromptTransformed",
-]
-
-_GEMINI_EVENTS = [
-    "SessionStart", "SessionEnd", "BeforeAgent", "AfterAgent",
-    "BeforeModel", "AfterModel", "BeforeTool", "AfterTool",
-    "BeforeToolSelection", "Notification", "PreCompress",
-]
-_GEMINI_MATCHER_EVENTS = {"BeforeAgent", "AfterAgent", "BeforeModel", "AfterModel", "BeforeTool", "AfterTool"}
-
-_CODEX_EVENTS = [
-    "SessionStart", "PreToolUse", "PermissionRequest", "PostToolUse",
-    "UserPromptSubmit", "Stop",
-    "SessionEnd", "PreCompact", "PostCompact", "SubagentStart", "SubagentStop", "Interrupt",
-]
-_CODEX_MATCHERS = {
-    "SessionStart": "startup|resume|clear|compact",
-    "PreToolUse": "*",
-    "PermissionRequest": "*",
-    "PostToolUse": "*",
-}
-
-_WINDSURF_EVENT_ALIASES = {
-    "pre_read_code": "BeforeReadFile", "post_read_code": "AfterReadFile",
-    "pre_write_code": "BeforeFileEdit", "post_write_code": "AfterFileEdit",
-    "pre_run_command": "BeforeShellExecution", "post_run_command": "AfterShellExecution",
-    "pre_mcp_tool_use": "BeforeMCPExecution", "post_mcp_tool_use": "AfterMCPExecution",
-    "pre_user_prompt": "UserPromptSubmit", "post_cascade_response": "Stop",
-    "post_cascade_response_with_transcript": "TranscriptReady",
-    "post_setup_worktree": "WorktreeReady",
-}
-# TranscriptReady is accepted, but registration would cause the harness to write
-# full conversation transcripts independently of our content-capture setting.
-_WINDSURF_EVENTS = [event for event in _WINDSURF_EVENT_ALIASES if event != "post_cascade_response_with_transcript"]
-
-# OpenCode plugin — source filename (in plugin/) and destination filename (in plugins/).
-_OPENCODE_PLUGIN_SOURCE_FILENAME = "opencode.ts"
-_OPENCODE_PLUGIN_FILENAME = "otel-hook.ts"
 
 # Common camelCase -> snake_case aliases used by compatible hook runners.
 # Claude Code's documented hook payloads are already snake_case, but generic
 # runners and workflow adapters that forward Claude- or Antigravity-style
 # events may supply camelCase fields instead.
-_INPUT_ALIASES = {
-    "sessionId": "session_id",
-    "conversationId": "conversation_id",
-    "generationId": "generation_id",
-    "transcriptPath": "transcript_path",
-    "providerName": "provider_name",
-    "requestModel": "request_model",
-    "responseModel": "response_model",
-    "modelName": "model_name",
-    "toolName": "tool_name",
-    "toolInput": "tool_input",
-    "toolOutput": "tool_output",
-    "toolType": "tool_type",
-    "toolDefinitions": "tool_definitions",
-    "toolUseId": "tool_use_id",
-    "toolId": "tool_id",
-    "mcpServerName": "mcp_server_name",
-    "mcpServer": "mcp_server",
-    "mcpTool": "mcp_tool",
-    "turnId": "turn_id",
-    "toolResponse": "tool_response",
-    "lastAssistantMessage": "last_assistant_message",
-    "stopMessage": "stop_message",
-    "errorMessage": "error_message",
-    "errorType": "error_type",
-    "errorCode": "error_code",
-    "eventId": "event_id",
-    "hookEventId": "hook_event_id",
-    "agentId": "agent_id",
-    "parentAgentId": "parent_agent_id",
-    "agentName": "agent_name",
-    "agentVersion": "agent_version",
-    "agentDescription": "agent_description",
-    "agentType": "agent_type",
-    "subagentType": "subagent_type",
-    "subagentTask": "subagent_task",
-    "delegationTask": "delegation_task",
-    "responseFormat": "response_format",
-    "outputType": "output_type",
-    "choiceCount": "choice_count",
-    "systemInstructions": "system_instructions",
-    "systemPrompt": "system_prompt",
-    "cacheCreationInputTokens": "cache_creation_input_tokens",
-    "cacheReadInputTokens": "cache_read_input_tokens",
-    "workspacePath": "workspace_path",
-    "filePath": "file_path",
-    "userId": "user_id",
-    "userEmail": "user_email",
-    "userName": "user_name",
-    "permissionMode": "permission_mode",
-    "permissionDecision": "permission_decision",
-    "approvalPolicy": "approval_policy",
-    "approvalDecision": "approval_decision",
-    "approvalRequired": "approval_required",
-    "sandboxMode": "sandbox_mode",
-    "sandboxPolicy": "sandbox_policy",
-    "sandboxEnabled": "sandbox_enabled",
-    "isSandboxed": "is_sandboxed",
-    "toolChoice": "tool_choice",
-    "toolDecision": "tool_decision",
-    "exitCode": "exit_code",
-    "durationMs": "duration_ms",
-    "loopCount": "loop_count",
-    "stopHookActive": "stop_hook_active",
-    "isInterrupt": "is_interrupt",
-    "hookEventType": "hook_event_type",
-    "clientVersion": "client_version",
-    "ideVersion": "ide_version",
-    "appVersion": "app_version",
-    "ideName": "ide_name",
-    "sourceApp": "source_app",
-    "traceId": "trace_id",
-    "spanId": "span_id",
-    "parentSpanId": "parent_span_id",
-    "nativeTraceId": "native_trace_id",
-    "nativeSpanId": "native_span_id",
-    "nativeParentSpanId": "native_parent_span_id",
-    "nativeSource": "native_source",
-    "traceFlags": "trace_flags",
-    "traceState": "tracestate",
-}
 
-# Canonical gen_ai.client.name values accepted directly from IDE_OTEL_IDE_NAME or
+# Canonical o11y.client.name values accepted directly from IDE_OTEL_IDE_NAME or
 # self-reported payload metadata before alias fallback.
-_CANONICAL_IDE_NAMES = {"cursor", "copilot", "claude", "antigravity", "opencode", "windsurf", "zed", "vscode", "gemini", "codex"}
-_IDE_NAME_ALIASES = {
-    "openai codex": "codex",
-    "codex cli": "codex",
-    "github copilot": "copilot",
-    "github copilot chat": "copilot",
-    "copilot chat": "copilot",
-    "claude code": "claude",
-    "anthropic claude code": "claude",
-    "claude cli": "claude",
-    "cursor ide": "cursor",
-    "cursor cli": "cursor",
-    "anti gravity": "antigravity",
-    "windsurf ide": "windsurf",
-    "codeium windsurf": "windsurf",
-    "visual studio code": "vscode",
-    "vs code": "vscode",
-    "zed editor": "zed",
-    "open code": "opencode",
-    "gemini cli": "gemini",
-    "google gemini": "gemini",
-}
-_IDE_NAME_NORM_PATTERN = re.compile(r"[-_\s]+")
 _MANAGED_HOOK_SOURCE_ENV = "IDE_OTEL_HOOK_SOURCE"
 _CLI_HOOK_SOURCE: Optional[str] = None
 _CLI_HOOK_EVENT: Optional[str] = None
+_CLI_REGISTRATION_SCOPE: Optional[str] = None
+_POLICY_SOURCES: dict = {}
 
 # Session boundary events
 _SESSION_START_EVENTS = {"SessionStart"}
 _SESSION_END_EVENTS = {"SessionEnd"}
-_GENERATION_START_EVENTS = {"UserPromptSubmit"}
-_GENERATION_END_EVENTS = {"Stop", "StopFailure", "Interrupt"}
 
 # GenAI operation mapping (canonical PascalCase)
-_OP_TOOL_EVENTS = {
-    "PreToolUse", "PostToolUse", "PostToolUseFailure",
-    "PermissionRequest",
-    "BeforeShellExecution", "AfterShellExecution",
-    "BeforeMCPExecution", "AfterMCPExecution",
-    "BeforeReadFile", "AfterFileEdit", "AfterReadFile", "BeforeFileEdit",
-}
-_OP_AGENT_EVENTS = {
-    "SessionStart", "SessionEnd",
-    "SubagentStart", "SubagentStop",
-    "PreCompact", "PostCompact",
-}
-
-# Per-event attribute extraction map (canonical names)
-_EVENT_ATTR_MAP = {
-    # Common
-    "UserPromptSubmit": {
-        "composer_mode": "gen_ai.client.composer_mode",
-        "model": "gen_ai.request.model",
-    },
-    "SessionStart": {
-        "source": "gen_ai.client.session_source", "composer_mode": "gen_ai.client.composer_mode",
-        "model": "gen_ai.request.model", "agent_type": "gen_ai.client.agent_type",
-    },
-    "SessionEnd": {"status": "gen_ai.client.status", "reason": "gen_ai.client.session_end_reason"},
-    "PreToolUse": {"tool_name": "gen_ai.client.tool_name", "tool_id": "gen_ai.client.tool_id", "tool_use_id": "gen_ai.client.tool_use_id"},
-    "PostToolUse": {"tool_name": "gen_ai.client.tool_name", "tool_id": "gen_ai.client.tool_id", "tool_use_id": "gen_ai.client.tool_use_id", "duration_ms": "gen_ai.client.duration_ms"},
-    "PostToolUseFailure": {"tool_name": "gen_ai.client.tool_name", "tool_id": "gen_ai.client.tool_id", "tool_use_id": "gen_ai.client.tool_use_id", "is_interrupt": "gen_ai.client.is_interrupt"},
-    "PermissionRequest": {"tool_name": "gen_ai.client.tool_name", "tool_id": "gen_ai.client.tool_id", "tool_use_id": "gen_ai.client.tool_use_id", "turn_id": "gen_ai.client.turn_id"},
-    "SubagentStart": {"subagent_type": "gen_ai.client.subagent_type", "agent_id": "gen_ai.client.agent_id", "parent_agent_id": "gen_ai.client.parent_agent_id", "agent_id_source": "gen_ai.client.agent_id_source", "agent_type": "gen_ai.client.agent_type"},
-    "SubagentStop": {"subagent_type": "gen_ai.client.subagent_type", "status": "gen_ai.client.status", "agent_id": "gen_ai.client.agent_id", "parent_agent_id": "gen_ai.client.parent_agent_id", "agent_id_source": "gen_ai.client.agent_id_source", "agent_type": "gen_ai.client.agent_type"},
-    "Stop": {"status": "gen_ai.client.status", "loop_count": "gen_ai.client.loop_count", "stop_hook_active": "gen_ai.client.stop_hook_active"},
-    # Cursor-specific
-    "BeforeShellExecution": {"command": "gen_ai.client.command", "cwd": "gen_ai.client.cwd"},
-    "AfterShellExecution": {"command": "gen_ai.client.command", "cwd": "gen_ai.client.cwd", "exit_code": "gen_ai.client.exit_code", "duration_ms": "gen_ai.client.duration_ms"},
-    "BeforeMCPExecution": {"mcp_server_name": "gen_ai.client.mcp_server", "mcp_server": "gen_ai.client.mcp_server", "mcp_tool": "gen_ai.client.mcp_tool", "tool_name": "gen_ai.client.mcp_tool", "tool_use_id": "gen_ai.client.tool_use_id"},
-    "AfterMCPExecution": {"mcp_server_name": "gen_ai.client.mcp_server", "mcp_server": "gen_ai.client.mcp_server", "mcp_tool": "gen_ai.client.mcp_tool", "tool_name": "gen_ai.client.mcp_tool", "tool_use_id": "gen_ai.client.tool_use_id", "duration_ms": "gen_ai.client.duration_ms", "duration": "gen_ai.client.duration_ms", "status": "gen_ai.client.status"},
-    "BeforeReadFile": {"file_path": "gen_ai.client.file_path"},
-    "AfterFileEdit": {"file_path": "gen_ai.client.file_path", "edits": "gen_ai.client.edits"},
-    # Copilot-specific
-    "ErrorOccurred": {"error_type": "error.type", "error_code": "error.code", "is_interrupt": "gen_ai.client.is_interrupt"},
-}
-
-# Metadata-only observations shared by current harness contracts. Never flatten
-# arbitrary event payloads: new hooks can carry prompt, config and MCP content.
-_OBSERVATION_FIELDS = {
-    "PreCompact": ("trigger", "context_usage_percent", "context_tokens", "context_window_size", "message_count", "messages_to_compact", "is_first_compaction"),
-    "PostCompact": ("trigger",),
-    "Notification": ("notification_type",),
-    "PermissionReplied": ("permission_request_id", "permission_response"),
-    "InstructionsLoaded": ("file_path", "load_reason"),
-    "ConfigChange": ("source", "file_path"),
-    "CwdChanged": ("cwd",),
-    "DirectoryAdded": ("directory",),
-    "WorktreeRemove": ("worktree_path",),
-    "WorktreeReady": ("workspace_path", "root_workspace_path"),
-    "TranscriptReady": ("transcript_path",),
-    "TaskCreated": ("task_id",),
-    "TaskCompleted": ("task_id",),
-    "TeammateIdle": ("teammate_name", "agent_id"),
-    "Elicitation": ("mcp_server_name", "mode"),
-    "ElicitationResult": ("mcp_server_name", "mode", "action"),
-    "PreModelSwitch": ("from_model", "to_model", "requested_model", "source", "context_tokens"),
-    "PostModelSwitch": ("from_model", "to_model", "requested_model", "source", "context_tokens"),
-    "AfterReadFile": ("file_path",),
-    "BeforeFileEdit": ("file_path",),
-    "AfterAgentThought": ("duration_ms",),
-    "MessageDisplay": ("message_id", "index", "final"),
-    "UserPromptExpansion": ("expansion_type", "command_name", "command_source"),
-    "Interrupt": ("is_interrupt", "status"),
-    "StopFailure": ("error_type", "status"),
-}
-for _observation_event, _observation_fields in _OBSERVATION_FIELDS.items():
-    _EVENT_ATTR_MAP.setdefault(_observation_event, {}).update({
-        field: f"gen_ai.client.{field}" for field in _observation_fields
-    })
-
 
 # ---------------------------------------------------------------------------
 # I/O helpers
@@ -645,7 +313,8 @@ def _load_input() -> dict:
         print("", file=sys.stderr)
         print("This hook is intended to be called by an IDE (Cursor, Copilot, Claude Code) with JSON on stdin.", file=sys.stderr)
         raise SystemExit(0)
-    raw = sys.stdin.read()
+    # Hook protocols use UTF-8 even when Windows pipes default to a legacy code page.
+    raw = sys.stdin.buffer.read().decode("utf-8-sig") if hasattr(sys.stdin, "buffer") else sys.stdin.read()
     if not raw.strip():
         return {}
     return _fast_json_loads(raw)
@@ -663,1288 +332,11 @@ def _fast_json_loads(raw: str):
         return {}
 
 
-def _safe_bool(value: str) -> bool:
-    return value.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _stringify(value) -> str:
-    if isinstance(value, (dict, list)):
-        return json.dumps(value, ensure_ascii=True)
-    return str(value)
-
-
-def _set_if_present(span, attr: str, value) -> None:
-    if value is not None:
-        span.set_attribute(attr, value)
-
-
-def _first_present(data: dict, keys: tuple):
-    for key in keys:
-        if key in data and data[key] is not None:
-            return data[key]
-    return None
-
-
 def _first_env(keys: tuple[str, ...]) -> Optional[str]:
     for key in keys:
         value = os.getenv(key)
         if value:
             return value
-    return None
-
-
-def _int_or_none(value):
-    try:
-        return int(value) if value is not None else None
-    except (TypeError, ValueError):
-        return None
-
-
-def _float_or_none(value):
-    try:
-        return float(value) if value is not None else None
-    except (TypeError, ValueError):
-        return None
-
-
-def _lower_or_none(value: Optional[str]) -> Optional[str]:
-    if not isinstance(value, str):
-        return None
-    lowered = value.strip().lower()
-    return lowered or None
-
-
-def _iter_enrichment_sources(data: Optional[dict], include_tool_payloads: bool = False):
-    if not isinstance(data, dict):
-        return
-    yield data
-    metadata = data.get("metadata")
-    if isinstance(metadata, dict):
-        yield metadata
-    user = data.get("user")
-    if isinstance(user, dict):
-        yield user
-    if include_tool_payloads:
-        for key in ("tool_input", "tool_response"):
-            value = data.get(key)
-            if isinstance(value, dict):
-                yield value
-
-
-def _coerce_attribute_value(value):
-    if isinstance(value, str):
-        stripped = value.strip()
-        return stripped or None
-    return value
-
-
-def _path_search_root(path: str) -> Optional[str]:
-    if not isinstance(path, str) or not path.strip():
-        return None
-    expanded = os.path.abspath(path.strip())
-    if os.path.isdir(expanded):
-        return expanded
-    return os.path.dirname(expanded) or expanded
-
-
-def _candidate_repo_paths(data: Optional[dict]) -> list[str]:
-    if not isinstance(data, dict):
-        return []
-    candidates: list[str] = []
-    cwd = data.get("cwd") or data.get("workspace_path")
-    if isinstance(cwd, str) and cwd.strip():
-        candidates.append(cwd.strip())
-
-    def _append_path(value) -> None:
-        if not isinstance(value, str) or not value.strip():
-            return
-        raw = value.strip()
-        if os.path.isabs(raw):
-            candidates.append(raw)
-            return
-        if isinstance(cwd, str) and cwd.strip() and os.path.isabs(cwd.strip()):
-            candidates.append(os.path.join(cwd.strip(), raw))
-
-    _append_path(data.get("file_path"))
-    edits = data.get("edits")
-    if isinstance(edits, list):
-        for entry in edits:
-            if isinstance(entry, dict):
-                _append_path(entry.get("file_path") or entry.get("path"))
-    elif isinstance(edits, dict):
-        _append_path(edits.get("file_path") or edits.get("path"))
-    return candidates
-
-
-def _git_command_output(args: list[str], cwd: str) -> Optional[str]:
-    try:
-        result = subprocess.run(
-            args,
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            timeout=2,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        return None
-    if result.returncode != 0:
-        return None
-    output = result.stdout.strip()
-    return output or None
-
-
-def _parse_repository_remote(remote_url: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
-    if not isinstance(remote_url, str) or not remote_url.strip():
-        return None, None
-    normalized = remote_url.strip()
-    is_network_remote = False
-    if "://" in normalized:
-        is_network_remote = True
-        path = urllib.parse.urlparse(normalized).path or ""
-    elif "@" in normalized and ":" in normalized.split("@", 1)[1]:
-        is_network_remote = True
-        path = normalized.split(":", 1)[1]
-    else:
-        path = normalized
-    path = path.strip().strip("/")
-    if path.endswith(".git"):
-        path = path[:-4]
-    parts = [part for part in path.split("/") if part]
-    if not parts:
-        return None, None
-    owner = parts[-2] if is_network_remote and len(parts) >= 2 else None
-    return owner, parts[-1]
-
-
-def _normalize_repository_remote(remote_url: Optional[str]) -> Optional[str]:
-    """Return a credential-free host/path identity suitable for deterministic hashing."""
-    if not isinstance(remote_url, str) or not remote_url.strip():
-        return None
-    value = remote_url.strip()
-    host = ""
-    path = ""
-    if "://" in value:
-        parsed = urllib.parse.urlsplit(value)
-        host = (parsed.hostname or "").lower()
-        try:
-            if parsed.port:
-                host = f"{host}:{parsed.port}"
-        except ValueError:
-            return None
-        path = parsed.path
-    elif "@" in value and ":" in value.split("@", 1)[1]:
-        host_path = value.split("@", 1)[1]
-        host, path = host_path.split(":", 1)
-        host = host.lower()
-    else:
-        return None
-    path = "/".join(part for part in path.strip().strip("/").split("/") if part)
-    if path.endswith(".git"):
-        path = path[:-4]
-    if not host or not path:
-        return None
-    return f"{host}/{path}"
-
-
-def _resolve_repository_context(data: Optional[dict] = None, session_ctx: Optional[dict] = None) -> dict:
-    repo_ctx: dict[str, str] = {}
-    if session_ctx:
-        for key in (
-            "repo_root",
-            "workspace_path",
-            "vcs.repository.owner",
-            "vcs.repository.name",
-            "vcs.ref.head.name",
-            "vcs.ref.head.type",
-            "gen_ai.client.repository.remote.sha256",
-        ):
-            value = session_ctx.get(key)
-            if isinstance(value, str) and value.strip():
-                repo_ctx[key] = value.strip()
-    explicit_workspace = _first_present(data or {}, ("workspace_path",))
-    if isinstance(explicit_workspace, str) and explicit_workspace.strip():
-        repo_ctx["workspace_path"] = os.path.abspath(os.path.expanduser(explicit_workspace.strip()))
-    if session_ctx and session_ctx.get("repository_context_resolved") and repo_ctx.get("repo_root"):
-        return repo_ctx
-    if "repo_root" not in repo_ctx:
-        for candidate in _candidate_repo_paths(data):
-            search_root = _path_search_root(candidate)
-            if not search_root:
-                continue
-            repo_root = _find_repo_root(search_root)
-            if repo_root and any(os.path.exists(os.path.join(repo_root, marker)) for marker in _REPO_MARKERS):
-                repo_ctx["repo_root"] = repo_root
-                break
-    repo_root = repo_ctx.get("repo_root")
-    if not repo_root:
-        return repo_ctx
-    if not os.path.exists(os.path.join(repo_root, ".git")):
-        return repo_ctx
-    git_root = _git_command_output(["git", "rev-parse", "--show-toplevel"], cwd=repo_root)
-    if git_root:
-        repo_ctx["repo_root"] = git_root
-        repo_ctx.setdefault("workspace_path", git_root)
-        remote_url = None
-        if (
-            "vcs.repository.name" not in repo_ctx
-            or "vcs.repository.owner" not in repo_ctx
-            or "gen_ai.client.repository.remote.sha256" not in repo_ctx
-        ):
-            remote_url = _git_command_output(
-                ["git", "config", "--get", "remote.origin.url"],
-                cwd=git_root,
-            )
-            owner, name = _parse_repository_remote(remote_url)
-            if owner and "vcs.repository.owner" not in repo_ctx:
-                repo_ctx["vcs.repository.owner"] = owner
-            if name and "vcs.repository.name" not in repo_ctx:
-                repo_ctx["vcs.repository.name"] = name
-            normalized_remote = _normalize_repository_remote(remote_url)
-            if normalized_remote:
-                repo_ctx["gen_ai.client.repository.remote.sha256"] = _hash_text(normalized_remote)
-        if "vcs.repository.name" not in repo_ctx:
-            repo_name = os.path.basename(git_root.rstrip(os.sep))
-            if repo_name:
-                repo_ctx["vcs.repository.name"] = repo_name
-        if "vcs.ref.head.name" not in repo_ctx:
-            head_name = _git_command_output(
-                ["git", "symbolic-ref", "--quiet", "--short", "HEAD"],
-                cwd=git_root,
-            )
-            if head_name:
-                repo_ctx["vcs.ref.head.name"] = head_name
-                repo_ctx["vcs.ref.head.type"] = "branch"
-    return repo_ctx
-
-
-def _collect_repository_attributes(data: Optional[dict] = None, session_ctx: Optional[dict] = None) -> dict:
-    attrs: dict[str, str] = {}
-    repo_ctx = _resolve_repository_context(data, session_ctx=session_ctx)
-    for key in (
-        "vcs.repository.owner",
-        "vcs.repository.name",
-        "vcs.ref.head.name",
-        "vcs.ref.head.type",
-        "gen_ai.client.repository.remote.sha256",
-    ):
-        value = repo_ctx.get(key)
-        if value:
-            attrs[key] = value
-    return attrs
-
-
-def _workspace_observability_attributes(data: Optional[dict], session_ctx: Optional[dict]) -> dict:
-    data = data or {}
-    repo_ctx = _resolve_repository_context(data, session_ctx=session_ctx)
-    cwd = _first_present(data, ("cwd",))
-    if not isinstance(cwd, str) or not cwd.strip():
-        cwd = None
-    workspace = _first_present(data, ("workspace_path",)) or repo_ctx.get("workspace_path")
-    workspace = workspace or repo_ctx.get("repo_root") or cwd
-    attrs = {}
-    if workspace:
-        attrs["gen_ai.client.workspace"] = os.path.abspath(os.path.expanduser(str(workspace)))
-    if cwd:
-        attrs["gen_ai.client.cwd"] = os.path.abspath(os.path.expanduser(cwd))
-    if repo_ctx.get("repo_root"):
-        attrs["gen_ai.client.repository_root"] = repo_ctx["repo_root"]
-    for key in (
-        "vcs.repository.owner",
-        "vcs.repository.name",
-        "vcs.ref.head.name",
-        "vcs.ref.head.type",
-        "gen_ai.client.repository.remote.sha256",
-    ):
-        if repo_ctx.get(key):
-            attrs[key] = repo_ctx[key]
-    return attrs
-
-
-def _collect_user_identity_attributes(data: Optional[dict]) -> dict:
-    if not _safe_bool(os.getenv("IDE_OTEL_CAPTURE_USER_IDENTITY", "")):
-        return {}
-    attrs = {}
-    user_id = None
-    user_email = None
-    user = data.get("user") if isinstance(data, dict) else None
-    if isinstance(user, dict):
-        user_id = _first_present(user, ("user_id", "id", "login", "username", "user_name", "actor_id"))
-        user_email = _first_present(user, ("user_email", "email"))
-    sources = []
-    if isinstance(data, dict):
-        sources.append(data)
-        metadata = data.get("metadata")
-        if isinstance(metadata, dict):
-            sources.append(metadata)
-    for source in sources:
-        if user_id is None:
-            user_id = _first_present(source, ("user_id", "login", "username", "user_name", "actor_id"))
-        if user_email is None:
-            user_email = _first_present(source, ("user_email", "email"))
-        if user_id is not None and user_email is not None:
-            break
-    user_id = _coerce_attribute_value(user_id)
-    if user_id is not None:
-        attrs["user.id"] = str(user_id)
-    user_email = _coerce_attribute_value(user_email)
-    if isinstance(user_email, str):
-        if _safe_bool(os.getenv("IDE_OTEL_MASK_PROMPTS", "")):
-            user_email = _mask_text(user_email)
-        attrs["user.email"] = user_email
-    return attrs
-
-
-def _collect_governance_attributes(data: Optional[dict]) -> dict:
-    if not isinstance(data, dict):
-        return {}
-    attrs = {}
-    attr_map = (
-        (("permission_mode",), "gen_ai.client.permission_mode"),
-        (("permission_decision", "approval_decision"), "gen_ai.client.approval.decision"),
-        (("approval_policy",), "gen_ai.client.approval.policy"),
-        (("approval_required", "requires_approval"), "gen_ai.client.approval.required"),
-        (("sandbox_mode",), "gen_ai.client.sandbox.mode"),
-        (("sandbox_policy",), "gen_ai.client.sandbox.policy"),
-        (("sandbox_enabled", "is_sandboxed", "sandboxed"), "gen_ai.client.sandbox.enabled"),
-        (("tool_choice",), "gen_ai.client.tool_choice"),
-        (("tool_decision",), "gen_ai.client.tool_decision"),
-    )
-    for source in _iter_enrichment_sources(data, include_tool_payloads=True):
-        for keys, attr_name in attr_map:
-            if attr_name in attrs:
-                continue
-            value = _coerce_attribute_value(_first_present(source, keys))
-            if value is not None:
-                attrs[attr_name] = value
-    return attrs
-
-
-def _collect_event_enrichment_attributes(data: Optional[dict] = None, session_ctx: Optional[dict] = None) -> dict:
-    data = data or {}
-    attrs = _workspace_observability_attributes(data, session_ctx=session_ctx)
-    attrs.update(_collect_user_identity_attributes(data))
-    attrs.update(_collect_governance_attributes(data))
-    attrs.update(_native_telemetry_attributes(data))
-    attrs["gen_ai.client.telemetry_source"] = _TELEMETRY_SOURCE
-    attrs["gen_ai.client.hook_schema_version"] = _HOOK_SCHEMA_VERSION
-    if data.get("_hook_event_id"):
-        attrs["gen_ai.client.hook.event_id"] = data["_hook_event_id"]
-    if _session_key(data):
-        attrs["gen_ai.client.session_id"] = _session_key(data)
-    if _generation_key_from_data(data):
-        attrs["gen_ai.client.generation_id"] = _generation_key_from_data(data)
-    if data.get("turn_id"):
-        attrs["gen_ai.client.turn_id"] = data["turn_id"]
-    return attrs
-
-
-def _apply_enrichment_attributes(span, data: Optional[dict] = None, session_ctx: Optional[dict] = None) -> None:
-    for key, value in _collect_event_enrichment_attributes(data, session_ctx=session_ctx).items():
-        _set_if_present(span, key, value)
-
-
-def _normalize_genai_output_type(value) -> Optional[str]:
-    normalized = _lower_or_none(value)
-    if normalized in {"json_object", "json_schema"}:
-        return "json"
-    if normalized in {"text", "json", "image", "speech"}:
-        return normalized
-    return None
-
-
-def _infer_genai_provider(data: dict) -> Optional[str]:
-    explicit = _lower_or_none(_first_present(data, ("provider_name", "provider", "model_provider", "vendor")))
-    if explicit is not None:
-        if explicit == "xai":
-            return "x_ai"
-        return explicit
-
-    model = _lower_or_none(_first_present(data, ("response_model", "request_model", "model", "model_name")))
-    if not model:
-        return None
-    if model.startswith("claude"):
-        return "anthropic"
-    if model.startswith(("gpt", "o1", "o3", "o4", "chatgpt", "text-embedding", "dall-e", "whisper")):
-        return "openai"
-    if model.startswith("gemini"):
-        return "gcp.gemini"
-    if model.startswith("mistral"):
-        return "mistral_ai"
-    if model.startswith("deepseek"):
-        return "deepseek"
-    if model.startswith("command") or model.startswith(("embed-", "rerank-")):
-        return "cohere"
-    if model.startswith("grok"):
-        return "x_ai"
-    if model.startswith("groq"):
-        return "groq"
-    return None
-
-
-# ---------------------------------------------------------------------------
-# OS / host detection (cached)
-# ---------------------------------------------------------------------------
-_OS_INFO: Optional[dict] = None
-
-
-def _get_os_info() -> dict:
-    """Detect operating system, version, and architecture. Cached after first call."""
-    global _OS_INFO
-    if _OS_INFO is not None:
-        return _OS_INFO
-    sys_name = platform.system().lower()  # darwin, linux, windows
-    os_type = {"darwin": "darwin", "linux": "linux", "windows": "windows"}.get(sys_name, sys_name)
-    os_name = platform.system()  # Darwin, Linux, Windows
-    if os_type == "darwin":
-        os_name = "macOS"
-    os_version = platform.release()  # e.g. "25.3.0", "6.5.0-44-generic"
-    arch = platform.machine()  # arm64, x86_64, aarch64
-    _OS_INFO = {
-        "os.type": os_type,
-        "os.name": os_name,
-        "os.version": os_version,
-        "host.arch": arch,
-    }
-    return _OS_INFO
-
-
-# ---------------------------------------------------------------------------
-# Client (IDE) version detection
-# ---------------------------------------------------------------------------
-_CODEX_VERSION_CACHE: Optional[str] = None  # cached result; None means not yet detected or not found
-_CODEX_VERSION_DETECTED: bool = False  # True once detection has been attempted
-
-
-def _detect_client_version(data: dict, ide: str) -> Optional[str]:
-    """Extract client/IDE version from environment variables or input payload."""
-    global _CODEX_VERSION_CACHE, _CODEX_VERSION_DETECTED
-    # Check input payload first
-    version = _first_present(data, ("client_version", "ide_version", "app_version"))
-    if version:
-        return str(version)
-    # IDE-specific env vars
-    if ide == "claude":
-        v = os.getenv("CLAUDE_CODE_VERSION")
-        if v:
-            return v
-    if ide == "cursor":
-        v = os.getenv("CURSOR_VERSION")
-        if v:
-            return v
-    if ide == "copilot":
-        v = os.getenv("COPILOT_VERSION")
-        if v:
-            return v
-    if ide == "codex":
-        v = os.getenv("CODEX_VERSION")
-        if v:
-            return v
-        if not _CODEX_VERSION_DETECTED:
-            _CODEX_VERSION_DETECTED = True
-            try:
-                result = subprocess.run(
-                    ["codex", "--version"],
-                    capture_output=True,
-                    text=True,
-                    timeout=2,
-                )
-                if result.returncode == 0:
-                    _CODEX_VERSION_CACHE = result.stdout.strip()
-            except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-                pass
-        if _CODEX_VERSION_CACHE:
-            return _CODEX_VERSION_CACHE
-    # Generic fallback
-    v = os.getenv("IDE_OTEL_CLIENT_VERSION")
-    if v:
-        return v
-    return None
-
-
-def _detect_payload_client_name(data: dict, include_session_fallback: bool = False) -> Optional[str]:
-    """Infer client identity from payload fields only, without wrapper env hints."""
-    reported = _normalize_ide_name(_first_present(data, ("ide_name", "ide", "client", "source_app")))
-    if reported:
-        return reported
-
-    semantic_signals = [
-        _normalize_ide_name(_first_present(data, ("gen_ai.client.name",))),
-        _normalize_ide_name(_first_present(data, ("gen_ai.system",))),
-        _normalize_ide_name(_first_present(data, ("service.name", "service_name"))),
-    ]
-    semantic_counts: dict[str, int] = {}
-    for signal in semantic_signals:
-        if signal:
-            semantic_counts[signal] = semantic_counts.get(signal, 0) + 1
-    corroborated = [name for name, count in semantic_counts.items() if count >= 2]
-    if len(corroborated) == 1:
-        return corroborated[0]
-
-    # Native Cascade IDs become session_id/generation_id in the adapter. Keep
-    # that provenance ahead of Cursor's generation_id heuristic.
-    if isinstance(data.get("agent_action_name"), str) and data["agent_action_name"] in _WINDSURF_EVENT_ALIASES and data.get("trajectory_id"):
-        return "windsurf"
-
-    if data.get("conversation_id") or data.get("generation_id"):
-        return "cursor"
-
-    if data.get("transcript_path") or data.get("permission_mode") or data.get("notification_type"):
-        return "claude"
-
-    if data.get("turn_id") or data.get("last_assistant_message") is not None or data.get("tool_response") is not None:
-        return "codex"
-
-    raw_event = _first_present(data, ("hook_event_name", "hook_event_type", "event"))
-    if isinstance(raw_event, str) and raw_event and raw_event[0].isupper():
-        return "claude"
-
-    cursor_indicators = ("composer_mode", "agent_type", "cwd", "workspace", "workspace_path")
-    if any(data.get(key) for key in cursor_indicators):
-        return "cursor"
-
-    if include_session_fallback and data.get("session_id"):
-        return "copilot"
-
-    return None
-
-
-def _detect_agent_engine(data: dict) -> Optional[str]:
-    """Detect an inner agent engine without consulting IDE_OTEL_IDE_NAME."""
-    explicit = _normalize_ide_name(_first_present(
-        data,
-        (
-            "agent_engine",
-            "agentEngine",
-            "engine",
-            "engine_name",
-        ),
-    ))
-    if explicit:
-        return explicit
-
-    payload_client = _detect_payload_client_name(data, include_session_fallback=False)
-    if payload_client:
-        return payload_client
-
-    if os.getenv("CLAUDE_CODE_ENTRYPOINT"):
-        return "claude"
-
-    return None
-
-
-def _has_strong_engine_signal(data: dict, resolved_engine: str) -> bool:
-    """True when payload has high-confidence evidence for the resolved engine."""
-    explicit = _normalize_ide_name(_first_present(
-        data,
-        ("agent_engine", "agentEngine", "engine", "engine_name"),
-    ))
-    if explicit == resolved_engine:
-        return True
-    reported = _normalize_ide_name(_first_present(data, ("ide_name", "ide", "client", "source_app")))
-    if reported == resolved_engine:
-        return True
-    semantic_signals = [
-        _normalize_ide_name(_first_present(data, ("gen_ai.client.name",))),
-        _normalize_ide_name(_first_present(data, ("gen_ai.system",))),
-        _normalize_ide_name(_first_present(data, ("service.name", "service_name"))),
-    ]
-    if sum(1 for signal in semantic_signals if signal == resolved_engine) >= 2:
-        return True
-    if resolved_engine == "cursor" and (data.get("conversation_id") or data.get("generation_id")):
-        return True
-    if resolved_engine == "windsurf" and isinstance(data.get("agent_action_name"), str) and data["agent_action_name"] in _WINDSURF_EVENT_ALIASES and data.get("trajectory_id"):
-        return True
-    if resolved_engine == "codex" and (
-        data.get("turn_id")
-        or data.get("last_assistant_message") is not None
-        or data.get("tool_response") is not None
-        or _get_event_name(data) in _CODEX_EVENTS
-    ):
-        return True
-    return False
-
-
-def _resolved_agent_engine(
-    data: Optional[dict] = None,
-    session_ctx: Optional[dict] = None,
-    ide: Optional[str] = None,
-) -> Optional[str]:
-    payload = data or {}
-    resolved = _detect_agent_engine(payload)
-    if resolved and ide and resolved != ide and not _has_strong_engine_signal(payload, resolved):
-        resolved = None
-    if resolved:
-        return resolved
-    if ide and _has_strong_engine_signal(payload, ide):
-        return None
-    if session_ctx:
-        session_engine = _normalize_ide_name(session_ctx.get("agent_engine"))
-        if session_engine and session_ctx.get("agent_engine_confirmed", True):
-            return session_engine
-    return None
-
-def _resolve_client_name(
-    ide: str,
-    data: Optional[dict] = None,
-    agent_engine: Optional[str] = None,
-    session_ctx: Optional[dict] = None,
-) -> str:
-    resolved_engine = agent_engine if agent_engine is not None else _resolved_agent_engine(data, session_ctx, ide=ide)
-    if resolved_engine and resolved_engine != ide:
-        return resolved_engine
-    return ide
-
-
-def _set_client_identity_attributes(
-    span, ide: str, data: Optional[dict] = None, agent_engine: Optional[str] = None, session_ctx: Optional[dict] = None,
-) -> Optional[str]:
-    """Attach canonical client identity and preserve wrapper identity when nested.
-
-    Returns the resolved inner engine when one is detected and differs from the
-    outer IDE; otherwise returns ``None``.
-    """
-    resolved_engine = agent_engine if agent_engine is not None else _resolved_agent_engine(data, session_ctx, ide=ide)
-    client_name = _resolve_client_name(ide, data=data, agent_engine=resolved_engine, session_ctx=session_ctx)
-    span.set_attribute("gen_ai.client.name", client_name)
-    if resolved_engine and resolved_engine != ide:
-        span.set_attribute("gen_ai.client.wrapper", ide)
-        span.set_attribute("gen_ai.client.agent_engine", resolved_engine)
-        return resolved_engine
-    return None
-
-
-def _normalize_input_data(data: dict) -> dict:
-    """Add snake_case aliases for compatible hook payloads when needed."""
-    normalized = None
-    for source_key, target_key in _INPUT_ALIASES.items():
-        if source_key in data and target_key not in data:
-            if normalized is None:
-                normalized = dict(data)
-            normalized[target_key] = data[source_key]
-    return normalized or data
-
-
-def _bound_tool_response_payload(data: dict) -> None:
-    """Keep buffered tool responses small while preserving exact size evidence."""
-    value = data.get("tool_response")
-    if value is None:
-        return
-
-    text = _stringify(value)
-    data["tool_response_length"] = len(text)
-    data["tool_response_sha256"] = _hash_text(text)
-
-    # Provider aliases are normalized before this boundary. Keeping both copies
-    # defeats the payload bound for camelCase callbacks.
-    data.pop("toolResponse", None)
-
-    max_chars = _text_max_chars()
-    if len(text) <= max_chars:
-        return
-
-    data["tool_response_truncated"] = True
-    retain_preview = _safe_bool(os.getenv("IDE_OTEL_CAPTURE_TOOL_INPUT_CONTENT", "")) or _safe_bool(
-        os.getenv("IDE_OTEL_MCP_LOG_PAYLOAD", "true")
-    )
-    if retain_preview and max_chars > 0:
-        data["tool_response"] = text[:max_chars]
-    else:
-        data.pop("tool_response", None)
-
-
-@dataclass(frozen=True, slots=True)
-class ConversationRecord:
-    """One privacy-controlled conversation fact extracted from a hook callback."""
-
-    kind: str
-    role: str
-    text: Optional[str] = None
-    length: int = 0
-    sha256: str = ""
-
-    @classmethod
-    def from_text(cls, kind: str, role: str, text: str) -> "ConversationRecord":
-        """Build a content fact without retaining raw text unless capture is enabled."""
-        return cls(
-            kind=kind,
-            role=role,
-            text=text if _conversation_content_enabled() else None,
-            length=len(text),
-            sha256=_hash_text(text),
-        )
-
-
-@dataclass(frozen=True, slots=True)
-class AgentRelationship:
-    """Provider-neutral agent/delegation identity carried by an event."""
-
-    agent_id: Optional[str] = None
-    parent_agent_id: Optional[str] = None
-    task: Optional[str] = None
-    task_length: int = 0
-    task_sha256: str = ""
-    status: Optional[str] = None
-
-
-@dataclass(frozen=True, slots=True)
-class WorkspaceIdentity:
-    """Provider-supplied workspace identity before Git enrichment."""
-
-    workspace_path: Optional[str] = None
-    cwd: Optional[str] = None
-
-
-@dataclass(frozen=True, slots=True)
-class NativeTelemetryContext:
-    """Validated trace identifiers supplied by the native agent, when present."""
-
-    source: Optional[str] = None
-    trace_id: Optional[str] = None
-    span_id: Optional[str] = None
-    parent_span_id: Optional[str] = None
-
-
-@dataclass(frozen=True, slots=True)
-class CanonicalHookEvent:
-    """Canonical event contract shared by every provider adapter."""
-
-    provider: str
-    original_event_name: str
-    event_name: str
-    event_id: str
-    event_id_source: str
-    original_tool_name: Optional[str]
-    session_id: Optional[str]
-    generation_id: Optional[str]
-    turn_id: Optional[str]
-    conversation: tuple[ConversationRecord, ...]
-    relationship: AgentRelationship
-    workspace: WorkspaceIdentity
-    native: NativeTelemetryContext
-    lifecycle_data: dict
-
-    def to_lifecycle_data(self) -> dict:
-        """Return the normalized, privacy-safe payload used by lifecycle services."""
-        return dict(self.lifecycle_data)
-
-
-class ProviderEventAdapter:
-    """Translate one provider payload into the canonical hook event model."""
-
-    provider = "unknown"
-    event_aliases: dict[str, str] = {}
-    response_fields = ("response", "last_assistant_message", "assistant_response")
-    stop_message_fields = ("stop_message",)
-    # Text facts are bounded and hash-only unless conversation capture is enabled.
-    event_text_fields = {
-        "AfterAgentResponse": ("response", "assistant", ("text",)),
-        "AfterAgentThought": ("reasoning", "assistant", ("text",)),
-        "MessageDisplay": ("response.chunk", "assistant", ("delta",)),
-        "Notification": ("notification", "system", ("message",)),
-        "UserPromptTransformed": ("prompt.transformed", "user", ("transformedPrompt", "transformed_prompt", "prompt")),
-        "UserPromptExpansion": ("prompt.expanded", "user", ("prompt", "command_args")),
-        "StopFailure": ("error", "error", ("last_assistant_message", "error_details", "error")),
-        "SubagentStop": ("response", "assistant", ("response", "last_assistant_message")),
-        "TaskCreated": ("task", "system", ("task_subject", "task_description")),
-        "TaskCompleted": ("task", "system", ("task_subject", "task_description")),
-        "PreCompact": ("compaction.instructions", "user", ("custom_instructions",)),
-        "PostCompact": ("compaction.summary", "system", ("compact_summary",)),
-    }
-
-    def canonical_event_name(self, original_event_name: str) -> str:
-        """Translate the provider callback name into the shared event vocabulary."""
-        return self.event_aliases.get(original_event_name, original_event_name)
-
-    def normalize(
-        self,
-        original_event_name: str,
-        event_name: Optional[str],
-        data: dict,
-        session_ctx: Optional[dict] = None,
-    ) -> CanonicalHookEvent:
-        event_name = event_name or self.canonical_event_name(original_event_name)
-        normalized = dict(_normalize_input_data(data))
-        self._normalize_provider_fields(event_name, normalized)
-        conversation = tuple(self._conversation_records(event_name, normalized))
-        event_id, event_id_source = self._event_identity(event_name, normalized, conversation, session_ctx)
-        normalized["_hook_event_id"] = event_id
-        normalized["_hook_event_id_source"] = event_id_source
-        normalized["_hook_original_event"] = original_event_name
-        normalized["_hook_provider_adapter"] = self.provider
-        normalized["_canonical_event_name"] = event_name
-
-        task = _first_present(normalized, ("delegation_task", "subagent_task", "task"))
-        if task is not None and not isinstance(task, str):
-            task = _stringify(task)
-        task_text = task if isinstance(task, str) else None
-        relationship = AgentRelationship(
-            agent_id=self._text_value(normalized.get("agent_id")),
-            parent_agent_id=self._text_value(normalized.get("parent_agent_id")),
-            task=task_text if task_text and _conversation_content_enabled() else None,
-            task_length=len(task_text) if task_text else 0,
-            task_sha256=_hash_text(task_text) if task_text else "",
-            status=self._text_value(normalized.get("status")),
-        )
-        workspace = WorkspaceIdentity(
-            workspace_path=self._text_value(normalized.get("workspace_path")),
-            cwd=self._text_value(normalized.get("cwd")),
-        )
-        native = NativeTelemetryContext(
-            source=self._text_value(normalized.get("native_source")) or (
-                self.provider if self._native_trace_id(normalized.get("native_trace_id")) else None
-            ),
-            trace_id=self._native_trace_id(normalized.get("native_trace_id")),
-            span_id=self._native_span_id(normalized.get("native_span_id")),
-            parent_span_id=self._native_span_id(normalized.get("native_parent_span_id")),
-        )
-        self._store_privacy_safe_conversation(event_name, normalized, conversation)
-        if not _conversation_content_enabled():
-            for source, target in _INPUT_ALIASES.items():
-                if target not in normalized:
-                    normalized.pop(source, None)
-        _bound_tool_response_payload(normalized)
-        return CanonicalHookEvent(
-            provider=self.provider,
-            original_event_name=original_event_name,
-            event_name=event_name,
-            event_id=event_id,
-            event_id_source=event_id_source,
-            original_tool_name=self._text_value(normalized.get("tool_name")),
-            session_id=_session_key(normalized),
-            generation_id=_generation_key_from_data(normalized),
-            turn_id=self._text_value(normalized.get("turn_id")),
-            conversation=conversation,
-            relationship=relationship,
-            workspace=workspace,
-            native=native,
-            lifecycle_data=normalized,
-        )
-
-    def _normalize_provider_fields(self, event_name: str, data: dict) -> None:
-        """Normalize shared encoded MCP syntax before lifecycle processing."""
-        data.update(_normalize_mcp_event_data(data, event_name, self.provider))
-
-    def _conversation_records(self, event_name: str, data: dict):
-        if event_name in self.event_text_fields:
-            kind, role, fields = self.event_text_fields[event_name]
-            text = self._first_text(data, fields)
-            if text:
-                yield ConversationRecord.from_text(kind, role, text)
-        if event_name == "UserPromptSubmit":
-            prompt = self._first_text(data, ("prompt", "user_prompt", "input"))
-            if prompt:
-                yield ConversationRecord.from_text("prompt", "user", prompt)
-        if event_name == "Stop":
-            response = self._first_text(data, self.response_fields)
-            if response:
-                yield ConversationRecord.from_text("response", "assistant", response)
-            stop_message = self._first_text(data, self.stop_message_fields)
-            if stop_message and stop_message != response:
-                yield ConversationRecord.from_text("stop_message", "system", stop_message)
-        if event_name in {"ErrorOccurred", "PostToolUseFailure"} or data.get("error") is not None:
-            error = self._first_text(data, ("error_message", "error"))
-            if error:
-                yield ConversationRecord.from_text("error", "error", error)
-        if event_name in {"SubagentStart", "SubagentStop"}:
-            task = self._first_text(data, ("delegation_task", "subagent_task", "task"))
-            if task:
-                yield ConversationRecord.from_text("delegation.task", "system", task)
-
-    def _store_privacy_safe_conversation(
-        self,
-        event_name: str,
-        data: dict,
-        conversation: tuple[ConversationRecord, ...],
-    ) -> None:
-        if conversation:
-            capture = _conversation_content_enabled()
-            data["_conversation_records"] = [
-                {
-                    "kind": record.kind,
-                    "role": record.role,
-                    "length": record.length,
-                    "sha256": record.sha256,
-                    **({"text": record.text} if capture and record.text is not None else {}),
-                }
-                for record in conversation
-            ]
-        if _conversation_content_enabled():
-            return
-
-        if event_name in self.event_text_fields:
-            for key in self.event_text_fields[event_name][2]:
-                data.pop(key, None)
-        if event_name == "Notification":
-            data.pop("details", None)
-        if event_name in {"Elicitation", "ElicitationResult"}:
-            for key in ("message", "requested_schema", "requestedSchema", "content"):
-                data.pop(key, None)
-
-        if event_name == "UserPromptSubmit":
-            for key in ("prompt", "user_prompt", "input"):
-                data.pop(key, None)
-        if event_name == "Stop":
-            for key in (*self.response_fields, *self.stop_message_fields):
-                data.pop(key, None)
-        if event_name in {"ErrorOccurred", "PostToolUseFailure", "AfterMCPExecution"} or data.get("error") is not None:
-            error = data.get("error")
-            if isinstance(error, dict):
-                data.setdefault("error_type", _first_present(error, ("type", "error_type", "name")))
-                data.setdefault("error_code", _first_present(error, ("code", "error_code")))
-            error_record = next((item for item in conversation if item.kind == "error"), None)
-            if error_record:
-                data["error_length"] = error_record.length
-                data["error_sha256"] = error_record.sha256
-                data.setdefault("status", "error")
-            data.pop("error", None)
-            data.pop("error_message", None)
-        if event_name in {"SubagentStart", "SubagentStop"}:
-            task_record = next((item for item in conversation if item.kind == "delegation.task"), None)
-            if task_record:
-                data["delegation_task_length"] = task_record.length
-                data["delegation_task_sha256"] = task_record.sha256
-            for key in ("delegation_task", "subagent_task", "task"):
-                data.pop(key, None)
-
-    def _event_identity(
-        self,
-        event_name: str,
-        data: dict,
-        conversation: tuple[ConversationRecord, ...],
-        session_ctx: Optional[dict],
-    ) -> tuple[str, str]:
-        provided = _first_present(data, ("event_id", "hook_event_id", "callback_id"))
-        if provided is not None and str(provided).strip():
-            return str(provided).strip(), "provider"
-        task = _first_present(data, ("delegation_task", "subagent_task", "task"))
-        error = _first_present(data, ("error_message", "error"))
-        payload = {
-            "provider": self.provider,
-            "event": event_name,
-            "session": _session_key(data),
-            "generation": _generation_key_from_data(data) or (
-                None if event_name in _GENERATION_START_EVENTS else (session_ctx or {}).get("current_generation")
-            ),
-            "turn": data.get("turn_id"),
-            "tool_use_id": data.get("tool_use_id"),
-            "tool_name": data.get("tool_name"),
-            "agent_id": data.get("agent_id"),
-            "agent_type": _first_present(data, ("subagent_type", "agent_type", "agent_name")),
-            "task_sha256": _hash_text(_stringify(task)) if task is not None else None,
-            "error_sha256": _hash_text(_stringify(error)) if error is not None else None,
-            "status": data.get("status"),
-            "timestamp": _first_present(data, ("timestamp_ns", "timestamp", "event_time")),
-            "conversation": [(item.kind, item.sha256) for item in conversation],
-        }
-        digest = hashlib.sha256(
-            json.dumps(payload, ensure_ascii=True, sort_keys=True, default=str).encode("utf-8")
-        ).hexdigest()
-        return f"hook:{digest}", "hook"
-
-    @staticmethod
-    def _first_text(data: dict, keys: tuple[str, ...]) -> Optional[str]:
-        value = _first_present(data, keys)
-        if value is None:
-            return None
-        return value if isinstance(value, str) else _stringify(value)
-
-    @staticmethod
-    def _text_value(value) -> Optional[str]:
-        if not isinstance(value, str) or not value.strip():
-            return None
-        return value.strip()
-
-    @staticmethod
-    def _native_trace_id(value) -> Optional[str]:
-        value = str(value).strip().lower() if value is not None else ""
-        return value if _TRACE_ID_RE.fullmatch(value) and int(value, 16) else None
-
-    @staticmethod
-    def _native_span_id(value) -> Optional[str]:
-        value = str(value).strip().lower() if value is not None else ""
-        return value if _SPAN_ID_RE.fullmatch(value) and int(value, 16) else None
-
-
-class CursorEventAdapter(ProviderEventAdapter):
-    provider = "cursor"
-    event_aliases = {
-        key: value
-        for key, value in _CANONICAL_EVENT.items()
-        if key[:1].islower() and key not in {"userPromptSubmitted", "errorOccurred"}
-    }
-
-
-class WindsurfEventAdapter(ProviderEventAdapter):
-    provider = "windsurf"
-    # Keep accepting legacy compatible-runner payloads, but install native names.
-    event_aliases = {**CursorEventAdapter.event_aliases, **_WINDSURF_EVENT_ALIASES}
-
-    def _normalize_provider_fields(self, event_name: str, data: dict) -> None:
-        for source, target in (("trajectory_id", "session_id"), ("execution_id", "generation_id")):
-            if data.get(source):
-                data.setdefault(target, data[source])
-        info = data.pop("tool_info", None)
-        if isinstance(info, dict):
-            fields = {
-                "file_path": "file_path", "command_line": "command", "cwd": "cwd",
-                "mcp_server_name": "mcp_server_name", "mcp_tool_name": "tool_name",
-                "mcp_tool_arguments": "tool_input", "mcp_result": "tool_response", "user_prompt": "prompt",
-                "response": "response", "transcript_path": "transcript_path",
-                "worktree_path": "workspace_path", "root_workspace_path": "root_workspace_path",
-            }
-            for source, target in fields.items():
-                if source in info:
-                    data.setdefault(target, info[source])
-        super()._normalize_provider_fields(event_name, data)
-
-
-class ClaudeEventAdapter(ProviderEventAdapter):
-    provider = "claude"
-    response_fields = ("last_assistant_message", "response", "assistant_response")
-
-    def _normalize_provider_fields(self, event_name: str, data: dict) -> None:
-        if event_name == "PostToolBatch":
-            # Batch results duplicate individual tool callbacks. Retain only
-            # identity and content facts unless tool-content capture is enabled.
-            calls = []
-            capture = _safe_bool(os.getenv("IDE_OTEL_CAPTURE_TOOL_INPUT_CONTENT", ""))
-            for call in data.get("tool_calls") or []:
-                if not isinstance(call, dict):
-                    continue
-                safe_call = {key: call[key] for key in ("tool_name", "tool_use_id") if key in call}
-                for key in ("tool_input", "tool_response"):
-                    if key not in call:
-                        continue
-                    text = _stringify(call[key])
-                    safe_call[f"{key}_length"] = len(text)
-                    safe_call[f"{key}_sha256"] = _hash_text(text)
-                    if capture:
-                        if _safe_bool(os.getenv("IDE_OTEL_MASK_PROMPTS", "")):
-                            text = _mask_text(text)
-                        safe_call[key] = text[:_text_max_chars()]
-                calls.append(safe_call)
-            data["tool_calls"] = calls
-        if event_name == "StopFailure":
-            data.setdefault("error_type", data.get("error"))
-            data.setdefault("status", "error")
-        super()._normalize_provider_fields(event_name, data)
-
-
-class CodexEventAdapter(ProviderEventAdapter):
-    provider = "codex"
-
-    def _normalize_provider_fields(self, event_name: str, data: dict) -> None:
-        if event_name == "Interrupt":
-            data["is_interrupt"] = True
-            data.setdefault("status", "interrupted")
-        super()._normalize_provider_fields(event_name, data)
-
-
-class GeminiEventAdapter(ProviderEventAdapter):
-    provider = "gemini"
-    event_aliases = {
-        "BeforeAgent": "UserPromptSubmit", "AfterAgent": "Stop",
-        "BeforeTool": "PreToolUse", "AfterTool": "PostToolUse",
-        "PreCompress": "PreCompact",
-    }
-    response_fields = ("prompt_response", "response", "output", "last_assistant_message")
-
-    def _normalize_provider_fields(self, event_name: str, data: dict) -> None:
-        # Model hooks can fire many times per turn (AfterModel even per chunk).
-        # Preserve their identities without opening/closing generations or
-        # persisting nested model messages outside the content privacy contract.
-        request = data.pop("llm_request", None)
-        if isinstance(request, dict) and request.get("model"):
-            data.setdefault("request_model", request["model"])
-        data.pop("llm_response", None)
-        if event_name == "Stop":
-            data.pop("prompt", None)  # repeated original request, already captured at BeforeAgent
-        if event_name == "PostToolUse" and isinstance(data.get("tool_response"), dict):
-            if data["tool_response"].get("error"):
-                data.setdefault("error", data["tool_response"]["error"])
-                data.setdefault("status", "error")
-        super()._normalize_provider_fields(event_name, data)
-
-
-class AntigravityEventAdapter(ProviderEventAdapter):
-    provider = "antigravity"
-    # The compatibility runner has its own historic event contract.
-    event_aliases = {
-        key: value for key, value in _CANONICAL_EVENT.items() if key.startswith(("Before", "After"))
-    }
-    response_fields = ("response", "output", "last_assistant_message")
-
-
-class CopilotEventAdapter(ProviderEventAdapter):
-    provider = "copilot"
-    event_aliases = {
-        key: _CANONICAL_EVENT[key]
-        for key in _COPILOT_EVENTS
-    }
-
-    def _normalize_provider_fields(self, event_name: str, data: dict) -> None:
-        if "toolArgs" in data:
-            args = data.pop("toolArgs")
-            if isinstance(args, str):
-                try:
-                    args = json.loads(args)
-                except (ValueError, TypeError):
-                    pass
-            data.setdefault("tool_input", args)
-        result = data.pop("toolResult", data.pop("tool_result", None))
-        if isinstance(result, dict):
-            data.setdefault("tool_output", result.get("textResultForLlm", result.get("text_result_for_llm")))
-        super()._normalize_provider_fields(event_name, data)
-
-
-class OpenCodeEventAdapter(ProviderEventAdapter):
-    provider = "opencode"
-
-
-_DEFAULT_EVENT_ADAPTER = ProviderEventAdapter()
-_PROVIDER_EVENT_ADAPTERS = {
-    "cursor": CursorEventAdapter(),
-    "windsurf": WindsurfEventAdapter(),
-    "claude": ClaudeEventAdapter(),
-    "codex": CodexEventAdapter(),
-    "gemini": GeminiEventAdapter(),
-    "antigravity": AntigravityEventAdapter(),
-    "copilot": CopilotEventAdapter(),
-    "opencode": OpenCodeEventAdapter(),
-}
-
-
-def _event_adapter_for(ide: str) -> ProviderEventAdapter:
-    return _PROVIDER_EVENT_ADAPTERS.get(ide, _DEFAULT_EVENT_ADAPTER)
-
-
-def _parse_encoded_mcp_tool_name(tool_name: object) -> Optional[Tuple[str, str]]:
-    """Parse ``mcp__<server>__<tool>`` while preserving ``__`` inside the tool."""
-    if not isinstance(tool_name, str) or not tool_name.startswith("mcp__"):
-        return None
-    parts = tool_name.split("__", 2)
-    if len(parts) != 3 or not parts[1] or not parts[2]:
-        return None
-    return parts[1], parts[2]
-
-
-def _normalize_mcp_event_data(data: dict, event_name: str, ide: Optional[str] = None) -> dict:
-    """Add a provider-neutral MCP identity without changing the original tool name."""
-    tool_name = data.get("tool_name")
-    parsed = _parse_encoded_mcp_tool_name(tool_name)
-    server = _first_present(data, ("mcp_server_name", "mcp_server"))
-    tool = data.get("mcp_tool")
-
-    if parsed:
-        server = server or parsed[0]
-        tool = tool or parsed[1]
-    elif ide == "cursor" and isinstance(tool_name, str) and tool_name.startswith("MCP:"):
-        tool = tool or tool_name.removeprefix("MCP:")
-    elif event_name in _MCP_EVENTS:
-        tool = tool or tool_name
-
-    # ``command`` is a legacy fallback for dedicated MCP events.  A real
-    # server field always wins, so executable paths never overwrite it.
-    if not server and event_name in _MCP_EVENTS:
-        server = data.get("command")
-
-    updates = {}
-    if server and data.get("mcp_server") != server:
-        updates["mcp_server"] = server
-    if tool and data.get("mcp_tool") != tool:
-        updates["mcp_tool"] = tool
-    if ide == "cursor" and event_name == "AfterMCPExecution" and data.get("duration_ms") is None:
-        # Cursor's hook wire contract reports duration in milliseconds.
-        duration = data.get("duration")
-        if isinstance(duration, (int, float)) and not isinstance(duration, bool):
-            updates["duration_ms"] = float(duration)
-    if not updates:
-        return data
-    normalized = dict(data)
-    normalized.update(updates)
-    return normalized
-
-
-def _mcp_identity(data: dict) -> Tuple[Optional[str], Optional[str]]:
-    """Return the already-normalized MCP server and tool identity."""
-    return data.get("mcp_server"), data.get("mcp_tool")
-
-
-def _mcp_observability_attributes(event_name: str, data: dict) -> dict:
-    """Build content-safe MCP attributes shared by spans and logs."""
-    normalized = _normalize_mcp_event_data(data, event_name)
-    server, tool = _mcp_identity(normalized)
-    if not server and not tool:
-        return {}
-    attrs = {}
-    if server:
-        attrs["gen_ai.client.mcp_server"] = server
-    if tool:
-        attrs["gen_ai.client.mcp_tool"] = tool
-    invocation_id = normalized.get("tool_use_id")
-    if invocation_id:
-        attrs["gen_ai.client.tool_use_id"] = invocation_id
-    duration = _first_present(normalized, ("duration_ms", "duration"))
-    if duration is not None:
-        attrs["gen_ai.client.mcp.duration_ms"] = duration
-        attrs["gen_ai.client.duration_ms"] = duration
-    status = normalized.get("status") or normalized.get("mcp_status")
-    if event_name == "PostToolUseFailure" or normalized.get("error") is not None:
-        status = "error"
-    elif event_name in {"PostToolUse", "AfterMCPExecution"} and not status:
-        status = "success"
-    if status:
-        attrs["gen_ai.client.status"] = status
-    if normalized.get("error") is not None:
-        error_text = _stringify(normalized["error"])
-        attrs["gen_ai.client.error.length"] = len(error_text)
-        attrs["gen_ai.client.error.sha256"] = _hash_text(error_text)
-        if _conversation_content_enabled():
-            if _safe_bool(os.getenv("IDE_OTEL_MASK_PROMPTS", "")):
-                error_text = _mask_text(error_text)
-            attrs["gen_ai.client.error.text"] = error_text[:_text_max_chars()]
-    else:
-        if normalized.get("error_length") is not None:
-            attrs["gen_ai.client.error.length"] = normalized["error_length"]
-        if normalized.get("error_sha256") is not None:
-            attrs["gen_ai.client.error.sha256"] = normalized["error_sha256"]
-
-    result = _first_present(normalized, ("result_json", "mcp_output", "tool_output", "output"))
-    if result is not None:
-        text = _stringify(result)
-        attrs["gen_ai.client.mcp.output.length"] = len(text)
-        attrs["gen_ai.client.mcp.output.sha256"] = _hash_text(text)
-    else:
-        if normalized.get("mcp_result_length") is not None:
-            attrs["gen_ai.client.mcp.output.length"] = normalized["mcp_result_length"]
-        if normalized.get("mcp_result_sha256") is not None:
-            attrs["gen_ai.client.mcp.output.sha256"] = normalized["mcp_result_sha256"]
-    return attrs
-
-
-def _apply_mcp_attributes(span, event_name: str, data: dict) -> None:
-    for key, value in _mcp_observability_attributes(event_name, data).items():
-        _set_if_present(span, key, value)
-
-
-def _normalize_ide_name(value: Optional[str]) -> Optional[str]:
-    """Normalize IDE names to canonical identifiers using case-insensitive lookup."""
-    if not isinstance(value, str):
-        return None
-    normalized = _IDE_NAME_NORM_PATTERN.sub(" ", value.strip().lower())
-    if normalized in _CANONICAL_IDE_NAMES:
-        return normalized
-
-    alias = _IDE_NAME_ALIASES.get(normalized)
-    if alias:
-        return alias
-
-    if normalized.endswith((" cli", " ide")):
-        normalized = normalized.rsplit(" ", 1)[0]
-        if normalized in _CANONICAL_IDE_NAMES:
-            return normalized
-        return _IDE_NAME_ALIASES.get(normalized)
-
     return None
 
 
@@ -2049,6 +441,10 @@ def _cleanup_state() -> None:
             try:
                 if not os.path.isfile(path) or os.path.getmtime(path) >= cutoff:
                     continue
+                if name.endswith('.quarantine.json'):
+                    continue
+                if name.endswith('.identity.json') and os.path.exists(path.removesuffix('.identity.json')):
+                    continue
                 key = name.removesuffix(".jsonl")
                 events = _load_batch_events(key)
                 owner = next(
@@ -2062,7 +458,7 @@ def _cleanup_state() -> None:
 
 
 def _flush_stale_sessions(tracer) -> None:
-    """Emit ``gen_ai.client.session`` root spans for stale sessions that were never closed.
+    """Emit ``o11y.client.session`` root spans for stale sessions that were never closed.
 
     When an IDE crashes or fails to send ``SessionEnd``, the session context
     file lingers on disk.  This function finds sessions older than the
@@ -2117,73 +513,6 @@ def _flush_stale_sessions(tracer) -> None:
 # ---------------------------------------------------------------------------
 # Logging — JSON structured format with trace context & extra attributes
 # ---------------------------------------------------------------------------
-
-# Standard Python LogRecord fields to exclude from the JSON "attributes" bucket
-_LOG_RESERVED_ATTRS = frozenset({
-    "args", "created", "exc_info", "exc_text", "filename", "funcName",
-    "levelname", "levelno", "lineno", "module", "msecs", "message", "msg",
-    "name", "pathname", "process", "processName", "relativeCreated",
-    "stack_info", "taskName", "thread", "threadName",
-    # Our own top-level keys (already emitted explicitly)
-    "trace_id", "span_id",
-})
-
-
-class _JsonFormatter(logging.Formatter):
-    """Emit each log record as a single-line JSON object.
-
-    Schema::
-
-        {
-          "timestamp": "2026-02-10T09:56:42.546000+00:00",
-          "level": "INFO",
-          "logger": "otel_hook.mcp",
-          "message": "MCP call: gitlab-mcp/search_gitlab",
-          "trace_id": "795f9117681e7f5c010a851ada5c300a",
-          "span_id": "5b718186951f167f",
-          "attributes": {              // all extra= fields
-            "gen_ai.client.mcp_server": "gitlab-mcp",
-            "gen_ai.client.mcp_tool": "search_gitlab",
-            "gen_ai.client.mcp.input": "{...}",
-            ...
-          }
-        }
-    """
-
-    def format(self, record: logging.LogRecord) -> str:
-        # Build the base envelope
-        obj = {
-            "timestamp": datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat(),
-            "level": record.levelname,
-            "logger": record.name,
-            "message": record.getMessage(),
-            "trace_id": getattr(record, "trace_id", "0"),
-            "span_id": getattr(record, "span_id", "0"),
-        }
-
-        # Collect all extra attributes (anything not in the reserved set)
-        attrs = {}
-        for key, value in record.__dict__.items():
-            if key.startswith("_") or key in _LOG_RESERVED_ATTRS:
-                continue
-            # Skip None values and internal callables
-            if value is None or callable(value):
-                continue
-            try:
-                # Ensure JSON-serializable
-                json.dumps(value)
-                attrs[key] = value
-            except (TypeError, ValueError):
-                attrs[key] = str(value)
-        if attrs:
-            obj["attributes"] = attrs
-
-        # Include exception info if present
-        if record.exc_info and record.exc_info[1] is not None:
-            obj["exception"] = self.formatException(record.exc_info)
-
-        return json.dumps(obj, ensure_ascii=False, default=str)
-
 
 def _resolve_log_level() -> int:
     for key in ("IDE_OTEL_LOG_LEVEL", "LOG_LEVEL", "LOGLEVEL"):
@@ -2291,59 +620,10 @@ def _load_mdm_config() -> dict:
 
     Returns a dict of key/value pairs (may be empty).  Never raises.
     """
-    if _safe_bool(os.getenv("IDE_OTEL_SKIP_MDM", "")):
-        return {}
     if sys.platform == "darwin":
         return _load_mdm_config_macos()
     if sys.platform == "win32":
         return _load_mdm_config_windows()
-    return {}
-
-
-def _load_mdm_config_macos() -> dict:
-    """Load managed preferences from macOS MDM profile."""
-    try:
-        import plistlib
-        managed_path = f"/Library/Managed Preferences/{_MDM_DOMAIN}.plist"
-        if os.path.exists(managed_path):
-            with open(managed_path, "rb") as fh:
-                return plistlib.load(fh) or {}
-        # Fall back to current-user managed preferences
-        user_managed = os.path.expanduser(
-            f"~/Library/Managed Preferences/{_MDM_DOMAIN}.plist"
-        )
-        if os.path.exists(user_managed):
-            with open(user_managed, "rb") as fh:
-                return plistlib.load(fh) or {}
-    except Exception:
-        _LOGGER.debug("MDM: unable to read macOS managed preferences")
-    return {}
-
-
-def _load_mdm_config_windows() -> dict:
-    """Load managed configuration from Windows registry (HKLM)."""
-    try:
-        import winreg
-        result = {}
-        for hive in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
-            try:
-                with winreg.OpenKey(hive, _MDM_REGISTRY_PATH) as key:
-                    idx = 0
-                    while True:
-                        try:
-                            name, value, _ = winreg.EnumValue(key, idx)
-                            if name and value is not None:
-                                result[name] = str(value)
-                            idx += 1
-                        except OSError:
-                            break
-            except OSError:
-                continue
-        return result
-    except ImportError:
-        pass
-    except Exception:
-        _LOGGER.debug("MDM: unable to read Windows registry")
     return {}
 
 
@@ -2393,65 +673,62 @@ def _load_config() -> dict:
         config = _load_json_config(path)
     # MDM settings override JSON config (IT admin policy takes precedence)
     mdm = _load_mdm_config()
+    shared_options = merge_settings(config, mdm).get("claude", {})
+    if not isinstance(shared_options, dict):
+        raise ValueError("claude configuration must be an object")
+    sources = {}
+    if shared_options.get("shared_config") is True and _CLI_HOOK_SOURCE == "claude":
+        shared, sources = shared_claude_settings(managed_only=export_enforced(mdm))
+        # Explicit hook settings override imported defaults. Enforced MDM settings
+        # use only the shared source and administrator values, never local JSON.
+        config = merge_settings(shared, config)
+        if export_enforced(mdm):
+            mdm = merge_settings(shared, mdm)
+    if _safe_bool(os.getenv("IDE_OTEL_SKIP_MDM", "")):
+        mdm = {key: value for key, value in mdm.items()
+               if key in {"capture", "logs"} or export_enforced(mdm)}
     if mdm:
-        config.update(mdm)
+        config = merge_settings(config, mdm)
+        config["_managed"] = mdm
+    if mdm or sources:
+        config["_policy_sources"] = {
+            "managed": bool(mdm), "export_enforced": export_enforced(mdm),
+            "claude_settings": sorted(set(sources.values())),
+        }
     return config
 
 
-def _load_json_config(path: str) -> dict:
-    try:
-        with open(path, "r", encoding="utf-8") as fh:
-            return json.load(fh) or {}
-    except (OSError, json.JSONDecodeError):
-        return {}
-
-
-def _headers_to_env(value: dict) -> str:
-    return ",".join(f"{k}={v}" for k, v in value.items() if v is not None)
-
-
-def _coerce_env_value(key: str, value) -> str:
-    if isinstance(value, dict) and key == "OTEL_EXPORTER_OTLP_HEADERS":
-        return _headers_to_env(value)
-    if isinstance(value, (bool, int, float)):
-        return str(value)
-    if value is None:
-        return ""
-    if isinstance(value, (dict, list)):
-        return json.dumps(value)
-    return str(value)
-
-
 def _apply_config_env(config: dict) -> None:
-    for key, value in config.items():
-        if not key or value is None or key in os.environ or key.startswith("_"):
-            continue
+    global _CAPTURE_POLICY, _POLICY_SOURCES
+    _POLICY_SOURCES = config.get("_policy_sources", {})
+    managed = config.get("_managed", {})
+    settings = environment_settings(config)
+    settings.update(environment_settings(managed))
+    for key, value in settings.items():
+        os.environ.setdefault(key, _coerce_env_value(key, value))
+    enforce_export_environment(managed)
+    # Managed capture/log restrictions cannot be loosened by local environment.
+    restrictions = {key: value for key, value in managed.items() if key in {"capture", "logs"}}
+    if isinstance(restrictions.get("capture"), dict) and "mode" in restrictions["capture"]:
+        # A managed selected-content mode with no include list permits metadata
+        # only; do not inherit a user's content allowlist.
+        restrictions["capture"] = {"include": [], **restrictions["capture"]}
+    for key, value in environment_settings(restrictions).items():
         os.environ[key] = _coerce_env_value(key, value)
-
-
-def _parse_resource_attributes(value: str) -> dict:
-    attrs = {}
-    for pair in (value or "").split(","):
-        pair = pair.strip()
-        if "=" not in pair:
-            continue
-        k, v = pair.split("=", 1)
-        if k.strip():
-            attrs[k.strip()] = v.strip()
-    return attrs
-
-
-def _parse_otlp_headers(value: str) -> dict:
-    headers = {}
-    for pair in (value or "").split(","):
-        pair = pair.strip()
-        if "=" not in pair:
-            continue
-        key, val = pair.split("=", 1)
-        key = key.strip()
-        if key:
-            headers[key] = urllib.parse.unquote(val.strip())
-    return headers
+    effective = merge_settings(config, restrictions)
+    _CAPTURE_POLICY = replace(
+        CapturePolicy.from_config(effective),
+        mask=_safe_bool(os.getenv('IDE_OTEL_MASK_PROMPTS', 'false')),
+        logs_enabled=_safe_bool(os.getenv('IDE_OTEL_ENABLE_LOGS', 'false')),
+        user_identity=_safe_bool(os.getenv('IDE_OTEL_CAPTURE_USER_IDENTITY', 'false')),
+    )
+    # Keep old queues separate so stricter policy never replays old content.
+    # Local span paths stay stable for Reflect's existing watcher.
+    global _SESSION_DIR, _BATCH_DIR, _LOCK_DIR
+    policy_dir = os.path.join(_STATE_DIR, "capture", _CAPTURE_POLICY.fingerprint)
+    _SESSION_DIR = os.path.join(policy_dir, "sessions")
+    _BATCH_DIR = os.path.join(policy_dir, "batches")
+    _LOCK_DIR = os.path.join(policy_dir, "locks")
 
 
 def _sanitized_exporter_endpoint(endpoint: Optional[str]) -> Optional[str]:
@@ -2579,7 +856,7 @@ def _init_sdk_tracer_provider(resource_attrs: dict, disable_batch: bool) -> bool
     headers = _parse_otlp_headers(os.getenv("OTEL_EXPORTER_OTLP_HEADERS", ""))
 
     if not endpoint and _local_spans_enabled():
-        sdk_provider = SDKTracerProvider(resource=Resource.create(resource_attrs), shutdown_on_exit=_EXPORT_DEADLINE is None)
+        sdk_provider = SDKTracerProvider(resource=Resource.create(resource_attrs), id_generator=PersistedIdGenerator(), shutdown_on_exit=_EXPORT_DEADLINE is None)
         trace.set_tracer_provider(sdk_provider)
         _LOGGER.info("SDK TracerProvider ready (file-only mode, no OTLP endpoint)")
         return True
@@ -2604,7 +881,7 @@ def _init_sdk_tracer_provider(resource_attrs: dict, disable_batch: bool) -> bool
 
     exporter = _DiagnosticExporter(exporter, "traces")
 
-    sdk_provider = SDKTracerProvider(resource=Resource.create(resource_attrs), shutdown_on_exit=_EXPORT_DEADLINE is None)
+    sdk_provider = SDKTracerProvider(resource=Resource.create(resource_attrs), id_generator=PersistedIdGenerator(), shutdown_on_exit=_EXPORT_DEADLINE is None)
     if disable_batch and _EXPORT_DEADLINE is None:
         sdk_provider.add_span_processor(SimpleSpanProcessor(exporter))
     else:
@@ -2681,8 +958,14 @@ def _init_sdk_logger_provider(resource_attrs: dict, disable_batch: bool) -> bool
         logger_provider.add_log_record_processor(BatchLogRecordProcessor(exporter))
     set_logger_provider(logger_provider)
 
-    # Python logging → OTel log bridge handler
-    _OTEL_LOG_HANDLER = LoggingHandler(level=logging.DEBUG, logger_provider=logger_provider)
+    # Retain original observation/event times, including sub-microsecond precision.
+    from otel_hooks.serialization import CallbackLogTimeMixin
+
+    class CallbackLoggingHandler(CallbackLogTimeMixin, LoggingHandler):
+        def emit(self, record):
+            logger_provider.get_logger(record.name, _hook_distro_attributes().get('telemetry.distro.version')).emit(self._translate(record))
+
+    _OTEL_LOG_HANDLER = CallbackLoggingHandler(level=logging.DEBUG, logger_provider=logger_provider)
     _LOGS_INITIALIZED = True
     _LOGGER.info("SDK LoggerProvider ready (protocol=%s endpoint=%s)", protocol, endpoint)
     return True
@@ -2722,39 +1005,6 @@ def _enable_console_log_exporter() -> None:
         provider.add_log_record_processor(SimpleLogRecordProcessor(ConsoleExporter()))
 
 
-def _span_to_dict(span) -> dict:
-    """Serialize an OTel ReadableSpan to a JSON-compatible dict."""
-    ctx = span.context
-    resource = getattr(span, "resource", None)
-    resource_attributes = dict(getattr(resource, "attributes", {}) or {})
-    parent_id = None
-    parent_ctx = span.parent
-    if parent_ctx is not None and getattr(parent_ctx, "span_id", 0) != 0:
-        parent_id = format(parent_ctx.span_id, "016x")
-    links = []
-    for link in getattr(span, "links", ()) or ():
-        link_context = getattr(link, "context", None)
-        if link_context is None or not getattr(link_context, "is_valid", False):
-            continue
-        links.append({
-            "trace_id": format(link_context.trace_id, "032x"),
-            "span_id": format(link_context.span_id, "016x"),
-            "attributes": dict(getattr(link, "attributes", {}) or {}),
-        })
-    return {
-        "name": span.name,
-        "trace_id": format(ctx.trace_id, "032x") if ctx else None,
-        "span_id": format(ctx.span_id, "016x") if ctx else None,
-        "parent_span_id": parent_id,
-        "start_time_ns": span.start_time,
-        "end_time_ns": span.end_time,
-        "attributes": dict(span.attributes or {}),
-        "resource": resource_attributes,
-        "links": links,
-        "status": span.status.status_code.name if span.status else None,
-    }
-
-
 class _FileSpanExporter:
     """OTel SpanExporter that appends spans as JSONL to a file."""
 
@@ -2774,7 +1024,7 @@ class _FileSpanExporter:
                     for span in spans:
                         if self._expected_session_key is not None:
                             attributes = dict(span.attributes or {})
-                            if attributes.get("gen_ai.client.session_id") != self._expected_session_key:
+                            if attributes.get("o11y.client.session_id") != self._expected_session_key:
                                 continue
                         fh.write(json.dumps(_span_to_dict(span), ensure_ascii=True, default=str) + "\n")
             return SpanExportResult.SUCCESS
@@ -2884,13 +1134,12 @@ def _init_tracing(
             if key and value is not None:
                 resource_attrs.setdefault(key, value)
     resource_attrs.setdefault("service.name", app_name)
-    resource_attrs.setdefault("gen_ai.client.name", resolved_client_name)
-    resource_attrs.setdefault("gen_ai.system", resolved_client_name)
+    resource_attrs.setdefault("o11y.client.name", resolved_client_name)
     if ide != resolved_client_name:
-        resource_attrs.setdefault("gen_ai.client.wrapper", ide)
+        resource_attrs.setdefault("o11y.client.wrapper", ide)
     resource_attrs.update(_hook_distro_attributes())
-    resource_attrs.setdefault("gen_ai.client.telemetry_source", _TELEMETRY_SOURCE)
-    resource_attrs.setdefault("gen_ai.client.hook_schema_version", _HOOK_SCHEMA_VERSION)
+    resource_attrs.setdefault("o11y.client.telemetry_source", _TELEMETRY_SOURCE)
+    resource_attrs["o11y.client.hook_schema_version"] = _HOOK_SCHEMA_VERSION
 
     # OS / host resource attributes (OTel semantic conventions)
     os_info = _get_os_info()
@@ -2907,7 +1156,7 @@ def _init_tracing(
         return False
 
     # Init OTel Logs (LoggerProvider + OTLP log exporter)
-    if _safe_bool(os.getenv("IDE_OTEL_ENABLE_LOGS", "true")):
+    if _safe_bool(os.getenv("IDE_OTEL_ENABLE_LOGS", "false")):
         if not _init_sdk_logger_provider(resource_attrs, disable_batch):
             _LOGGER.warning("OTel Logs init failed — continuing with traces only")
 
@@ -2934,122 +1183,39 @@ def _init_tracing(
 # ---------------------------------------------------------------------------
 # Privacy
 # ---------------------------------------------------------------------------
-def _hash_text(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def _mask_text(text: str) -> str:
-    text = _EMAIL_RE.sub("[REDACTED_EMAIL]", text)
-    text = _TOKEN_RE.sub("[REDACTED_TOKEN]", text)
-    text = _HOME_RE.sub("/Users/[REDACTED]", text)
-    return text
-
-
-def _conversation_content_enabled() -> bool:
-    """Return whether raw conversation/delegation content was explicitly enabled."""
-    return _safe_bool(os.getenv("IDE_OTEL_CAPTURE_CONVERSATION_CONTENT", "")) or _safe_bool(
-        os.getenv("IDE_OTEL_CAPTURE_TEXT", "")
-    )
-
-
-def _text_max_chars() -> int:
-    try:
-        return max(0, int(os.getenv("IDE_OTEL_TEXT_MAX_CHARS", "4000")))
-    except (TypeError, ValueError):
-        return 4000
-
-
-def _attach_content_fact(span, label: str, text: str, *, capture: bool) -> None:
-    if not text:
-        return
-    span.set_attribute(f"gen_ai.client.{label}.length", len(text))
-    span.set_attribute(f"gen_ai.client.{label}.sha256", _hash_text(text))
-    if not capture:
-        return
-    if _safe_bool(os.getenv("IDE_OTEL_MASK_PROMPTS", "")):
-        text = _mask_text(text)
-    span.set_attribute(f"gen_ai.client.{label}.text", text[:_text_max_chars()])
-
-
-def _conversation_records_from_data(data: dict) -> tuple[ConversationRecord, ...]:
-    records = []
-    for item in data.get("_conversation_records") or []:
-        if not isinstance(item, dict):
-            continue
-        kind = item.get("kind")
-        role = item.get("role")
-        text = item.get("text")
-        length = item.get("length")
-        sha256 = item.get("sha256")
-        if not isinstance(kind, str) or not isinstance(role, str):
-            continue
-        if isinstance(text, str) and text:
-            records.append(ConversationRecord.from_text(kind, role, text))
-        elif isinstance(length, int) and length >= 0 and isinstance(sha256, str) and sha256:
-            records.append(ConversationRecord(kind, role, None, length, sha256))
-    return tuple(records)
-
-
-def _apply_conversation_attributes(span, event_name: str, data: dict) -> None:
-    records = _conversation_records_from_data(data)
-    if not records:
-        records = tuple(ProviderEventAdapter()._conversation_records(event_name, data))
-    if records:
-        span.set_attribute("gen_ai.client.message.types", [record.kind for record in records])
-        span.set_attribute("gen_ai.client.message.roles", [record.role for record in records])
-    for record in records:
-        span.set_attribute(f"gen_ai.client.{record.kind}.length", record.length)
-        span.set_attribute(f"gen_ai.client.{record.kind}.sha256", record.sha256)
-        if _conversation_content_enabled() and record.text is not None:
-            _attach_content_fact(span, record.kind, record.text, capture=True)
-
-    error = data.get("error")
-    if isinstance(error, dict):
-        _set_if_present(span, "error.type", _first_present(error, ("type", "error_type", "name")))
-        _set_if_present(span, "error.code", _first_present(error, ("code", "error_code")))
-    _set_if_present(span, "error.type", data.get("error_type"))
-    _set_if_present(span, "error.code", data.get("error_code"))
-    if event_name in {"ErrorOccurred", "PostToolUseFailure"} or error is not None:
-        span.set_attribute(
-            "gen_ai.client.status",
-            "interrupted" if data.get("is_interrupt") else "error",
-        )
+def _event_adapter_for(ide: str) -> ProviderEventAdapter:
+    return _get_parser(ide, capture_policy=_CAPTURE_POLICY)
 
 
 def _apply_operation_status(span, event_name: str, data: dict) -> None:
     """Set OTel status for real failures without leaking error descriptions."""
-    if data.get("is_interrupt"):
-        return
-    status = _lower_or_none(data.get("status") or data.get("mcp_status"))
-    is_error = bool(
-        event_name in {"ErrorOccurred", "PostToolUseFailure"}
-        or data.get("error") is not None
-        or status in {"error", "failed", "failure"}
-    )
-    if is_error and Status is not None and StatusCode is not None and hasattr(span, "set_status"):
+    if _operation_failed(event_name, data) and Status is not None and StatusCode is not None and hasattr(span, "set_status"):
+        error = data.get('error')
+        error_type = data.get('error_type') or (error.get('type') if isinstance(error, dict) else None)
+        span.set_attribute('error.type', error_type if isinstance(error_type, str) and error_type else '_OTHER')
         span.set_status(Status(StatusCode.ERROR))
 
 
-def _maybe_attach_text(span, label: str, text: str) -> None:
-    _attach_content_fact(
-        span,
-        label,
-        text,
-        capture=_safe_bool(os.getenv("IDE_OTEL_CAPTURE_TEXT", "")),
-    )
+def _operation_failed(event_name: str, data: dict) -> bool:
+    if data.get('is_interrupt'):
+        return False
+    status = _lower_or_none(data.get('status') or data.get('mcp_status'))
+    return bool(data.get('_hook_failure_observed') or event_name in {'ErrorOccurred', 'PostToolUseFailure', 'StopFailure'}
+                or data.get('error') is not None
+                or (type(data.get('error_length')) in (int, float) and data['error_length'] > 0)
+                or status in {'error', 'failed', 'failure'}
+                or (type(data.get('exit_code')) is int and data['exit_code'] != 0))
 
 
 # ---------------------------------------------------------------------------
-# OTel Log emission (MCP, shell, tool events)
+# Correlated hook log emission
 # ---------------------------------------------------------------------------
-_MCP_EVENTS = {"BeforeMCPExecution", "AfterMCPExecution"}
-_SHELL_EVENTS = {"BeforeShellExecution", "AfterShellExecution"}
-_TOOL_EVENTS = {"PreToolUse", "PostToolUse", "PostToolUseFailure", "PermissionRequest"}
-
-
 def _get_otel_logger(name: str) -> logging.Logger:
     """Get or create a Python logger with the OTel log bridge handler attached."""
     logger = logging.getLogger(f"otel_hook.{name}")
+    logger.propagate = False
     if _OTEL_LOG_HANDLER is not None and _OTEL_LOG_HANDLER not in logger.handlers:
         logger.addHandler(_OTEL_LOG_HANDLER)
         logger.setLevel(logging.DEBUG)
@@ -3082,270 +1248,42 @@ def _inject_trace_context(attrs: dict) -> tuple:
     return tid, sid
 
 
-def _fmt_duration(duration) -> str:
-    """Format duration for log messages, handling None gracefully."""
-    if duration is None:
-        return "n/a"
-    return f"{duration}ms"
-
-
-def _emit_mcp_log(event_name: str, data: dict, session_ctx: Optional[dict] = None) -> None:
-    """Emit a structured OTel log record for MCP events with full I/O payload.
-
-    Cursor's current dedicated callbacks provide ``mcp_server_name`` and
-    ``tool_name``.  Older payloads may only provide ``command``; normalization
-    uses it strictly as a fallback and never over a real server field.
-    """
-    if not _LOGS_INITIALIZED:
+def _emit_event_log(event_name: str, data: dict) -> None:
+    """Export one policy-filtered JSON body under the active hook span."""
+    body = data.get("_hook_log_body")
+    if not _LOGS_INITIALIZED or body is None:
         return
-
-    logger = _get_otel_logger("mcp")
-    data = _normalize_mcp_event_data(data, event_name)
-    server = data.get("mcp_server") or "unknown"
-    tool = data.get("mcp_tool") or "unknown"
-
     attrs = {
-        "gen_ai.client.mcp_server": server,
-        "gen_ai.client.mcp_tool": tool,
-        "gen_ai.client.hook.event": event_name,
+        "o11y.client.hook.event": event_name,
+        "o11y.client.telemetry_source": _TELEMETRY_SOURCE,
     }
-    attrs.update(_mcp_observability_attributes(event_name, data))
-    attrs.update(_collect_event_enrichment_attributes(data, session_ctx=session_ctx))
-    _tid, _sid = _inject_trace_context(attrs)
-
-    # Capture input payload
-    capture_payload = _safe_bool(os.getenv("IDE_OTEL_MCP_LOG_PAYLOAD", "true"))
-    mask = _safe_bool(os.getenv("IDE_OTEL_MASK_PROMPTS", ""))
-    max_chars = _text_max_chars()
-
-    for key in ("mcp_input", "tool_input", "input"):
-        value = data.get(key)
-        if value is not None:
-            text = _stringify(value)
-            attrs["gen_ai.client.mcp.input.length"] = len(text)
-            attrs["gen_ai.client.mcp.input.sha256"] = _hash_text(text)
-            if capture_payload:
-                if mask:
-                    text = _mask_text(text)
-                attrs["gen_ai.client.mcp.input"] = text[:max_chars]
-            break
-
-    # Capture output payload — Cursor uses "result_json" (JSON string)
-    for key in ("mcp_output", "result_json", "tool_output", "output", "tool_response"):
-        value = data.get(key)
-        if value is not None:
-            text = _stringify(value)
-            attrs["gen_ai.client.mcp.output.length"] = len(text)
-            attrs["gen_ai.client.mcp.output.sha256"] = _hash_text(text)
-            if capture_payload:
-                if mask:
-                    text = _mask_text(text)
-                attrs["gen_ai.client.mcp.output"] = text[:max_chars]
-            break
-
-    # Keep the existing duration_ms attribute contract for both source keys.
-    duration = _first_present(data, ("duration_ms", "duration"))
-    if duration is not None:
-        attrs["gen_ai.client.mcp.duration_ms"] = duration
-
-    # Server stdout/stderr (if the IDE provides it)
-    for stream in ("stdout", "stderr", "mcp_stdout", "mcp_stderr"):
-        value = data.get(stream)
-        if value:
-            stream_name = stream.replace("mcp_", "")
-            text = str(value)
-            attrs[f"gen_ai.client.mcp.{stream_name}.length"] = len(text)
-            if capture_payload:
-                if mask:
-                    text = _mask_text(text)
-                attrs[f"gen_ai.client.mcp.{stream_name}"] = text[:max_chars]
-
-    # Emit the log record — span_id in body for backend visibility
-    if event_name == "BeforeMCPExecution":
-        logger.info("[%s] MCP call: %s/%s", _sid, server, tool, extra=attrs)
-    else:
-        logger.info("[%s] MCP result: %s/%s duration=%s", _sid, server, tool, _fmt_duration(duration), extra=attrs)
-
-
-def _emit_shell_log(event_name: str, data: dict, session_ctx: Optional[dict] = None) -> None:
-    """Emit a structured OTel log record for shell execution events."""
-    if not _LOGS_INITIALIZED:
-        return
-
-    logger = _get_otel_logger("shell")
-    command = data.get("command") or "unknown"
-    cwd = data.get("cwd") or ""
-
-    attrs = {
-        "gen_ai.client.hook.event": event_name,
-        "gen_ai.client.command": command,
-        "gen_ai.client.cwd": cwd,
-    }
-    attrs.update(_collect_event_enrichment_attributes(data, session_ctx=session_ctx))
-    _tid, _sid = _inject_trace_context(attrs)
-
-    exit_code = data.get("exit_code")
-    if exit_code is not None:
-        attrs["gen_ai.client.exit_code"] = exit_code
-    duration = data.get("duration_ms")
-    if duration is not None:
-        attrs["gen_ai.client.duration_ms"] = duration
-
-    # Capture stdout/stderr
-    capture_payload = _safe_bool(os.getenv("IDE_OTEL_MCP_LOG_PAYLOAD", "true"))
-    mask = _safe_bool(os.getenv("IDE_OTEL_MASK_PROMPTS", ""))
-    max_chars = _text_max_chars()
-    for stream in ("stdout", "stderr", "output"):
-        value = data.get(stream)
-        if value:
-            text = str(value)
-            stream_name = "stdout" if stream == "output" else stream
-            attrs[f"gen_ai.client.shell.{stream_name}.length"] = len(text)
-            if capture_payload:
-                if mask:
-                    text = _mask_text(text)
-                attrs[f"gen_ai.client.shell.{stream_name}"] = text[:max_chars]
-
-    if event_name == "BeforeShellExecution":
-        logger.info("[%s] Shell exec: %s", _sid, command, extra=attrs)
-    else:
-        logger.info("[%s] Shell result: %s exit=%s duration=%s", _sid, command, exit_code, _fmt_duration(duration), extra=attrs)
-
-
-def _emit_tool_log(event_name: str, data: dict, session_ctx: Optional[dict] = None) -> None:
-    """Emit a structured OTel log record for tool use events."""
-    if not _LOGS_INITIALIZED:
-        return
-
-    logger = _get_otel_logger("tool")
-    data = _normalize_mcp_event_data(data, event_name)
-    tool_name = data.get("tool_name") or "unknown"
-
-    attrs = {
-        "gen_ai.client.hook.event": event_name,
-        "gen_ai.client.tool_name": tool_name,
-    }
-    attrs.update(_mcp_observability_attributes(event_name, data))
-    attrs.update(_collect_event_enrichment_attributes(data, session_ctx=session_ctx))
-    _tid, _sid = _inject_trace_context(attrs)
-
-    for key in ("tool_id", "tool_use_id"):
-        value = data.get(key)
-        if value is not None:
-            attrs[f"gen_ai.client.{key}"] = value
-
-    duration = data.get("duration_ms")
-    if duration is not None:
-        attrs["gen_ai.client.duration_ms"] = duration
-
-    error = data.get("error")
-    if error is not None:
-        error_text = _stringify(error)
-        attrs["gen_ai.client.error.length"] = len(error_text)
-        attrs["gen_ai.client.error.sha256"] = _hash_text(error_text)
-        if _conversation_content_enabled():
-            if _safe_bool(os.getenv("IDE_OTEL_MASK_PROMPTS", "")):
-                error_text = _mask_text(error_text)
-            attrs["gen_ai.client.error.text"] = error_text[:_text_max_chars()]
-
-    # Capture tool input/output (subject to privacy controls)
-    capture_payload = _safe_bool(os.getenv("IDE_OTEL_MCP_LOG_PAYLOAD", "true"))
-    mask = _safe_bool(os.getenv("IDE_OTEL_MASK_PROMPTS", ""))
-    max_chars = _text_max_chars()
-    for key in ("tool_input", "input"):
-        value = data.get(key)
-        if value is not None:
-            text = _stringify(value)
-            attrs["gen_ai.client.tool.input.length"] = len(text)
-            if capture_payload and _safe_bool(os.getenv("IDE_OTEL_CAPTURE_TOOL_INPUT_CONTENT", "")):
-                if mask:
-                    text = _mask_text(text)
-                attrs["gen_ai.client.tool.input"] = text[:max_chars]
-            break
-
-    if data.get("mcp_tool"):
-        result = _first_present(data, ("result_json", "mcp_output", "tool_output", "output"))
-        if result is not None and capture_payload:
-            text = _stringify(result)
-            if mask:
-                text = _mask_text(text)
-            attrs["gen_ai.client.mcp.output"] = text[:max_chars]
-
-    if event_name == "PostToolUseFailure":
-        logger.warning("[%s] Tool failed: %s", _sid, tool_name, extra=attrs)
-    elif event_name == "PreToolUse":
-        logger.info("[%s] Tool call: %s", _sid, tool_name, extra=attrs)
-    else:
-        logger.info("[%s] Tool result: %s duration=%s", _sid, tool_name, _fmt_duration(duration), extra=attrs)
-
-
-def _emit_conversation_logs(event_name: str, data: dict, session_ctx: Optional[dict] = None) -> None:
-    """Optionally mirror span-first conversation facts as correlated OTel logs."""
-    if not _LOGS_INITIALIZED or not _safe_bool(
-        os.getenv("IDE_OTEL_ENABLE_CONVERSATION_LOGS", "")
-    ):
-        return
-    records = _conversation_records_from_data(data)
-    if not records:
-        return
-    logger = _get_otel_logger("conversation")
-    max_chars = _text_max_chars()
-    for record in records:
-        attrs = {
-            "event.name": f"gen_ai.client.{record.kind}",
-            "gen_ai.client.hook.event": event_name,
-            "gen_ai.client.hook.event_id": data.get("_hook_event_id", "unknown"),
-            "gen_ai.client.message.type": record.kind,
-            "gen_ai.client.message.role": record.role,
-            f"gen_ai.client.{record.kind}.length": record.length,
-            f"gen_ai.client.{record.kind}.sha256": record.sha256,
-        }
-        attrs.update(_collect_event_enrichment_attributes(data, session_ctx=session_ctx))
-        _tid, sid = _inject_trace_context(attrs)
-        if _conversation_content_enabled():
-            content = record.text
-            if content is not None:
-                if _safe_bool(os.getenv("IDE_OTEL_MASK_PROMPTS", "")):
-                    content = _mask_text(content)
-                attrs[f"gen_ai.client.{record.kind}.text"] = content[:max_chars]
-        if record.kind == "error":
-            logger.error("[%s] Conversation event: %s", sid, record.kind, extra=attrs)
-        else:
-            logger.info("[%s] Conversation event: %s", sid, record.kind, extra=attrs)
-
-
-def _emit_event_log(event_name: str, data: dict, session_ctx: Optional[dict] = None) -> None:
-    """Emit OTel log records for hook events (dispatcher)."""
-    if not _LOGS_INITIALIZED:
-        return
-    _emit_conversation_logs(event_name, data, session_ctx=session_ctx)
-    if event_name in _MCP_EVENTS:
-        _emit_mcp_log(event_name, data, session_ctx=session_ctx)
-    elif event_name in _SHELL_EVENTS:
-        _emit_shell_log(event_name, data, session_ctx=session_ctx)
-    elif event_name in _TOOL_EVENTS:
-        _emit_tool_log(event_name, data, session_ctx=session_ctx)
-    elif _safe_bool(os.getenv("IDE_OTEL_LOG_ALL_EVENTS", "")):
-        logger = _get_otel_logger("events")
-        all_attrs = {"gen_ai.client.hook.event": event_name}
-        all_attrs.update(_collect_event_enrichment_attributes(data, session_ctx=session_ctx))
-        _tid, _sid = _inject_trace_context(all_attrs)
-        logger.info("[%s] Hook event: %s", _sid, event_name, extra=all_attrs)
-
-
-def _emit_event_log_with_context(
-    event_name: str,
-    data: dict,
-    session_ctx: Optional[dict],
-    parent_ctx,
-) -> None:
-    """Emit log-only lifecycle evidence under the restored session trace context."""
-    if parent_ctx is None or _REAL_TRACE is None:
-        _emit_event_log(event_name, data, session_ctx=session_ctx)
-        return
-    parent_span = _REAL_TRACE.get_current_span(parent_ctx)
-    with _span_context(parent_span):
-        _emit_event_log(event_name, data, session_ctx=session_ctx)
+    for source, target in (("_hook_event_id", "hook.event_id"), ("session_id", "session_id"),
+                           ("conversation_id", "conversation_id"), ("turn_id", "turn_id"),
+                           ("generation_id", "generation_id")):
+        if data.get(source) is not None:
+            attrs[f"o11y.client.{target}"] = data[source]
+    _inject_trace_context(attrs)
+    if data.get('_hook_provider_adapter'):
+        attrs['o11y.client.hook.provider_adapter'] = data['_hook_provider_adapter']
+    invocation = data.get('tool_use_id') or data.get('tool_call_id') or data.get('call_id')
+    if invocation is not None:
+        attrs['gen_ai.tool.call.id'] = invocation
+    for key in ('event', 'observed'):
+        value = data.get('_hook_' + ('event_time_ns' if key == 'event' else 'observed_time_ns'))
+        if type(value) is int:
+            attrs['o11y.time.' + key + '_ns'] = value
+    attrs['o11y.client.hook_schema_version'] = _HOOK_SCHEMA_VERSION
+    attrs['o11y.capture.mode'] = _CAPTURE_POLICY.mode
+    attrs['o11y.capture.policy_id'] = _CAPTURE_POLICY.fingerprint
+    for key in ('tool_use_id', 'tool_call_id', 'agent_id'):
+        if data.get(key) is not None:
+            attrs['o11y.client.' + key] = data[key]
+    record = logging.LogRecord('otel_hook.hooks', logging.ERROR if _operation_failed(event_name, data) else logging.INFO,
+                               '', 0, body, (), None)
+    if data.get('_hook_event_time_ns') is not None:
+        record.created = data['_hook_event_time_ns'] / 1e9
+    record.__dict__.update(attrs)
+    _get_otel_logger('hooks').handle(record)
 
 
 # ---------------------------------------------------------------------------
@@ -3368,6 +1306,10 @@ def _detect_ide_from_process_tree() -> Optional[str]:
     reuse concern.  The walk costs ~10 ms (5–8 ps calls), negligible
     compared to Python startup.
     """
+    # Managed registrations identify their source explicitly. Windows has no ps;
+    # unmanaged hooks continue through the environment and payload fallbacks.
+    if sys.platform == "win32":
+        return None
     try:
         import subprocess as _sp
         pid = os.getpid()
@@ -3452,41 +1394,6 @@ def _detect_ide(data: dict) -> str:
     return "cursor"
 
 
-def _get_event_name(data: dict) -> str:
-    """Extract raw event name from hook input."""
-    if _CLI_HOOK_EVENT:
-        return _CLI_HOOK_EVENT
-    for key in ("hook_event_name", "hook_event_type", "event", "hook", "agent_action_name"):
-        value = data.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    if "prompt" in data:
-        return "beforeSubmitPrompt"
-    return "stop"
-
-
-def _normalize_event(event_name: str) -> str:
-    """Normalize event name to canonical PascalCase."""
-    return _CANONICAL_EVENT.get(event_name, event_name)
-
-
-def _session_key(data: dict) -> Optional[str]:
-    """Extract session key: conversation_id (Cursor) or session_id (Copilot)."""
-    for key in ("session_id", "conversation_id"):
-        val = data.get(key)
-        if isinstance(val, str) and val.strip():
-            return val.strip()
-    return None
-
-
-def _generation_key_from_data(data: dict) -> Optional[str]:
-    """Extract generation key from Cursor-specific fields."""
-    val = data.get("generation_id")
-    if isinstance(val, str) and val.strip():
-        return val.strip()
-    return None
-
-
 # ---------------------------------------------------------------------------
 # Session context (cross-process, session-level trace linking)
 # ---------------------------------------------------------------------------
@@ -3499,9 +1406,10 @@ def _new_session_context(data: dict, ide: str) -> dict:
     """Build a new session context without writing it."""
     upstream_ctx = _resolve_upstream_trace_context(data)
     ctx = {
+        "session_span_id": new_span_id(),
         "phantom_parent_id": f"{random.getrandbits(64):016x}",
         "trace_id": f"{random.getrandbits(128):032x}",
-        "start_time_ns": time.time_ns(),
+        "start_time_ns": data.get("_hook_event_time_ns") or data.get("_hook_observed_time_ns") or time.time_ns(),
         "ide": ide,
         "generation_count": 0,
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -3518,6 +1426,8 @@ def _new_session_context(data: dict, ide: str) -> dict:
         ctx["context_origin"] = "upstream"
     if model := _first_present(data, ("request_model", "model", "model_name")):
         ctx["last_known_model"] = model
+    if isinstance(data.get('conversation_id'), str) and data['conversation_id']:
+        ctx['conversation_id'] = data['conversation_id']
 
     repository_context = _resolve_repository_context(data)
     ctx.update(repository_context)
@@ -3594,7 +1504,7 @@ def _maybe_enrich_session_context(session_key: Optional[str], session_ctx: Optio
             "vcs.repository.name",
             "vcs.ref.head.name",
             "vcs.ref.head.type",
-            "gen_ai.client.repository.remote.sha256",
+            "o11y.client.repository.remote.sha256",
         ):
             value = repo_ctx.get(key)
             if value:
@@ -3610,14 +1520,14 @@ def _maybe_enrich_session_context(session_key: Optional[str], session_ctx: Optio
 
 
 def _maybe_bind_session_to_upstream_context(session_key: Optional[str], session_ctx: Optional[dict], data: dict) -> Optional[dict]:
-    if not session_key or not session_ctx or session_ctx.get("context_origin") == "upstream":
+    if not session_key or not session_ctx or (session_ctx.get("context_origin") == "upstream" or session_ctx.get("identity_committed")):
         return session_ctx
     upstream_ctx = _resolve_upstream_trace_context(data)
     if upstream_ctx is None:
         return session_ctx
 
     def mutate(latest: dict) -> None:
-        if latest.get("context_origin") == "upstream":
+        if latest.get("context_origin") == "upstream" or latest.get("identity_committed"):
             return
         latest["trace_id"] = upstream_ctx["trace_id"]
         latest["upstream_parent_span_id"] = upstream_ctx["parent_span_id"]
@@ -3662,17 +1572,6 @@ def _new_generation_key(session_key: str, session_ctx: dict) -> str:
         pending.append(gen_key)
     session_ctx["current_generation"] = gen_key
     return gen_key
-
-
-def _advance_generation(session_key: str, session_ctx: dict) -> str:
-    """Atomically start a new generation within the session."""
-    _ctx, gen_key = _update_session_context(
-        session_key,
-        lambda latest: _new_generation_key(session_key, latest),
-    )
-    if gen_key:
-        return gen_key
-    return _new_generation_key(session_key, session_ctx)
 
 
 def _resolve_generation_key(data: dict, session_ctx: Optional[dict]) -> Optional[str]:
@@ -3846,42 +1745,6 @@ def _local_span_path(session_key: Optional[str]) -> str:
     return os.path.join(_LOCAL_SPANS_DIR, f"{safe_key}.jsonl")
 
 
-def _save_local_span_event(event_name: str, ide: str, data: dict) -> None:
-    if not _local_spans_enabled():
-        return
-    session_key = _session_key(data)
-    record = {
-        "timestamp_ns": time.time_ns(),
-        "event": event_name,
-        "ide": ide,
-        "session_key": session_key,
-        "generation_key": _generation_key_from_data(data),
-        "data": data,
-    }
-    lock_key = session_key or "unscoped"
-    lock_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", lock_key)
-    lock_path = os.path.join(_LOCK_DIR, f"local_spans_{lock_name}.lock")
-    try:
-        os.makedirs(_LOCAL_SPANS_DIR, exist_ok=True)
-        with _acquire_lock(lock_path):
-            with open(_local_span_path(session_key), "a", encoding="utf-8") as fh:
-                fh.write(json.dumps(record, ensure_ascii=True, default=str) + "\n")
-    except OSError as exc:
-        _LOGGER.debug("local spans save failed: %s", exc)
-
-
-def _local_trace_saving_configured() -> bool:
-    return _local_spans_configured()
-
-
-def _local_trace_saving_enabled() -> bool:
-    return _local_spans_enabled()
-
-
-def _save_local_trace_event(event_name: str, ide: str, data: dict) -> None:
-    _save_local_span_event(event_name, ide, data)
-
-
 def _batch_path(key: str) -> str:
     safe_key = re.sub(r"[^A-Za-z0-9_.-]+", "_", key)
     return os.path.join(_BATCH_DIR, f"{safe_key}.jsonl")
@@ -3889,7 +1752,9 @@ def _batch_path(key: str) -> str:
 
 def _append_batch_event(key: str, event_name: str, data: dict) -> None:
     os.makedirs(_BATCH_DIR, exist_ok=True)
-    record = {"event": event_name, "timestamp_ns": time.time_ns(), "data": data}
+    observed = data.get('_hook_observed_time_ns') or time.time_ns()
+    record = {"event": event_name, "timestamp_ns": data.get('_hook_event_time_ns') or observed,
+              "observed_time_ns": observed, "span_id": new_span_id(), "data": data}
     lock_path = os.path.join(_LOCK_DIR, f"{re.sub(r'[^A-Za-z0-9_.-]+', '_', key)}.lock")
     with _acquire_lock(lock_path):
         with open(_batch_path(key), "a", encoding="utf-8") as fh:
@@ -3924,479 +1789,13 @@ def _clear_batch_events(key: str) -> None:
         pass
 
 
-@dataclass(slots=True)
-class _BufferedEventDecision:
-    generation_key: Optional[str]
-    data: dict
-    duplicate: bool = False
-    correlated: bool = False
-
-
-def _event_tool_key(data: dict) -> Optional[str]:
-    _server, mcp_tool = _mcp_identity(data)
-    value = mcp_tool or data.get("tool_name")
-    if not isinstance(value, str) or not value:
-        return None
-    return value
-
-
-def _prune_session_event_state(session_ctx: dict, now_ns: int) -> None:
-    cutoff_ns = now_ns - max(1, _state_ttl_seconds()) * 1_000_000_000
-    seen = session_ctx.get("seen_events")
-    if isinstance(seen, list):
-        session_ctx["seen_events"] = [
-            entry for entry in seen[-_SESSION_EVENT_LIMIT:]
-            if isinstance(entry, dict) and entry.get("seen_at_ns", now_ns) >= cutoff_ns
-        ]
-    invocations = session_ctx.get("tool_invocations")
-    if isinstance(invocations, list):
-        session_ctx["tool_invocations"] = [
-            entry for entry in invocations[-_SESSION_INVOCATION_LIMIT:]
-            if isinstance(entry, dict) and entry.get("updated_at_ns", now_ns) >= cutoff_ns
-        ]
-    agents = session_ctx.get("agent_invocations")
-    if isinstance(agents, list):
-        session_ctx["agent_invocations"] = [
-            entry for entry in agents[-_AGENT_INVOCATION_LIMIT:]
-            if isinstance(entry, dict) and entry.get("updated_at_ns", now_ns) >= cutoff_ns
-        ]
-
-
-def _mark_event_seen(
-    session_ctx: dict,
-    key: str,
-    now_ns: int,
-    generation_key: Optional[str],
-    *,
-    window_seconds: Optional[float] = None,
-) -> bool:
-    """Return True for a duplicate and remember new observations in bounded state."""
-    _prune_session_event_state(session_ctx, now_ns)
-    seen = session_ctx.setdefault("seen_events", [])
-    for entry in reversed(seen):
-        if entry.get("key") != key:
-            continue
-        if window_seconds is None:
-            return True
-        age_ns = now_ns - entry.get("seen_at_ns", now_ns)
-        if age_ns <= int(window_seconds * 1_000_000_000):
-            return True
-        break
-    seen.append({"key": key, "seen_at_ns": now_ns, "generation_key": generation_key})
-    del seen[:-_SESSION_EVENT_LIMIT]
-    return False
-
-
-class SessionEventDeduplicator:
-    """Own bounded callback idempotency independently of invocation matching."""
-
-    def __init__(self, session_ctx: dict, generation_key: Optional[str], now_ns: int) -> None:
-        self.session_ctx = session_ctx
-        self.generation_key = generation_key
-        self.now_ns = now_ns
-
-    def seen(self, key: str, *, window_seconds: Optional[float] = None) -> bool:
-        return _mark_event_seen(
-            self.session_ctx,
-            key,
-            self.now_ns,
-            self.generation_key,
-            window_seconds=window_seconds,
-        )
-
-    def is_duplicate(
-        self,
-        event_name: str,
-        data: dict,
-        invocation_id: Optional[str],
-    ) -> bool:
-        """Apply event-specific keys without owning correlation state."""
-        if invocation_id:
-            return self.seen(f"tool:{event_name}:{invocation_id}")
-        if event_name in _GENERATION_END_EVENTS and self.generation_key:
-            return self.seen(f"generation-end:{event_name}:{self.generation_key}")
-        if event_name not in _MCP_EVENTS:
-            event_id = data.get("_hook_event_id")
-            if event_id and event_name in {
-                "ErrorOccurred",
-                "PostToolUseFailure",
-                "PreCompact",
-                "PostCompact",
-                "PermissionRequest",
-            }:
-                window = None if data.get("_hook_event_id_source") == "provider" else 1.0
-                return self.seen(
-                    f"event:{event_name}:{self.generation_key}:{event_id}",
-                    window_seconds=window,
-                )
-            return False
-        return self.seen(
-            _no_id_mcp_fingerprint(event_name, data, self.generation_key),
-            window_seconds=0.25,
-        )
-
-
-class SubagentInvocationCorrelator:
-    """Correlate concurrent subagent callbacks before applying deduplication."""
-
-    def __init__(
-        self,
-        session_ctx: dict,
-        generation_key: Optional[str],
-        now_ns: int,
-    ) -> None:
-        self.session_ctx = session_ctx
-        self.generation_key = generation_key
-        self.now_ns = now_ns
-        self.deduplicator = SessionEventDeduplicator(session_ctx, generation_key, now_ns)
-
-    @property
-    def invocations(self) -> list:
-        return self.session_ctx.setdefault("agent_invocations", [])
-
-    def prepare(self, event_name: str, data: dict) -> tuple[dict, bool]:
-        if event_name not in {"SubagentStart", "SubagentStop"}:
-            return data, False
-        prepared = dict(data)
-        callback_id = prepared.get("_hook_event_id")
-        if prepared.get("_hook_event_id_source") == "provider" and callback_id:
-            if self.deduplicator.seen(f"subagent-callback:{event_name}:{callback_id}"):
-                return prepared, True
-
-        agent_id = prepared.get("agent_id")
-        if agent_id and self.deduplicator.seen(f"subagent:{event_name}:{agent_id}"):
-            return prepared, True
-        if event_name == "SubagentStart":
-            return self._start(prepared, agent_id), False
-        return self._stop(prepared, agent_id)
-
-    def _start(self, prepared: dict, agent_id: Optional[str]) -> dict:
-        if not agent_id:
-            agent_id = f"hook:{uuid.uuid4()}"
-            prepared["agent_id"] = agent_id
-            prepared["agent_id_source"] = "hook"
-        else:
-            prepared["agent_id_source"] = "provider"
-        parent_id = prepared.get("parent_agent_id") or self.session_ctx.get("root_agent_id")
-        if parent_id:
-            prepared["parent_agent_id"] = parent_id
-        agent_type = _first_present(prepared, ("subagent_type", "agent_type", "agent_name"))
-        task = _first_present(prepared, ("delegation_task", "subagent_task", "task"))
-        self.invocations.append({
-            "agent_id": agent_id,
-            "agent_id_source": prepared.get("agent_id_source"),
-            "parent_agent_id": parent_id,
-            "agent_type": agent_type,
-            "task": _stringify(task) if task is not None else None,
-            "generation_key": self.generation_key,
-            "state": "open",
-            "started_at_ns": self.now_ns,
-            "updated_at_ns": self.now_ns,
-        })
-        del self.invocations[:-_AGENT_INVOCATION_LIMIT]
-        return prepared
-
-    def _matches(self, invocation: dict, agent_id: Optional[str], agent_type, task) -> bool:
-        return bool(
-            invocation.get("state") == "open"
-            and (not agent_id or invocation.get("agent_id") == agent_id)
-            and (not agent_type or invocation.get("agent_type") in (None, agent_type))
-            and (task is None or invocation.get("task") in (None, _stringify(task)))
-        )
-
-    def _stop(self, prepared: dict, agent_id: Optional[str]) -> tuple[dict, bool]:
-        agent_type = _first_present(prepared, ("subagent_type", "agent_type", "agent_name"))
-        task = _first_present(prepared, ("delegation_task", "subagent_task", "task"))
-        candidates = [
-            item for item in self.invocations if self._matches(item, agent_id, agent_type, task)
-        ]
-        if not candidates:
-            recent_cutoff = self.now_ns - 1_000_000_000
-            recently_closed = any(
-                item.get("state") == "closed"
-                and item.get("updated_at_ns", 0) >= recent_cutoff
-                and (not agent_id or item.get("agent_id") == agent_id)
-                and (not agent_type or item.get("agent_type") in (None, agent_type))
-                and (task is None or item.get("task") in (None, _stringify(task)))
-                for item in self.invocations
-            )
-            if recently_closed:
-                return prepared, True
-            event_id = prepared.get("_hook_event_id")
-            if event_id:
-                return prepared, self.deduplicator.seen(
-                    f"subagent-unmatched-stop:{self.generation_key}:{event_id}",
-                    window_seconds=1.0,
-                )
-            return prepared, False
-
-        invocation = candidates[0]
-        prepared.setdefault("agent_id", invocation.get("agent_id"))
-        prepared.setdefault("agent_id_source", invocation.get("agent_id_source"))
-        prepared.setdefault("parent_agent_id", invocation.get("parent_agent_id"))
-        if task is None and invocation.get("task") is not None:
-            prepared["delegation_task"] = invocation["task"]
-        invocation["state"] = "closed"
-        invocation["updated_at_ns"] = self.now_ns
-        invocation["status"] = prepared.get("status") or "success"
-        return prepared, False
-def _no_id_mcp_fingerprint(event_name: str, data: dict, generation_key: Optional[str]) -> str:
-    server, tool = _mcp_identity(data)
-    result = _first_present(data, ("result_json", "mcp_output", "tool_output", "output"))
-    result_hash = _hash_text(_stringify(result)) if result is not None else ""
-    error = data.get("error")
-    error_hash = _hash_text(str(error)) if error is not None else ""
-    supplied_time = _first_present(data, ("timestamp_ns", "timestamp", "event_time"))
-    payload = "|".join(str(value or "") for value in (
-        event_name,
-        server,
-        tool,
-        generation_key,
-        data.get("duration_ms") or data.get("duration"),
-        data.get("status"),
-        result_hash,
-        error_hash,
-        supplied_time,
-    ))
-    return f"mcp-fingerprint:{hashlib.sha256(payload.encode('utf-8')).hexdigest()}"
-
-
-def _store_mcp_result(invocation: dict, data: dict) -> None:
-    duration = _first_present(data, ("duration_ms", "duration"))
-    if duration is not None:
-        invocation["duration_ms"] = duration
-    if data.get("status") is not None:
-        invocation["mcp_status"] = data.get("status")
-    if data.get("error") is not None:
-        error_text = _stringify(data.get("error"))
-        invocation["error_length"] = len(error_text)
-        invocation["error_sha256"] = _hash_text(error_text)
-        if _conversation_content_enabled():
-            invocation["error"] = error_text
-        invocation["mcp_status"] = "error"
-    result = _first_present(data, ("result_json", "mcp_output", "tool_output", "output"))
-    if result is not None:
-        text = _stringify(result)
-        invocation["mcp_result_length"] = len(text)
-        invocation["mcp_result_sha256"] = _hash_text(text)
-        if _safe_bool(os.getenv("IDE_OTEL_MCP_LOG_PAYLOAD", "true")):
-            invocation["result_json"] = result
-
-
-def _merge_invocation_data(data: dict, invocation: dict) -> dict:
-    merged = dict(data)
-    for key in (
-        "tool_use_id",
-        "mcp_server",
-        "mcp_tool",
-        "duration_ms",
-        "mcp_status",
-        "error",
-        "error_length",
-        "error_sha256",
-        "mcp_result_length",
-        "mcp_result_sha256",
-        "result_json",
-    ):
-        value = invocation.get(key)
-        if value is not None and merged.get(key) is None:
-            merged[key] = value
-    if merged.get("status") is None and invocation.get("mcp_status") is not None:
-        merged["status"] = invocation["mcp_status"]
-    return merged
-
-
-def _matching_open_tools(
-    session_ctx: dict,
-    data: dict,
-    generation_key: Optional[str],
-    *,
-    mcp_only: bool = False,
-    after_mcp: bool = False,
-) -> list:
-    tool_key = _event_tool_key(data)
-    server, _tool = _mcp_identity(data)
-    candidates = []
-    for invocation in session_ctx.get("tool_invocations", []):
-        if invocation.get("state") != "open":
-            continue
-        if mcp_only and not invocation.get("is_mcp"):
-            continue
-        if tool_key and invocation.get("tool_key") != tool_key:
-            continue
-        if generation_key and invocation.get("generation_key") != generation_key:
-            continue
-        if data.get("turn_id") and invocation.get("turn_id") != data.get("turn_id"):
-            continue
-        if server and invocation.get("mcp_server") not in (None, server):
-            continue
-        if after_mcp and not invocation.get("mcp_before_seen"):
-            continue
-        if after_mcp and invocation.get("mcp_after_seen"):
-            continue
-        if not after_mcp and invocation.get("mcp_before_seen"):
-            continue
-        candidates.append(invocation)
-    return candidates
-
-
-class ToolInvocationCorrelator:
-    """Own bounded, session-local tool, permission, and MCP correlation state."""
-
-    def __init__(
-        self,
-        session_ctx: dict,
-        ide: str,
-        generation_key: Optional[str],
-        now_ns: int,
-    ) -> None:
-        self.session_ctx = session_ctx
-        self.ide = ide
-        self.generation_key = generation_key
-        self.now_ns = now_ns
-        self.deduplicator = SessionEventDeduplicator(session_ctx, generation_key, now_ns)
-
-    @property
-    def invocations(self) -> list:
-        """Return the current session-owned list after any pruning replacement."""
-        return self.session_ctx.setdefault("tool_invocations", [])
-
-    def prepare(self, event_name: str, data: dict) -> _BufferedEventDecision:
-        prepared = _normalize_mcp_event_data(data, event_name, self.ide)
-        if event_name in {"SubagentStart", "SubagentStop"}:
-            prepared, duplicate = SubagentInvocationCorrelator(
-                self.session_ctx,
-                self.generation_key,
-                self.now_ns,
-            ).prepare(event_name, prepared)
-            return self._decision(prepared, duplicate=duplicate)
-
-        invocation_id = prepared.get("tool_use_id")
-        if self._is_duplicate(event_name, prepared, invocation_id):
-            return self._decision(prepared, duplicate=True)
-
-        if event_name == "PreToolUse" and invocation_id:
-            self._record_open_tool(prepared, invocation_id)
-        elif event_name == "PermissionRequest" and not invocation_id:
-            prepared, duplicate = self._correlate_permission(event_name, prepared)
-            if duplicate:
-                return self._decision(prepared, duplicate=True, correlated=True)
-        elif event_name in _MCP_EVENTS and self.ide == "cursor" and not invocation_id:
-            correlated = self._correlate_cursor_mcp(event_name, prepared)
-            if correlated is not None:
-                return self._decision(correlated, correlated=True)
-        elif event_name in {"PostToolUse", "PostToolUseFailure"} and invocation_id:
-            prepared = self._close_tool(event_name, prepared, invocation_id)
-
-        return self._decision(prepared)
-
-    def _decision(
-        self,
-        data: dict,
-        *,
-        duplicate: bool = False,
-        correlated: bool = False,
-    ) -> _BufferedEventDecision:
-        return _BufferedEventDecision(self.generation_key, data, duplicate=duplicate, correlated=correlated)
-
-    def _is_duplicate(self, event_name: str, data: dict, invocation_id: Optional[str]) -> bool:
-        return self.deduplicator.is_duplicate(event_name, data, invocation_id)
-
-    def _record_open_tool(self, data: dict, invocation_id: str) -> None:
-        if any(item.get("tool_use_id") == invocation_id for item in self.invocations):
-            return
-        server, tool = _mcp_identity(data)
-        self.invocations.append({
-            "tool_use_id": invocation_id,
-            "tool_name": data.get("tool_name"),
-            "tool_key": _event_tool_key(data),
-            "mcp_server": server,
-            "mcp_tool": tool,
-            "is_mcp": bool(server or tool),
-            "generation_key": self.generation_key,
-            "turn_id": data.get("turn_id"),
-            "state": "open",
-            "started_at_ns": self.now_ns,
-            "updated_at_ns": self.now_ns,
-        })
-        del self.invocations[:-_SESSION_INVOCATION_LIMIT]
-
-    def _correlate_permission(self, event_name: str, data: dict) -> Tuple[dict, bool]:
-        candidates = _matching_open_tools(self.session_ctx, data, self.generation_key)
-        if len(candidates) != 1:
-            return data, False
-        prepared = dict(data)
-        invocation_id = candidates[0]["tool_use_id"]
-        prepared["tool_use_id"] = invocation_id
-        duplicate = _mark_event_seen(
-            self.session_ctx,
-            f"tool:{event_name}:{invocation_id}",
-            self.now_ns,
-            self.generation_key,
-        )
-        return prepared, duplicate
-
-    def _correlate_cursor_mcp(self, event_name: str, data: dict) -> Optional[dict]:
-        candidates = _matching_open_tools(
-            self.session_ctx,
-            data,
-            self.generation_key,
-            mcp_only=True,
-            after_mcp=event_name == "AfterMCPExecution",
-        )
-        if event_name == "AfterMCPExecution" and not candidates:
-            candidates = _matching_open_tools(
-                self.session_ctx,
-                data,
-                self.generation_key,
-                mcp_only=True,
-            )
-        if not candidates:
-            return None
-
-        invocation = candidates[0]
-        prepared = dict(data)
-        prepared["tool_use_id"] = invocation["tool_use_id"]
-        server, tool = _mcp_identity(prepared)
-        invocation["mcp_server"] = server or invocation.get("mcp_server")
-        invocation["mcp_tool"] = tool or invocation.get("mcp_tool")
-        invocation["is_mcp"] = True
-        invocation["updated_at_ns"] = self.now_ns
-        if event_name == "BeforeMCPExecution":
-            invocation["mcp_before_seen"] = True
-        else:
-            invocation["mcp_after_seen"] = True
-            _store_mcp_result(invocation, prepared)
-            invocation.setdefault("mcp_status", "success")
-        return prepared
-    def _close_tool(self, event_name: str, data: dict, invocation_id: str) -> dict:
-        invocation = next(
-            (item for item in self.invocations if item.get("tool_use_id") == invocation_id),
-            None,
-        )
-        if invocation is None:
-            return data
-        prepared = _merge_invocation_data(data, invocation)
-        invocation["state"] = "closed"
-        invocation["updated_at_ns"] = self.now_ns
-        if event_name == "PostToolUseFailure":
-            invocation["mcp_status"] = "error"
-        else:
-            invocation.setdefault("mcp_status", "success")
-        return prepared
-
-
-# Backward-compatible name retained for callers that imported the original class.
-MCPInvocationCorrelator = ToolInvocationCorrelator
-
-
-def _buffer_session_event(session_key: str, event_name: str, data: dict, ide: str) -> _BufferedEventDecision:
+def _buffer_session_event(session_key: str, event_name: str, data: dict, ide: str) -> BufferedEventDecision:
     """Atomically prepare and append a generation-owned event."""
     now_ns = time.time_ns()
 
-    def mutate(session_ctx: dict) -> _BufferedEventDecision:
+    def mutate(session_ctx: dict) -> BufferedEventDecision:
         if session_ctx.get("finalizing"):
-            return _BufferedEventDecision(None, data, duplicate=True)
+            return BufferedEventDecision(None, data, duplicate=True)
         explicit_gen = _generation_key_from_data(data)
         if event_name in _GENERATION_START_EVENTS:
             event_id = data.get("_hook_event_id")
@@ -4405,7 +1804,7 @@ def _buffer_session_event(session_key: str, event_name: str, data: dict, ide: st
                 and event_id
                 and session_ctx.get("active_prompt_event_id") == event_id
             ):
-                return _BufferedEventDecision(
+                return BufferedEventDecision(
                     session_ctx.get("current_generation"),
                     data,
                     duplicate=True,
@@ -4423,11 +1822,16 @@ def _buffer_session_event(session_key: str, event_name: str, data: dict, ide: st
             if not gen_key:
                 gen_key = _new_generation_key(session_key, session_ctx)
 
-        decision = ToolInvocationCorrelator(session_ctx, ide, gen_key, now_ns).prepare(
+        decision = ToolInvocationCorrelator(
+            session_ctx, ide, gen_key, now_ns,
+            ttl_seconds=_state_ttl_seconds(), capture_content=_CAPTURE_POLICY.content_enabled,
+        ).prepare(
             event_name,
             data,
         )
-        if not decision.duplicate and not decision.correlated:
+        if not decision.duplicate:
+            if decision.correlated:
+                decision.data["_mcp_correlated_evidence"] = True
             _append_batch_event(gen_key, event_name, decision.data)
         session_ctx["last_seen_at_ns"] = now_ns
         return decision
@@ -4438,24 +1842,27 @@ def _buffer_session_event(session_key: str, event_name: str, data: dict, ide: st
         _ctx, decision = _update_session_context(session_key, mutate)
         if decision is None:
             gen_key = _resolve_generation_key(data, session_ctx)
-            return _BufferedEventDecision(gen_key, data)
+            return BufferedEventDecision(gen_key, data)
     return decision
 
 
-def _buffer_generation_end(session_key: str, event_name: str, data: dict, ide: str) -> _BufferedEventDecision:
-    """Append a Stop event to the active generation without creating a new one."""
+def _buffer_generation_end(session_key: str, event_name: str, data: dict, ide: str) -> BufferedEventDecision:
+    """Append a terminal callback, creating an incomplete generation if needed."""
     now_ns = time.time_ns()
 
-    def mutate(session_ctx: dict) -> _BufferedEventDecision:
+    def mutate(session_ctx: dict) -> BufferedEventDecision:
         if session_ctx.get("finalizing"):
-            return _BufferedEventDecision(None, data, duplicate=True)
+            return BufferedEventDecision(None, data, duplicate=True)
         gen_key = _generation_key_from_data(data) or session_ctx.get("current_generation")
         if not gen_key:
             pending = session_ctx.get("pending_generations") or []
             gen_key = pending[-1] if pending else None
         if not gen_key:
-            return _BufferedEventDecision(None, data)
-        decision = ToolInvocationCorrelator(session_ctx, ide, gen_key, now_ns).prepare(
+            gen_key = _new_generation_key(session_key, session_ctx)
+        decision = ToolInvocationCorrelator(
+            session_ctx, ide, gen_key, now_ns,
+            ttl_seconds=_state_ttl_seconds(), capture_content=_CAPTURE_POLICY.content_enabled,
+        ).prepare(
             event_name,
             data,
         )
@@ -4465,7 +1872,7 @@ def _buffer_generation_end(session_key: str, event_name: str, data: dict, ide: s
         return decision
 
     _ctx, decision = _update_session_context(session_key, mutate)
-    return decision or _BufferedEventDecision(None, data)
+    return decision or BufferedEventDecision(None, data)
 
 
 def _prepare_streaming_session_event(
@@ -4473,13 +1880,13 @@ def _prepare_streaming_session_event(
     event_name: str,
     data: dict,
     ide: str,
-) -> _BufferedEventDecision:
+) -> BufferedEventDecision:
     """Apply the same persisted dedupe/correlation policy without writing a batch."""
     now_ns = time.time_ns()
 
-    def mutate(session_ctx: dict) -> _BufferedEventDecision:
+    def mutate(session_ctx: dict) -> BufferedEventDecision:
         if session_ctx.get("finalizing"):
-            return _BufferedEventDecision(None, data, duplicate=True)
+            return BufferedEventDecision(None, data, duplicate=True)
         explicit_gen = _generation_key_from_data(data)
         if event_name in _GENERATION_START_EVENTS:
             event_id = data.get("_hook_event_id")
@@ -4488,7 +1895,7 @@ def _prepare_streaming_session_event(
                 and event_id
                 and session_ctx.get("active_prompt_event_id") == event_id
             ):
-                return _BufferedEventDecision(
+                return BufferedEventDecision(
                     session_ctx.get("current_generation"),
                     data,
                     duplicate=True,
@@ -4502,14 +1909,17 @@ def _prepare_streaming_session_event(
         elif event_name in _GENERATION_END_EVENTS:
             gen_key = explicit_gen or session_ctx.get("current_generation")
             if not gen_key:
-                return _BufferedEventDecision(None, data, duplicate=True)
+                gen_key = _new_generation_key(session_key, session_ctx)
         elif explicit_gen:
             gen_key = _remember_pending_generation(session_ctx, explicit_gen)
         else:
             gen_key = session_ctx.get("current_generation")
             if not gen_key:
                 gen_key = _new_generation_key(session_key, session_ctx)
-        decision = ToolInvocationCorrelator(session_ctx, ide, gen_key, now_ns).prepare(
+        decision = ToolInvocationCorrelator(
+            session_ctx, ide, gen_key, now_ns,
+            ttl_seconds=_state_ttl_seconds(), capture_content=_CAPTURE_POLICY.content_enabled,
+        ).prepare(
             event_name,
             data,
         )
@@ -4517,7 +1927,66 @@ def _prepare_streaming_session_event(
         return decision
 
     _ctx, decision = _update_session_context(session_key, mutate)
-    return decision or _BufferedEventDecision(None, data)
+    return decision or BufferedEventDecision(None, data)
+
+
+def _emit_streaming_event(tracer, session_key, event_name, data, ide, generation_key):
+    """Persist scope and callback identities before retryable SDK export."""
+    data.setdefault('_hook_observed_time_ns', time.time_ns())
+    current, records = _update_session_context(
+        session_key, lambda latest: (list(latest.get('stream_outbox', [])) if data.get('_replay_only')
+                                     else plan_streaming(latest, event_name, data, generation_key)),
+    )
+    if not current or records is None:
+        return False
+    for record in records:
+        role = record.get('role', 'callback')
+        parent = _make_trace_context(record['trace_id'], record['parent_span_id'],
+                                     current.get('trace_flags', '01'), current.get('tracestate'))
+        with export_identity(record['trace_id'], record['span_id']):
+            span = tracer.start_span(record['name'], context=parent, start_time=record['start'],
+                                     kind=SpanKind.INTERNAL,
+                                     attributes=_initial_span_attributes(role, record['event'], record['data']),
+                                     links=_event_span_links(record['data'], current))
+        span.set_attribute('o11y.timing.basis', record['basis'])
+        span.set_attribute('o11y.timing.inferred', record['basis'] != 'matching_callback')
+        if record.get('missing'):
+            span.set_attribute('o11y.timing.missing_end', True)
+        with _span_context(span):
+            if record.get('scope_only'):
+                enrichment.populate_span(span, record['event'], record['data'], ide,
+                                         session_ctx=current, capture_policy=_CAPTURE_POLICY, span_role=role)
+                _apply_operation_status(span, record['event'], record['data'])
+            else:
+                _populate_span(span, record['event'], record['data'], ide, session_ctx=current)
+                _remember_agent_span_context(session_key, current, record['event'], record['data'], span)
+        span.set_attribute('o11y.span.role', role)
+        if record['end'] < record['start']:
+            span.set_attribute('o11y.timing.end_before_start', True)
+        span.end(end_time=record['end'])
+    success = _force_flush_provider(authoritative_signal='traces')
+    if success:
+        exported = {record['span_id'] for record in records}
+        _update_session_context(session_key, lambda latest: latest.__setitem__(
+            'stream_outbox', [r for r in latest.get('stream_outbox', []) if r['span_id'] not in exported]))
+    else:
+        def failed(latest):
+            retained = []
+            attempted = {record['span_id'] for record in records}
+            for record in latest.get('stream_outbox', []):
+                if record['span_id'] in attempted:
+                    record['attempts'] = record.get('attempts', 0) + 1
+                if record.get('attempts', 0) >= _CAPTURE_POLICY.max_export_attempts:
+                    _atomic_write_json(os.path.join(_BATCH_DIR, record['span_id'] + '.quarantine.json'), {
+                        'record': record, 'trace_id': latest['trace_id'],
+                        'policy_id': _CAPTURE_POLICY.fingerprint, 'reason': 'export_attempts_exhausted',
+                    })
+                    _LOGGER.error('Streaming export attempts exhausted; policy-filtered record quarantined')
+                else:
+                    retained.append(record)
+            latest['stream_outbox'] = retained
+        _update_session_context(session_key, failed)
+    return success
 
 
 def _complete_generation_state(session_key: str, gen_key: str, memory: Optional[dict] = None) -> None:
@@ -4531,12 +2000,12 @@ def _complete_generation_state(session_key: str, gen_key: str, memory: Optional[
         invocations = session_ctx.get("tool_invocations")
         if isinstance(invocations, list):
             session_ctx["tool_invocations"] = [
-                item for item in invocations if item.get("generation_key") != gen_key
+                item for item in invocations if item.get("generation_key") != gen_key or item.get("state") == "open"
             ]
         agents = session_ctx.get("agent_invocations")
         if isinstance(agents, list):
             session_ctx["agent_invocations"] = [
-                item for item in agents if item.get("generation_key") != gen_key
+                item for item in agents if item.get("generation_key") != gen_key or item.get("state") == "open"
             ]
         seen = session_ctx.get("seen_events")
         if isinstance(seen, list):
@@ -4573,21 +2042,6 @@ def _pending_batch_keys_for_session(session_key: str, session_ctx: Optional[dict
         if any(_session_key(entry.get("data") or {}) == session_key for entry in events):
             keys.append(key)
     return keys
-
-
-def _enrich_buffered_event(data: dict, event_name: str, session_ctx: Optional[dict], ide: str) -> dict:
-    enriched = _normalize_mcp_event_data(data, event_name, ide)
-    invocation_id = enriched.get("tool_use_id")
-    if not invocation_id or not session_ctx:
-        return enriched
-    invocation = next(
-        (
-            item for item in session_ctx.get("tool_invocations", [])
-            if item.get("tool_use_id") == invocation_id
-        ),
-        None,
-    )
-    return _merge_invocation_data(enriched, invocation) if invocation else enriched
 
 
 # ---------------------------------------------------------------------------
@@ -4707,7 +2161,7 @@ def _session_trace_context(session_ctx: Optional[dict]):
         return None
     return _make_trace_context(
         session_ctx.get("trace_id", "0"),
-        session_ctx.get("upstream_parent_span_id") or session_ctx.get("phantom_parent_id", "0"),
+        session_ctx.get("session_span_id") or session_ctx.get("upstream_parent_span_id") or session_ctx.get("phantom_parent_id", "0"),
         session_ctx.get("trace_flags", "01"),
         session_ctx.get("tracestate"),
     )
@@ -4723,25 +2177,6 @@ def _event_parent_trace_context(data: dict, session_ctx: Optional[dict]):
             upstream_ctx.get("tracestate"),
         )
     return _session_trace_context(session_ctx)
-
-
-def _native_telemetry_attributes(data: dict) -> dict:
-    """Return native-agent identity only from the explicit native contract."""
-    trace_id = ProviderEventAdapter._native_trace_id(data.get("native_trace_id"))
-    span_id = ProviderEventAdapter._native_span_id(data.get("native_span_id"))
-    parent_span_id = ProviderEventAdapter._native_span_id(data.get("native_parent_span_id"))
-    attrs = {}
-    if trace_id:
-        attrs["gen_ai.client.native_trace_id"] = trace_id
-    if span_id:
-        attrs["gen_ai.client.native_span_id"] = span_id
-    if parent_span_id:
-        attrs["gen_ai.client.native_parent_span_id"] = parent_span_id
-    if attrs:
-        attrs["gen_ai.client.native_source"] = (
-            data.get("native_source") or data.get("_hook_provider_adapter", "unknown")
-        )
-    return attrs
 
 
 def _native_span_links(data: dict) -> list:
@@ -4763,7 +2198,7 @@ def _native_span_links(data: dict) -> list:
             trace_state=TraceState(),
         )
         return [Link(native_context, attributes={
-            "gen_ai.client.native_source": (
+            "o11y.client.native_source": (
                 data.get("native_source") or data.get("_hook_provider_adapter", "unknown")
             )
         })]
@@ -4801,7 +2236,7 @@ def _agent_relationship_links(data: dict, session_ctx: Optional[dict]) -> list:
             trace_flags=TraceFlags(TraceFlags.SAMPLED),
             trace_state=TraceState(),
         )
-        return [Link(context, attributes={"gen_ai.client.link.type": "delegation"})]
+        return [Link(context, attributes={"o11y.client.link.type": "delegation"})]
     except (TypeError, ValueError):
         return []
 
@@ -4809,6 +2244,13 @@ def _agent_relationship_links(data: dict, session_ctx: Optional[dict]) -> list:
 def _event_span_links(data: dict, session_ctx: Optional[dict]) -> list:
     links = _native_span_links(data)
     links.extend(_agent_relationship_links(data, session_ctx))
+    upstream = _resolve_upstream_trace_context(data)
+    if upstream and session_ctx and session_ctx.get('identity_committed') and upstream['trace_id'] != session_ctx.get('trace_id'):
+        if SpanContext is not None and Link is not None:
+            context = SpanContext(trace_id=int(upstream['trace_id'], 16), span_id=int(upstream['parent_span_id'], 16),
+                                  is_remote=True, trace_flags=TraceFlags(int(upstream.get('trace_flags', '01'), 16)),
+                                  trace_state=TraceState())
+            links.append(Link(context, attributes={'o11y.relationship': 'late_upstream'}))
     return links
 
 
@@ -4819,8 +2261,11 @@ def _remember_agent_span_context(
     data: dict,
     span,
 ) -> None:
-    if event_name != "SubagentStart" or not session_key or not session_ctx or not data.get("agent_id"):
+    is_agent = event_name == 'SubagentStart' and data.get('agent_id')
+    is_tool = event_name == 'PreToolUse' and data.get('tool_use_id')
+    if not (is_agent or is_tool) or not session_key or not session_ctx:
         return
+    collection, identity_key = ('agent_invocations', 'agent_id') if is_agent else ('tool_invocations', 'tool_use_id')
     try:
         context = span.get_span_context()
         if context is None or not context.is_valid:
@@ -4831,343 +2276,47 @@ def _remember_agent_span_context(
         return
 
     def mutate(latest: dict) -> None:
-        for invocation in reversed(latest.get("agent_invocations", [])):
-            if invocation.get("agent_id") == data.get("agent_id"):
+        for invocation in reversed(latest.get(collection, [])):
+            if invocation.get(identity_key) == data.get(identity_key):
                 invocation["start_trace_id"] = trace_id
                 invocation["start_span_id"] = span_id
                 break
 
     _update_session_context(session_key, mutate)
-    for invocation in reversed(session_ctx.get("agent_invocations", [])):
-        if invocation.get("agent_id") == data.get("agent_id"):
+    for invocation in reversed(session_ctx.get(collection, [])):
+        if invocation.get(identity_key) == data.get(identity_key):
             invocation["start_trace_id"] = trace_id
             invocation["start_span_id"] = span_id
             break
 
 
 # ---------------------------------------------------------------------------
-# GenAI semantic conventions
-# ---------------------------------------------------------------------------
-def _genai_operation(event_name: str) -> str:
-    if event_name in _OP_TOOL_EVENTS:
-        return "execute_tool"
-    if event_name in _OP_AGENT_EVENTS:
-        return "invoke_agent"
-    return "chat"
-
-
-def _genai_messages(
-    prompt: Optional[str], response: Optional[str],
-) -> Tuple[Optional[str], Optional[str]]:
-    inp = None
-    out = None
-    if prompt:
-        inp = json.dumps([{"role": "user", "parts": [{"type": "text", "content": prompt}]}], ensure_ascii=True)
-    if response:
-        out = json.dumps([{"role": "assistant", "parts": [{"type": "text", "content": response}]}], ensure_ascii=True)
-    return inp, out
-
-
-def _apply_genai_semconv(span, event_name: str, data: dict, ide: str, session_ctx: Optional[dict] = None, batch_model: Optional[str] = None) -> None:
-    provider = _infer_genai_provider(data)
-    if provider is not None:
-        span.set_attribute("gen_ai.provider.name", provider)
-    span.set_attribute("gen_ai.system", _resolve_client_name(ide, data=data, session_ctx=session_ctx))
-    span.set_attribute("gen_ai.operation.name", _genai_operation(event_name))
-    _set_if_present(span, "gen_ai.conversation.id", data.get("conversation_id") or data.get("session_id"))
-    _set_if_present(
-        span,
-        "gen_ai.agent.id",
-        _first_present(data, ("agent_id",)) or (session_ctx or {}).get("root_agent_id"),
-    )
-    _set_if_present(span, "gen_ai.agent.name", _first_present(data, ("agent_name", "subagent_type", "agent_type")))
-    _set_if_present(span, "gen_ai.agent.version", _first_present(data, ("agent_version",)))
-    _set_if_present(span, "gen_ai.agent.description", _first_present(data, ("agent_description",)))
-
-    # Model attribution with fallback chain (Fix A, B, C)
-    model = _first_present(data, ("request_model", "model", "model_name"))
-    if not model and session_ctx:
-        model = session_ctx.get("last_known_model")
-    if not model:
-        model = batch_model
-    if not model:
-        model = os.getenv("CLAUDE_MODEL") or os.getenv("ANTHROPIC_MODEL")
-
-    _set_if_present(span, "gen_ai.request.model", model)
-    _set_if_present(span, "gen_ai.response.model", _first_present(data, ("response_model",)))
-    _set_if_present(span, "gen_ai.request.choice.count", _int_or_none(_first_present(data, ("choice_count",))))
-    _set_if_present(
-        span,
-        "gen_ai.output.type",
-        _normalize_genai_output_type(_first_present(data, ("output_type", "response_format"))),
-    )
-
-    # Token usage (top-level)
-    _set_if_present(span, "gen_ai.usage.input_tokens", _int_or_none(_first_present(data, ("input_tokens", "prompt_tokens"))))
-    _set_if_present(span, "gen_ai.usage.output_tokens", _int_or_none(_first_present(data, ("output_tokens", "completion_tokens"))))
-    _set_if_present(
-        span,
-        "gen_ai.usage.cache_creation.input_tokens",
-        _int_or_none(_first_present(data, ("cache_creation_input_tokens",))),
-    )
-    _set_if_present(
-        span,
-        "gen_ai.usage.cache_read.input_tokens",
-        _int_or_none(_first_present(data, ("cache_read_input_tokens",))),
-    )
-
-    # Token usage (nested)
-    usage = data.get("usage")
-    if isinstance(usage, dict):
-        _set_if_present(span, "gen_ai.usage.input_tokens", _int_or_none(_first_present(usage, ("input_tokens", "prompt_tokens"))))
-        _set_if_present(span, "gen_ai.usage.output_tokens", _int_or_none(_first_present(usage, ("output_tokens", "completion_tokens"))))
-        _set_if_present(
-            span,
-            "gen_ai.usage.cache_creation.input_tokens",
-            _int_or_none(_first_present(usage, ("cache_creation_input_tokens", "cache_creation_tokens"))),
-        )
-        _set_if_present(
-            span,
-            "gen_ai.usage.cache_read.input_tokens",
-            _int_or_none(_first_present(usage, ("cache_read_input_tokens", "cached_input_tokens"))),
-        )
-        _set_if_present(span, "gen_ai.usage.total_tokens", _int_or_none(_first_present(usage, ("total_tokens",))))
-
-    # Request params
-    for source in (data, data.get("metadata") or {}):
-        _set_if_present(span, "gen_ai.request.temperature", _float_or_none(_first_present(source, ("temperature",))))
-        _set_if_present(span, "gen_ai.request.top_p", _float_or_none(_first_present(source, ("top_p",))))
-        _set_if_present(span, "gen_ai.request.top_k", _float_or_none(_first_present(source, ("top_k",))))
-        _set_if_present(span, "gen_ai.request.max_tokens", _int_or_none(_first_present(source, ("max_tokens",))))
-        _set_if_present(span, "gen_ai.request.frequency_penalty", _float_or_none(_first_present(source, ("frequency_penalty",))))
-        _set_if_present(span, "gen_ai.request.presence_penalty", _float_or_none(_first_present(source, ("presence_penalty",))))
-        _set_if_present(span, "gen_ai.request.seed", _int_or_none(_first_present(source, ("seed",))))
-        _set_if_present(span, "gen_ai.response.id", _first_present(source, ("response_id",)))
-        finish = _first_present(source, ("finish_reasons",))
-        if finish is not None:
-            span.set_attribute("gen_ai.response.finish_reasons", finish if isinstance(finish, list) else [str(finish)])
-        stop_seq = _first_present(source, ("stop_sequences",))
-        if stop_seq is not None:
-            span.set_attribute("gen_ai.request.stop_sequences", stop_seq if isinstance(stop_seq, list) else [str(stop_seq)])
-
-    # Tool definitions (opt-in)
-    tool_defs = _first_present(data, ("tool_definitions", "tools", "tool_schema"))
-    if tool_defs is not None and _safe_bool(os.getenv("IDE_OTEL_CAPTURE_TOOL_DEFINITIONS", "")):
-        span.set_attribute("gen_ai.tool.definitions", _stringify(tool_defs))
-
-    # GenAI messages (opt-in)
-    if _conversation_content_enabled():
-        records = _conversation_records_from_data(data)
-        prompt = next((record.text for record in records if record.kind == "prompt"), None)
-        response = next((record.text for record in records if record.kind == "response"), None)
-        prompt = prompt or (data.get("prompt") if isinstance(data.get("prompt"), str) else None)
-        response = response or (data.get("response") if isinstance(data.get("response"), str) else None)
-        if _safe_bool(os.getenv("IDE_OTEL_MASK_PROMPTS", "")):
-            prompt = _mask_text(prompt) if prompt else None
-            response = _mask_text(response) if response else None
-        max_chars = _text_max_chars()
-        prompt = prompt[:max_chars] if prompt else None
-        response = response[:max_chars] if response else None
-        inp_msg, out_msg = _genai_messages(prompt, response)
-        _set_if_present(span, "gen_ai.input.messages", inp_msg)
-        _set_if_present(span, "gen_ai.output.messages", out_msg)
-    if _safe_bool(os.getenv("IDE_OTEL_CAPTURE_TEXT", "")):
-        system_instructions = _first_present(data, ("system_instructions", "system_prompt"))
-        if system_instructions is not None:
-            _set_if_present(span, "gen_ai.system_instructions", _stringify(system_instructions))
-
-
-# ---------------------------------------------------------------------------
 # Span population
 # ---------------------------------------------------------------------------
-def _populate_span(span, event_name: str, data: dict, ide: str, session_ctx: Optional[dict] = None, batch_model: Optional[str] = None) -> None:
-    """Attach all attributes to a span and emit OTel log records."""
-    data = _normalize_mcp_event_data(data, event_name, ide)
-    span.set_attribute("gen_ai.client.hook.event", event_name)
-    span.set_attribute("gen_ai.client.telemetry_source", _TELEMETRY_SOURCE)
-    span.set_attribute("gen_ai.client.hook_schema_version", _HOOK_SCHEMA_VERSION)
-    _set_if_present(span, "gen_ai.client.hook.event_id", data.get("_hook_event_id"))
-    _set_if_present(span, "gen_ai.client.hook.event_id_source", data.get("_hook_event_id_source"))
-    _set_if_present(span, "gen_ai.client.hook.original_event", data.get("_hook_original_event"))
-    _set_if_present(span, "gen_ai.client.hook.provider_adapter", data.get("_hook_provider_adapter"))
-    _set_if_present(
-        span,
-        "gen_ai.client.mcp.correlated_evidence",
-        data.get("_mcp_correlated_evidence"),
+def _initial_span_attributes(role, event, data, model=None):
+    """Make known semantic identity available when the SDK samples a span."""
+    attrs = operation_attributes(role, event, data)
+    model = _first_present(data, ('request_model', 'model', 'model_name')) or model
+    provider = enrichment._infer_genai_provider(data if not model else {**data, 'request_model': model})
+    if provider:
+        attrs['gen_ai.provider.name'] = provider
+    if isinstance(model, str) and model:
+        attrs['gen_ai.request.model'] = model
+    conversation = data.get('conversation_id') or data.get('session_id')
+    if isinstance(conversation, str) and conversation:
+        attrs['gen_ai.conversation.id'] = conversation
+    return attrs
+
+
+def _populate_span(span, event_name: str, data: dict, ide: str, session_ctx: Optional[dict] = None, batch_model: Optional[str] = None, *, span_role: str = 'callback') -> None:
+    """Enrich the active span, emit its correlated hook log, then set status."""
+    enrichment.populate_span(
+        span, event_name, data, ide, session_ctx=session_ctx, batch_model=batch_model,
+        capture_policy=_CAPTURE_POLICY, attach_os_attributes=_ATTACH_OS_ATTRIBUTES_PER_SPAN,
+        span_role=span_role,
     )
-    _set_client_identity_attributes(span, ide, data=data, session_ctx=session_ctx)
-    _apply_enrichment_attributes(span, data, session_ctx=session_ctx)
-    for key, value in _workspace_observability_attributes(data, session_ctx).items():
-        _set_if_present(span, key, value)
-    for key, value in _native_telemetry_attributes(data).items():
-        _set_if_present(span, key, value)
-
-    # Optionally attach OS / host attributes on every span.
-    # These are already present as resource attributes via OTEL_RESOURCE_ATTRIBUTES,
-    # so we gate per-span duplication behind a flag to avoid hot-path overhead.
-    if _ATTACH_OS_ATTRIBUTES_PER_SPAN:
-        os_info = _get_os_info()
-        for attr_key, attr_val in os_info.items():
-            span.set_attribute(attr_key, attr_val)
-
-    # Client version
-    client_version = _detect_client_version(data, ide)
-    _set_if_present(span, "gen_ai.client.version", client_version)
-
-    # Emit structured OTel log record (MCP, shell, tool — correlated with this span)
-    _emit_event_log(event_name, data, session_ctx=session_ctx)
-    _set_if_present(span, "gen_ai.client.session_id", data.get("session_id") or data.get("conversation_id"))
-    _set_if_present(span, "gen_ai.client.generation_id", data.get("generation_id"))
-    _set_if_present(span, "gen_ai.client.turn_id", data.get("turn_id"))
-    span.set_attribute("gen_ai.client.timestamp", datetime.now(timezone.utc).isoformat())
-
-    # GenAI semantic conventions
-    _apply_genai_semconv(span, event_name, data, ide, session_ctx=session_ctx, batch_model=batch_model)
-
-    # Flatten metadata dict
-    metadata = data.get("metadata")
-    if isinstance(metadata, dict):
-        flat = {}  # type: dict
-        _flatten(flat, "gen_ai.client.metadata", metadata)
-        for k, v in flat.items():
-            _set_if_present(span, k, v)
-
-    # Event-specific attributes
-    mapping = _EVENT_ATTR_MAP.get(event_name, {})
-    for key, attr in mapping.items():
-        _set_if_present(span, attr, data.get(key))
-    _apply_mcp_attributes(span, event_name, data)
-    _set_codex_tool_attrs(span, event_name, data)
-    _apply_conversation_attributes(span, event_name, data)
+    _emit_event_log(event_name, data)
     _apply_operation_status(span, event_name, data)
-
-    for label in ("tool_input", "tool_output", "mcp_input", "mcp_output"):
-        value = data.get(label)
-        if value is not None and not isinstance(value, dict):
-            _maybe_attach_text(span, label, _stringify(value))
-
-
-def _set_codex_tool_attrs(span, event_name: str, data: dict) -> None:
-    """Attach useful attributes from Codex's structured tool hook payloads."""
-    if event_name not in {"PreToolUse", "PermissionRequest", "PostToolUse"}:
-        return
-
-    tool_input = data.get("tool_input")
-    if isinstance(tool_input, dict):
-        command = tool_input.get("command")
-        if isinstance(command, str):
-            span.set_attribute("gen_ai.client.command", command)
-        description = tool_input.get("description")
-        if isinstance(description, str):
-            span.set_attribute("gen_ai.client.approval.description", description)
-        # Flatten full input only when explicitly opted in (IDE_OTEL_CAPTURE_TOOL_INPUT_CONTENT
-        # gates both tool input and tool response content — consistent with _emit_tool_log).
-        if _safe_bool(os.getenv("IDE_OTEL_CAPTURE_TOOL_INPUT_CONTENT", "")):
-            mask = _safe_bool(os.getenv("IDE_OTEL_MASK_PROMPTS", ""))
-            max_chars = _text_max_chars()
-            flat_input: dict = {}
-            _flatten(flat_input, "gen_ai.client.tool.input", tool_input)
-            for key, value in flat_input.items():
-                if isinstance(value, str):
-                    if mask:
-                        value = _mask_text(value)
-                    _set_if_present(span, key, value[:max_chars])
-                else:
-                    _set_if_present(span, key, value)
-        else:
-            # Always emit length+digest for cardinality-safe observability
-            text = _stringify(tool_input)
-            span.set_attribute("gen_ai.client.tool.input.length", len(text))
-            span.set_attribute("gen_ai.client.tool.input.sha256", _hash_text(text))
-
-    tool_response = data.get("tool_response")
-    response_length = _int_or_none(data.get("tool_response_length"))
-    response_sha256 = data.get("tool_response_sha256")
-    if isinstance(tool_response, dict):
-        # Flatten full response only when explicitly opted in (same gate as tool input above)
-        if _safe_bool(os.getenv("IDE_OTEL_CAPTURE_TOOL_INPUT_CONTENT", "")):
-            mask = _safe_bool(os.getenv("IDE_OTEL_MASK_PROMPTS", ""))
-            max_chars = _text_max_chars()
-            flat_response: dict = {}
-            _flatten(flat_response, "gen_ai.client.tool.response", tool_response)
-            for key, value in flat_response.items():
-                if isinstance(value, str):
-                    if mask:
-                        value = _mask_text(value)
-                    _set_if_present(span, key, value[:max_chars])
-                else:
-                    _set_if_present(span, key, value)
-        else:
-            # Always emit length+digest for cardinality-safe observability
-            if response_length is None or not response_sha256:
-                text = _stringify(tool_response)
-                response_length = len(text)
-                response_sha256 = _hash_text(text)
-            span.set_attribute("gen_ai.client.tool.response.length", response_length)
-            span.set_attribute("gen_ai.client.tool.response.sha256", response_sha256)
-    elif tool_response is not None:
-        if response_length is None or not response_sha256:
-            _maybe_attach_text(span, "tool_response", _stringify(tool_response))
-        if response_length is not None:
-            span.set_attribute("gen_ai.client.tool.response.length", response_length)
-        if response_sha256:
-            span.set_attribute("gen_ai.client.tool.response.sha256", response_sha256)
-    else:
-        if response_length is not None:
-            span.set_attribute("gen_ai.client.tool.response.length", response_length)
-        if response_sha256:
-            span.set_attribute("gen_ai.client.tool.response.sha256", response_sha256)
-
-
-def _flatten(out: dict, prefix: str, data: dict) -> None:
-    for key, value in data.items():
-        if value is None:
-            continue
-        name = f"{prefix}.{key}"
-        if isinstance(value, dict):
-            _flatten(out, name, value)
-        elif isinstance(value, list):
-            out[name] = json.dumps(value, ensure_ascii=True)
-        else:
-            out[name] = value
-
-
-# ---------------------------------------------------------------------------
-# Memory enrichment (generation/session summaries)
-# ---------------------------------------------------------------------------
-def _extract_event_memory_facts(event_name: str, data: dict) -> dict:
-    """Backward-compatible wrapper for connector-based enrichment."""
-    return extract_event_memory_facts(event_name, data)
-
-
-def _aggregate_generation_memory(batch: list, repo_root: Optional[str] = None) -> dict:
-    """Backward-compatible wrapper for connector-based enrichment."""
-    return aggregate_generation_memory(batch, repo_root=repo_root)
-
-
-def _apply_memory_summary_attrs(span, prefix: str, summary: dict) -> None:
-    """Attach memory summary attributes to a span."""
-    files = summary.get("files") or []
-    tools = summary.get("tools") or []
-    entities = summary.get("entities") or []
-    commands = summary.get("commands") or []
-    tool_counts = summary.get("tool_counts") or {}
-
-    span.set_attribute(f"{prefix}.files_touched_count", len(files))
-    span.set_attribute(f"{prefix}.tools_used_count", len(tools))
-    span.set_attribute(f"{prefix}.entities_count", len(entities))
-    span.set_attribute(f"{prefix}.commands_count", len(commands))
-
-    if files:
-        span.set_attribute(f"{prefix}.files_touched", files)
-    if tools:
-        span.set_attribute(f"{prefix}.tools_used", tools)
-    if entities:
-        span.set_attribute(f"{prefix}.entities", entities)
-    if commands:
-        span.set_attribute(f"{prefix}.commands", commands)
-    if tool_counts:
-        span.set_attribute(f"{prefix}.tool_counts", json.dumps(tool_counts, ensure_ascii=True, sort_keys=True))
 
 
 # ---------------------------------------------------------------------------
@@ -5184,13 +2333,30 @@ def _flush_generation_unlocked(tracer, gen_key: str, session_ctx: Optional[dict]
         return True
 
     for entry in batch:
-        entry["data"] = _enrich_buffered_event(
+        entry["data"] = enrich_buffered_event(
             entry.get("data") or {},
-            entry.get("event") or "unknown",
             session_ctx,
-            ide,
         )
 
+    identity_path = _batch_path(gen_key) + '.identity.json'
+    try:
+        with open(identity_path, encoding='utf-8') as fh:
+            identity = json.load(fh)
+    except FileNotFoundError:
+        identity = {'span_id': new_span_id(), 'trace_id': (session_ctx or {}).get('trace_id') or uuid.uuid4().hex,
+                    'callbacks': {}}
+    for entry in batch:
+        key = entry.get('span_id') or (entry.get('data') or {}).get('_hook_event_id')
+        if key is None:
+            key = str(batch.index(entry))
+        entry['span_id'] = identity['callbacks'].setdefault(key, entry.get('span_id') or new_span_id())
+    _atomic_write_json(identity_path, identity)
+    if session_ctx is not None:
+        session_ctx['identity_committed'] = True
+        owner = _session_key(batch[0].get('data') or {})
+        if owner:
+            _update_session_context(owner, lambda latest: latest.__setitem__('identity_committed', True))
+    intervals = boundaries(batch)
     first_ts = batch[0].get("timestamp_ns") or time.time_ns()
     last_ts = batch[-1].get("timestamp_ns") or time.time_ns()
 
@@ -5205,26 +2371,37 @@ def _flush_generation_unlocked(tracer, gen_key: str, session_ctx: Optional[dict]
         None
     )
     repo_root = (session_ctx or {}).get("repo_root")
-    memory_summary = _aggregate_generation_memory(batch, repo_root=repo_root)
+    memory_summary = aggregate_generation_memory(batch, repo_root=repo_root)
     first_event_data = batch[0].get("data") if batch else {}
 
     span_kind = SpanKind.INTERNAL if SpanKind is not None else None
-    gen_span = tracer.start_span(
-        "gen_ai.client.generation", kind=span_kind,
-        context=parent_ctx, start_time=first_ts,
-    )
+    with export_identity(identity['trace_id'], identity['span_id']):
+        gen_span = tracer.start_span(
+            operation_span_name('generation', 'UserPromptSubmit', first_event_data), kind=span_kind,
+            attributes=_initial_span_attributes('generation', 'UserPromptSubmit', first_event_data, batch_model),
+            context=parent_ctx, start_time=first_ts,
+        )
     gen_ctx = trace.set_span_in_context(gen_span)
+    agent_parents = {item['agent_id']: item['start_span_id']
+                     for item in (session_ctx or {}).get('agent_invocations', [])
+                     if item.get('agent_id') and item.get('start_span_id')}
+    tool_parents = {(item.get('agent_id'), item['tool_use_id']): item['start_span_id']
+                    for item in (session_ctx or {}).get('tool_invocations', [])
+                    if item.get('tool_use_id') and item.get('start_span_id')}
     with _span_context(gen_span):
-        gen_span.set_attribute("gen_ai.client.generation_id", gen_key)
+        gen_span.set_attribute("o11y.span.role", "generation")
+        gen_span.set_attribute("o11y.client.generation_id", gen_key)
         _set_if_present(
             gen_span,
-            "gen_ai.client.session_id",
+            "o11y.client.session_id",
             _session_key(first_event_data) or (session_ctx or {}).get("session_id"),
         )
-        gen_span.set_attribute("gen_ai.client.event.count", len(batch))
-        _set_if_present(gen_span, "gen_ai.agent.id", (session_ctx or {}).get("root_agent_id"))
+        gen_span.set_attribute("o11y.client.event.count", len(batch))
+        _set_if_present(gen_span, "o11y.client.agent_id", (session_ctx or {}).get("root_agent_id"))
+        _set_if_present(gen_span, "gen_ai.conversation.id", first_event_data.get('conversation_id') or
+                        (session_ctx or {}).get('conversation_id') or _session_key(first_event_data) or (session_ctx or {}).get("session_id"))
         _set_if_present(gen_span, "gen_ai.request.model", batch_model)
-        _apply_memory_summary_attrs(gen_span, "gen_ai.client.memory", memory_summary)
+        _apply_memory_summary_attrs(gen_span, "o11y.client.memory", memory_summary)
         _set_client_identity_attributes(gen_span, ide, data=first_event_data, session_ctx=session_ctx)
         _apply_enrichment_attributes(gen_span, first_event_data, session_ctx=session_ctx)
         _log_with_span(_LOGGER, logging.INFO, gen_span, "Generation span: gen_key=%s events=%d", gen_key, len(batch))
@@ -5233,15 +2410,36 @@ def _flush_generation_unlocked(tracer, gen_key: str, session_ctx: Optional[dict]
             evt = entry.get("event") or "unknown"
             evt_data = entry.get("data") or {}
             ts = entry.get("timestamp_ns") or time.time_ns()
-            next_ts = batch[idx + 1].get("timestamp_ns") if idx + 1 < len(batch) else ts + 1_000_000
+            next_ts, timing_basis, missing_end = intervals[idx]
 
-            span = tracer.start_span(
-                f"gen_ai.client.hook.{evt}", kind=span_kind,
-                context=gen_ctx, start_time=ts,
-                links=_event_span_links(evt_data, session_ctx),
-            )
+            callback_parent = gen_ctx
+            agent_id = evt_data.get('agent_id') or evt_data.get('subagent_id')
+            tool_id = evt_data.get('tool_use_id') or evt_data.get('tool_call_id') or evt_data.get('call_id')
+            parent_id = agent_parents.get(agent_id) if evt != 'SubagentStart' else agent_parents.get(evt_data.get('parent_agent_id'))
+            if tool_id and evt in {'PostToolUse', 'PostToolUseFailure', 'AfterMCPExecution', 'AfterShellExecution'}:
+                parent_id = tool_parents.get((agent_id, tool_id)) or parent_id
+            if parent_id:
+                callback_parent = _make_trace_context(identity['trace_id'], parent_id)
+            if evt == 'SubagentStart' and agent_id:
+                agent_parents[agent_id] = entry['span_id']
+            if evt in {'PreToolUse', 'BeforeMCPExecution', 'BeforeShellExecution'} and tool_id:
+                tool_parents[(agent_id, tool_id)] = entry['span_id']
+            with export_identity(identity['trace_id'], entry['span_id']):
+                role = ('callback' if evt_data.get('_mcp_correlated_evidence') else scope_role(evt))
+                span = tracer.start_span(
+                    operation_span_name(role, evt, evt_data), kind=span_kind,
+                    attributes=_initial_span_attributes(role, evt, evt_data, batch_model),
+                    context=callback_parent, start_time=ts,
+                    links=_event_span_links(evt_data, session_ctx),
+                )
+            span.set_attribute('o11y.timing.basis', timing_basis)
+            span.set_attribute('o11y.timing.inferred', timing_basis != 'matching_callback')
+            if missing_end:
+                span.set_attribute('o11y.timing.missing_end', True)
             with _span_context(span):
-                _populate_span(span, evt, evt_data, ide, session_ctx=session_ctx, batch_model=batch_model)
+                terminal = matching_terminal(batch, idx) if role in {'tool', 'subagent'} else None
+                scope_data = completed_data(evt_data, terminal['data'], terminal['event']) if terminal else evt_data
+                _populate_span(span, evt, scope_data, ide, session_ctx=session_ctx, batch_model=batch_model, span_role=role)
                 _remember_agent_span_context(
                     _session_key(evt_data),
                     session_ctx,
@@ -5249,17 +2447,37 @@ def _flush_generation_unlocked(tracer, gen_key: str, session_ctx: Optional[dict]
                     evt_data,
                     span,
                 )
+            span.set_attribute('o11y.span.role', role)
             span.end(end_time=next_ts)
 
+        terminal = next((entry for entry in reversed(batch) if entry.get('event') in {'Stop', 'StopFailure', 'Interrupt'}
+                         and event_branch(entry.get('data') or {}) == event_branch(first_event_data)), None)
+        if terminal:
+            _apply_operation_status(gen_span, terminal['event'], terminal['data'])
         gen_span.end(end_time=last_ts)
-
-    if session_ctx is not None:
-        session_memory = session_ctx.setdefault("memory", {})
-        merge_memory_summaries(session_memory, memory_summary, repo_root=repo_root)
 
     success = not flush or _force_flush_provider(authoritative_signal="traces")
     if success:
+        if session_ctx is not None:
+            session_memory = session_ctx.setdefault("memory", {})
+            merge_memory_summaries(session_memory, memory_summary, repo_root=repo_root)
         _clear_batch_events(gen_key)
+        try:
+            os.remove(identity_path)
+        except FileNotFoundError:
+            pass
+    else:
+        identity['attempts'] = identity.get('attempts', 0) + 1
+        if identity['attempts'] >= _CAPTURE_POLICY.max_export_attempts:
+            _atomic_write_json(identity_path + '.quarantine.json', {
+                'identity': identity, 'events': batch, 'session_context': session_ctx,
+                'policy_id': _CAPTURE_POLICY.fingerprint, 'reason': 'export_attempts_exhausted',
+            })
+            _clear_batch_events(gen_key)
+            os.remove(identity_path)
+            _LOGGER.error('Generation export attempts exhausted; policy-filtered records quarantined')
+        else:
+            _atomic_write_json(identity_path, identity)
     _LOGGER.info("Flushed generation %s (%d events)", gen_key, len(batch))
     return success
 
@@ -5275,7 +2493,7 @@ def _flush_generation(tracer, gen_key: str, session_ctx: Optional[dict], ide: st
 def _flush_session(tracer, session_key: str, session_ctx: dict, ide: str, flush: bool = True) -> bool:
     """Emit the root session span covering the full session duration."""
     start_ns = session_ctx.get("start_time_ns") or time.time_ns()
-    end_ns = time.time_ns()
+    end_ns = session_ctx.get("end_time_ns") or time.time_ns()
     session_batch = sorted(
         _load_batch_events(f"{session_key}_session"),
         key=lambda e: e.get("timestamp_ns") or 0,
@@ -5285,23 +2503,43 @@ def _flush_session(tracer, session_key: str, session_ctx: dict, ide: str, flush:
     parent_ctx = _session_trace_context(session_ctx)
 
     span_kind = SpanKind.INTERNAL if SpanKind is not None else None
-    session_span = tracer.start_span(
-        "gen_ai.client.session", kind=span_kind,
-        context=parent_ctx, start_time=start_ns,
-    )
+    # Children already reference this persisted session ID. The session itself
+    # is parented only to a validated upstream context, never to itself.
+    parent_ctx = (_make_trace_context(session_ctx['trace_id'], session_ctx['upstream_parent_span_id'],
+                                    session_ctx.get('trace_flags', '01'), session_ctx.get('tracestate'))
+                  if session_ctx.get('upstream_parent_span_id') else None)
+    with export_identity(session_ctx['trace_id'], session_ctx.get('session_span_id') or new_span_id()):
+        session_span = tracer.start_span(
+            "o11y.client.session", kind=span_kind,
+            context=parent_ctx, start_time=start_ns,
+        )
     with _span_context(session_span):
-        session_span.set_attribute("gen_ai.client.session_id", session_key)
-        _set_if_present(session_span, "gen_ai.agent.id", session_ctx.get("root_agent_id"))
+        for entry in session_batch:
+            data = entry.get("data") or {}
+            event = entry["event"]
+            timestamp = entry.get("timestamp_ns") or end_ns
+            with export_identity(session_ctx['trace_id'], entry.get('span_id') or new_span_id()):
+                hook_span = tracer.start_span(
+                    f"o11y.client.hook.{event}", kind=span_kind,
+                    context=trace.set_span_in_context(session_span), start_time=timestamp,
+                )
+            with _span_context(hook_span):
+                _populate_span(hook_span, event, data, ide, session_ctx=session_ctx)
+            hook_span.end(end_time=timestamp)
+        session_span.set_attribute("o11y.span.role", "session")
+        session_span.set_attribute("o11y.client.session_id", session_key)
+        _set_if_present(session_span, "o11y.client.agent_id", session_ctx.get("root_agent_id"))
+        session_span.set_attribute("gen_ai.conversation.id", session_ctx.get("conversation_id") or session_ctx.get("session_id") or session_key)
         _set_if_present(
             session_span,
-            "gen_ai.client.agent_id_source",
+            "o11y.client.agent_id_source",
             session_ctx.get("root_agent_id_source"),
         )
         _set_client_identity_attributes(session_span, ide, data=first_event_data, session_ctx=session_ctx)
-        session_span.set_attribute("gen_ai.client.generation_count", session_ctx.get("generation_count", 0))
-        session_span.set_attribute("gen_ai.client.session.duration_ms", (end_ns - start_ns) // 1_000_000)
+        session_span.set_attribute("o11y.client.generation_count", session_ctx.get("generation_count", 0))
+        session_span.set_attribute("o11y.client.session.duration_ms", (end_ns - start_ns) // 1_000_000)
         _apply_enrichment_attributes(session_span, first_event_data, session_ctx=session_ctx)
-        _apply_memory_summary_attrs(session_span, "gen_ai.client.memory", session_ctx.get("memory", {}))
+        _apply_memory_summary_attrs(session_span, "o11y.client.memory", session_ctx.get("memory", {}))
         _log_with_span(_LOGGER, logging.INFO, session_span, "Session span: session=%s", session_key)
         session_span.end(end_time=end_ns)
 
@@ -5325,11 +2563,19 @@ def _finalize_session(
     with _acquire_lock(finalize_lock):
         current_ctx, _result = _update_session_context(
             session_key,
-            lambda latest: latest.__setitem__("finalizing", True),
+            lambda latest: latest.update({'finalizing': True, 'end_time_ns': latest.get('end_time_ns') or time.time_ns()}),
         )
         if not current_ctx:
             return True
         session_ctx = current_ctx
+        if any(session_ctx.get(key) for key in ('stream_scopes', 'stream_outbox', 'stream_generations')):
+            # Maintenance closes missing scope callbacks, without fabricating a
+            # callback log or changing the original observed timestamps.
+            if not _emit_streaming_event(tracer, session_key, 'SessionEnd', {
+                'session_id': session_key, '_hook_observed_time_ns': session_ctx['end_time_ns'],
+                '_scope_closure_only': True, '_hook_timeout': True,
+            }, ide, None):
+                return False
         pending = _pending_batch_keys_for_session(session_key, session_ctx)
         session_ctx["generation_count"] = max(session_ctx.get("generation_count", 0), len(pending))
         for gen_key in pending:
@@ -5351,15 +2597,38 @@ def main() -> int:
     if _safe_bool(os.getenv("IDE_OTEL_LOG_EVENTS", "")):
         # Very early log to stderr to show the hook is alive
         sys.stderr.write(f"Hook starting (pid={os.getpid()})\n")
-    _apply_config_env(_load_config())
+    try:
+        _apply_config_env(_load_config())
+    except ValueError as exc:
+        # A bad capture policy must neither export unfiltered data nor prevent
+        # the harness from continuing its work.
+        _LOGGER.error("Hook telemetry disabled: %s", exc)
+        data = _normalize_input_data(_load_input())
+        ide = _detect_ide(data)
+        event = _event_adapter_for(ide).canonical_event_name(_get_event_name(data, override=_CLI_HOOK_EVENT))
+        _emit_stdout_response(event, ide, data)
+        return 0
     _configure_logging()
 
     input_data = _load_input()
     if not isinstance(input_data, dict):
         input_data = {}
-    data = _normalize_input_data(input_data)
-    raw_event = _get_event_name(data)
+    observed_time_ns = time.time_ns()
+    original_data = data = _normalize_input_data(input_data)
+    raw_event = _get_event_name(data, override=_CLI_HOOK_EVENT)
     ide = _detect_ide(data)
+    from otel_hooks.managed import should_skip
+    if should_skip(ide, _CLI_REGISTRATION_SCOPE, raw_event):
+        event = _event_adapter_for(ide).canonical_event_name(raw_event)
+        _emit_stdout_response(event, ide, data)
+        return 0
+    captured_payload = _CAPTURE_POLICY.filter(input_data)
+    # Never trust incoming private keys as runtime-generated state.
+    parser_input = {k: v for k, v in captured_payload.items() if not k.startswith("_")}
+    # Filtering preserves leaf types. Compare before aliases are added, which
+    # could otherwise hide changed values through Python's True == 1 equality.
+    input_unchanged = parser_input == input_data
+    data = _normalize_input_data(parser_input)
     short_hook = ide == "codex" and raw_event in {"SessionEnd", "Interrupt"}
     # Leave one second of Codex's three-second budget for startup and local I/O.
     _EXPORT_DEADLINE = started + 2.0 if short_hook else None
@@ -5368,17 +2637,48 @@ def main() -> int:
     initial_session_key = _session_key(data)
     initial_session_ctx = _load_session_context(initial_session_key)
     adapter = _event_adapter_for(ide)
-    canonical_event = adapter.normalize(
+    canonical_event = adapter.parse(
         raw_event,
-        None,
         data,
         session_ctx=initial_session_ctx,
     )
     event_name = canonical_event.event_name
     data = canonical_event.to_lifecycle_data()
-    data = _normalize_mcp_event_data(data, event_name, ide)
+    # Pure parsing can retain identity and length/hash facts from omitted
+    # conversation content, without persisting that content.
+    observed = canonical_event if input_unchanged else adapter.parse(
+        raw_event, original_data, session_ctx=initial_session_ctx,
+    )
+    if canonical_event.event_id_source != "provider":
+        # Content equality is not callback identity. Generate once at observation,
+        # then persist it with the record for replay.
+        data['_hook_event_id'] = 'hook:' + str(uuid.uuid4())
+    if _operation_failed(event_name, original_data):
+        data['_hook_failure_observed'] = True
+    data['_hook_observed_time_ns'] = observed_time_ns
+    event_ns = input_data.get('timestamp_ns')
+    if type(event_ns) is int and event_ns > 0:
+        data['_hook_event_time_ns'] = event_ns
+    else:
+        data['_hook_event_time_ns'] = observed_time_ns
+    data['_payload_facts'] = {**data.get('_payload_facts', {}), **observed.to_lifecycle_data().get('_payload_facts', {})}
+    records = data.setdefault("_conversation_records", [])
+    retained = {record["kind"] for record in records}
+    records.extend({"kind": record.kind, "role": record.role, "length": record.length, "bytes": record.bytes, "sha256": record.sha256}
+                   for record in observed.conversation if record.kind not in retained)
+    data["_hook_attributes"] = _CAPTURE_POLICY.attributes(captured_payload)
+    if _safe_bool(os.getenv("IDE_OTEL_ENABLE_LOGS", "false")):
+        log_size = len(json.dumps(captured_payload, ensure_ascii=False, separators=(',', ':')).encode('utf-8'))
+        limit = _CAPTURE_POLICY.max_log_body_bytes
+        if limit is not None and log_size > limit:
+            data['_hook_log_body'] = {'o11y.body.omitted_reason': 'max_body_bytes', 'o11y.body.bytes': log_size}
+        else:
+            data['_hook_log_body'] = captured_payload
+    data = bound_runtime_payload(data, _CAPTURE_POLICY)
     sk = _session_key(data)
     session_ctx = initial_session_ctx if sk == initial_session_key else _load_session_context(sk)
+    if sk and session_ctx is None and event_name not in _SESSION_START_EVENTS:
+        session_ctx = _create_session_context(sk, data, ide)
     session_ctx = _maybe_bind_session_to_upstream_context(sk, session_ctx, data)
     session_ctx = _maybe_enrich_session_context(sk, session_ctx, data)
     agent_engine = _resolved_agent_engine(data, session_ctx, ide=ide)
@@ -5395,6 +2695,8 @@ def main() -> int:
         if event_name in _SESSION_START_EVENTS:
             if sk:
                 _create_session_context(sk, data, ide)
+                if initial_session_ctx is None:
+                    _append_batch_event(f"{sk}_session", event_name, data)
             _emit_stdout_response(event_name, ide, data)
             return 0
 
@@ -5403,15 +2705,21 @@ def main() -> int:
             _emit_stdout_response(event_name, ide, data)
             return 0
 
-    if not _init_tracing(
-        ide,
-        client_name=_resolve_client_name(ide, data=data, agent_engine=agent_engine, session_ctx=session_ctx),
-        resource_attributes=_collect_repository_attributes(data, session_ctx=session_ctx),
-    ):
+    try:
+        initialized = _init_tracing(
+            ide,
+            client_name=_resolve_client_name(ide, data=data, agent_engine=agent_engine, session_ctx=session_ctx),
+            resource_attributes=_collect_repository_attributes(data, session_ctx=session_ctx),
+        )
+    except Exception as exc:
+        # Invalid exporters must not consume the harness protocol response.
+        _LOGGER.warning('Telemetry initialization failed (%s)', type(exc).__name__)
+        initialized = False
+    if not initialized:
         _emit_stdout_response(event_name, ide, data)
         return 0
 
-    tracer = trace.get_tracer("ide-hooks")
+    tracer = trace.get_tracer("ide-hooks", _hook_distro_attributes().get("telemetry.distro.version"))
     # Codex only allows up to three seconds for these callbacks. Spend that
     # budget on the current session, leaving stale maintenance to other hooks.
     if not (ide == "codex" and event_name in {"SessionEnd", "Interrupt"}):
@@ -5460,6 +2768,11 @@ def main() -> int:
             # SessionEnd: emit session root span, clean up
             if event_name in _SESSION_END_EVENTS:
                 if sk:
+                    with _acquire_lock(_session_lock_path(sk)):
+                        key = f"{sk}_session"
+                        if not any(entry.get("data", {}).get("_hook_event_id") == data.get("_hook_event_id")
+                                   for entry in _load_batch_events(key)):
+                            _append_batch_event(key, event_name, data)
                     _finalize_session(tracer, sk, session_ctx, ide)
                 _emit_stdout_response(event_name, ide, data)
                 return 0
@@ -5467,7 +2780,7 @@ def main() -> int:
             # Sessionless runners cannot use the persisted batch lifecycle.
             parent_ctx = _event_parent_trace_context(data, session_ctx)
             with tracer.start_as_current_span(
-                f"gen_ai.client.hook.{event_name}", kind=SpanKind.INTERNAL,
+                f"o11y.client.hook.{event_name}", kind=SpanKind.INTERNAL,
                 context=parent_ctx,
                 links=_event_span_links(data, session_ctx),
             ) as span:
@@ -5497,21 +2810,28 @@ def main() -> int:
         if sk and event_name not in _SESSION_START_EVENTS and event_name not in _SESSION_END_EVENTS:
             streaming_decision = _prepare_streaming_session_event(sk, event_name, data, ide)
             if streaming_decision.duplicate:
-                _emit_stdout_response(event_name, ide, streaming_decision.data)
-                return 0
+                if not (session_ctx or {}).get('stream_outbox'):
+                    _emit_stdout_response(event_name, ide, streaming_decision.data)
+                    return 0
+                streaming_decision.data['_replay_only'] = True
             data = streaming_decision.data
             session_ctx = _load_session_context(sk) or session_ctx
             if streaming_decision.correlated:
                 data = dict(data)
                 data["_mcp_correlated_evidence"] = True
 
-        with tracer.start_as_current_span(
-            f"gen_ai.client.hook.{event_name}", kind=SpanKind.INTERNAL,
-            context=parent_ctx,
-            links=_event_span_links(data, session_ctx),
-        ) as span:
-            _populate_span(span, event_name, data, ide, session_ctx=session_ctx)
-            _remember_agent_span_context(sk, session_ctx, event_name, data, span)
+        if sk:
+            if not _emit_streaming_event(tracer, sk, event_name, data, ide,
+                                         streaming_decision.generation_key if streaming_decision else None):
+                _emit_stdout_response(event_name, ide, data)
+                return 0
+        else:
+            with tracer.start_as_current_span(
+                f"o11y.client.hook.{event_name}", kind=SpanKind.INTERNAL,
+                context=parent_ctx, links=_event_span_links(data, session_ctx),
+            ) as span:
+                span.set_attribute('o11y.timing.basis', 'hook_execution')
+                _populate_span(span, event_name, data, ide, session_ctx=session_ctx)
 
         if (
             event_name in _GENERATION_END_EVENTS
@@ -5540,1028 +2860,6 @@ def main() -> int:
     return 0
 
 
-# ---------------------------------------------------------------------------
-# Setup CLI: helpers
-# ---------------------------------------------------------------------------
-
-_REPO_MARKERS = (".git", ".github", ".cursor", ".claude", ".gemini", ".codex", ".opencode", ".windsurf")
-
-
-def _find_repo_root(cwd: str) -> str:
-    """Walk up from cwd to find the nearest repo/project root.
-
-    Tries `git rev-parse --show-toplevel` first (handles worktrees where .git
-    is a file rather than a directory), then falls back to marker detection.
-    """
-    # Fast path: ask git (works for worktrees too)
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"],
-            cwd=os.path.abspath(cwd),
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if result.returncode == 0:
-            return result.stdout.strip()
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        # git not installed, timed out, or environment error — non-fatal, use marker walk
-        pass
-    # Fallback: walk up looking for well-known markers (os.path.exists handles
-    # both regular dirs and file-form .git used by worktrees/submodules)
-    current = os.path.abspath(cwd)
-    while True:
-        for marker in _REPO_MARKERS:
-            if os.path.exists(os.path.join(current, marker)):
-                return current
-        parent = os.path.dirname(current)
-        if parent == current:
-            return os.path.abspath(cwd)
-        current = parent
-
-
-def _resolve_hook_cmd() -> str:
-    return shutil.which("otel-hook") or "otel-hook"
-
-
-def _hook_cmd_for_agent(agent: str) -> str:
-    return f"{_resolve_hook_cmd()} --{agent}"
-
-
-def _load_json_file(path: str) -> dict:
-    if os.path.exists(path):
-        with open(path) as f:
-            try:
-                return json.load(f)
-            except json.JSONDecodeError as exc:
-                raise click.ClickException(f"Invalid JSON in {path}: {exc}") from exc
-    return {}
-
-
-def _write_json_file(path: str, data: dict) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w") as f:
-        json.dump(data, f, indent=2)
-        f.write("\n")
-
-
-def _ensure_toml_bool(path: str, section: str, key: str, value: bool) -> None:
-    """Set a boolean in a simple TOML section while preserving unrelated text."""
-    desired = "true" if value else "false"
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    if os.path.exists(path):
-        with open(path) as f:
-            lines = f.readlines()
-    else:
-        lines = []
-
-    section_header = f"[{section}]"
-    section_start = None
-    section_end = len(lines)
-    section_re = re.compile(r"^\s*\[.*\]\s*$")
-    for index, line in enumerate(lines):
-        if line.strip() == section_header:
-            section_start = index
-            section_end = len(lines)
-            for probe in range(index + 1, len(lines)):
-                if section_re.match(lines[probe]):
-                    section_end = probe
-                    break
-            break
-
-    new_line = f"{key} = {desired}\n"
-    if section_start is None:
-        if lines and lines[-1].strip():
-            lines.append("\n")
-        lines.extend([f"{section_header}\n", new_line])
-    else:
-        key_re = re.compile(rf"^\s*{re.escape(key)}\s*=")
-        for index in range(section_start + 1, section_end):
-            if key_re.match(lines[index]):
-                if lines[index] == new_line:
-                    return
-                lines[index] = new_line
-                break
-        else:
-            lines.insert(section_end, new_line)
-
-    with open(path, "w") as f:
-        f.writelines(lines)
-
-
-def _remove_toml_key(path: str, section: str, key: str) -> None:
-    """Remove a key from a simple TOML section while preserving unrelated text."""
-    if not os.path.exists(path):
-        return
-    with open(path) as f:
-        lines = f.readlines()
-
-    section_header = f"[{section}]"
-    section_start = None
-    section_end = len(lines)
-    section_re = re.compile(r"^\s*\[.*\]\s*$")
-    for index, line in enumerate(lines):
-        if line.strip() == section_header:
-            section_start = index
-            section_end = len(lines)
-            for probe in range(index + 1, len(lines)):
-                if section_re.match(lines[probe]):
-                    section_end = probe
-                    break
-            break
-
-    if section_start is None:
-        return
-
-    key_re = re.compile(rf"^\s*{re.escape(key)}\s*=")
-    new_lines = []
-    removed = False
-    for index, line in enumerate(lines):
-        if section_start < index < section_end and key_re.match(line):
-            removed = True
-            continue
-        new_lines.append(line)
-
-    if not removed:
-        return
-
-    with open(path, "w") as f:
-        f.writelines(new_lines)
-
-
-def _detect_available_agents() -> list:
-    """Return list of agent names whose home dirs or commands exist."""
-    found = []
-    home = os.path.expanduser("~")
-    if os.path.isdir(os.path.join(home, ".cursor")) or shutil.which("cursor"):
-        found.append("cursor")
-    if os.path.isdir(os.path.join(home, ".claude")) or shutil.which("claude"):
-        found.append("claude")
-    # Copilot: detect via gh CLI or a .github dir in the current working directory
-    if shutil.which("gh") or os.path.isdir(os.path.join(os.getcwd(), ".github")):
-        found.append("copilot")
-    if os.path.isdir(os.path.join(home, ".gemini")) or shutil.which("gemini"):
-        found.append("gemini")
-    if shutil.which("opencode") or os.path.isdir(os.path.join(home, ".config", "opencode")):
-        found.append("opencode")
-    if os.path.isdir(os.path.join(home, ".codeium", "windsurf")) or shutil.which("windsurf"):
-        found.append("windsurf")
-    if os.path.isdir(os.path.join(home, ".codex")) or shutil.which("codex"):
-        found.append("codex")
-    return found
-
-
-def _find_opencode_plugin_source() -> Optional[str]:
-    """Return the absolute path to the bundled plugin/opencode.ts source file.
-
-    Looks next to otel_hook.py first (source checkout), then in the installed
-    package data location (pipx / pip install).
-    """
-    # Source checkout: plugin/ lives next to otel_hook.py
-    candidate = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plugin", _OPENCODE_PLUGIN_SOURCE_FILENAME)
-    if os.path.isfile(candidate):
-        return candidate
-    # Installed package data: setuptools places data files under <prefix>/share/
-    # Check the venv that contains this very module (handles pipx venvs correctly),
-    # then sys.prefix, then ~/.local as a last-resort fallback.
-    import sys
-    module_file = os.path.abspath(__file__)
-    # Walk up from the module file to find a share/ sibling (handles any venv layout)
-    check = os.path.dirname(module_file)
-    for _ in range(6):  # at most 6 levels up
-        share_candidate = os.path.join(check, "share", "opentelemetry-hooks", "plugin", _OPENCODE_PLUGIN_SOURCE_FILENAME)
-        if os.path.isfile(share_candidate):
-            return share_candidate
-        parent = os.path.dirname(check)
-        if parent == check:
-            break
-        check = parent
-    # Fallbacks: sys.prefix, sys.real_prefix, ~/.local
-    for prefix in (sys.prefix, getattr(sys, "real_prefix", None), os.path.expanduser("~/.local")):
-        if not prefix:
-            continue
-        data_candidate = os.path.join(prefix, "share", "opentelemetry-hooks", "plugin", _OPENCODE_PLUGIN_SOURCE_FILENAME)
-        if os.path.isfile(data_candidate):
-            return data_candidate
-    return None
-
-
-# ---------------------------------------------------------------------------
-# Setup CLI: per-agent setup functions (public API, importable)
-# ---------------------------------------------------------------------------
-
-def _configure_managed_hook_command(hook: dict, source: str) -> bool:
-    """Stamp a setup-managed hook command with the source-agent CLI flag."""
-    desired_cmd = _hook_cmd_for_agent(source)
-    changed = False
-    if hook.get("command") != desired_cmd:
-        hook["command"] = desired_cmd
-        changed = True
-    env = hook.get("env")
-    if isinstance(env, dict):
-        next_env = dict(env)
-        next_env.pop("IDE_OTEL_IDE_NAME", None)
-        next_env.pop(_MANAGED_HOOK_SOURCE_ENV, None)
-        if next_env:
-            if next_env != env:
-                hook["env"] = next_env
-                changed = True
-        else:
-            hook.pop("env", None)
-            changed = True
-    return changed
-
-
-def setup_cursor(global_: bool = True, cwd: str = ".") -> None:
-    """Register otel-hook in Cursor's hooks.json."""
-    hook_cmd = _resolve_hook_cmd()
-    if global_:
-        hooks_path = os.path.join(os.path.expanduser("~"), ".cursor", "hooks.json")
-    else:
-        repo = _find_repo_root(cwd)
-        hooks_path = os.path.join(repo, ".cursor", "hooks.json")
-
-    doc = _load_json_file(hooks_path)
-    doc.setdefault("version", 1)
-    hooks = doc.setdefault("hooks", {})
-    added, updated, skipped = [], [], []
-
-    for event in _CURSOR_EVENTS:
-        event_hooks = hooks.setdefault(event, [])
-        matches = [h for h in event_hooks if "otel-hook" in h.get("command", "") or "otel_hook" in h.get("command", "")]
-        if matches:
-            changed = False
-            for hook in matches:
-                changed = _configure_managed_hook_command(hook, "cursor") or changed
-            (updated if changed else skipped).append(event)
-        else:
-            hook = {"command": hook_cmd}
-            _configure_managed_hook_command(hook, "cursor")
-            event_hooks.append(hook)
-            added.append(event)
-
-    _write_json_file(hooks_path, doc)
-    _log_setup_result("cursor", hooks_path, added, updated, skipped)
-
-
-def setup_windsurf(global_: bool = True, cwd: str = ".") -> None:
-    """Register native Cascade hooks (also supported by Devin Desktop)."""
-    hook_cmd = _resolve_hook_cmd()
-    if global_:
-        hooks_path = os.path.join(os.path.expanduser("~"), ".codeium", "windsurf", "hooks.json")
-    else:
-        repo = _find_repo_root(cwd)
-        hooks_path = os.path.join(repo, ".windsurf", "hooks.json")
-        devin_path = os.path.join(repo, ".devin", "hooks.json")
-        if _load_json_file(devin_path).get("hooks"):
-            hooks_path = devin_path
-
-    doc = _load_json_file(hooks_path)
-    hooks = doc.setdefault("hooks", {})
-    added, updated, skipped = [], [], []
-
-    for event in _WINDSURF_EVENTS:
-        event_hooks = hooks.setdefault(event, [])
-        matches = [h for h in event_hooks if "otel-hook" in h.get("command", "") or "otel_hook" in h.get("command", "")]
-        if matches:
-            changed = False
-            for hook in matches:
-                changed = _configure_managed_hook_command(hook, "windsurf") or changed
-            (updated if changed else skipped).append(event)
-        else:
-            hook = {"command": hook_cmd}
-            _configure_managed_hook_command(hook, "windsurf")
-            event_hooks.append(hook)
-            added.append(event)
-
-    _write_json_file(hooks_path, doc)
-    _log_setup_result("windsurf", hooks_path, added, updated, skipped)
-
-
-def setup_claude(global_: bool = True, cwd: str = ".") -> None:
-    """Register otel-hook in Claude Code's settings.json."""
-    hook_cmd = _resolve_hook_cmd()
-    if global_:
-        settings_path = os.path.join(os.path.expanduser("~"), ".claude", "settings.json")
-    else:
-        repo = _find_repo_root(cwd)
-        settings_path = os.path.join(repo, ".claude", "settings.json")
-
-    settings = _load_json_file(settings_path)
-    hooks = settings.setdefault("hooks", {})
-    added, updated, skipped = [], [], []
-
-    for event in _CLAUDE_EVENTS:
-        event_list = hooks.setdefault(event, [])
-        others, exact = [], []
-        desired_cmd = _hook_cmd_for_agent("claude")
-        for entry in event_list:
-            for h in entry.get("hooks", []):
-                cmd = h.get("command", "")
-                if "otel_hook" in cmd or "otel-hook" in cmd:
-                    (exact if cmd == desired_cmd else others).append(h)
-
-        if exact:
-            changed = False
-            for hook in exact:
-                changed = _configure_managed_hook_command(hook, "claude") or changed
-            (updated if changed else skipped).append(event)
-            continue
-
-        if others:
-            for hook in others:
-                _configure_managed_hook_command(hook, "claude")
-            updated.append(event)
-            continue
-
-        hook = {"type": "command", "command": hook_cmd}
-        _configure_managed_hook_command(hook, "claude")
-        hook_entry: dict = {"hooks": [hook]}
-        if event in _CLAUDE_MATCHER_EVENTS:
-            hook_entry["matcher"] = "*"
-        event_list.append(hook_entry)
-        added.append(event)
-
-    _write_json_file(settings_path, settings)
-    _log_setup_result("claude", settings_path, added, updated, skipped)
-
-
-def setup_copilot(cwd: str = ".", global_: bool = False) -> None:
-    """Register otel-hook in GitHub Copilot's otel-hooks.json."""
-    hook_cmd = _hook_cmd_for_agent("copilot")
-    repo = _find_repo_root(cwd)
-    hooks_path = os.path.join(repo, ".github", "hooks", "otel-hooks.json")
-    if global_:
-        copilot_home = os.getenv("COPILOT_HOME") or os.path.join(os.path.expanduser("~"), ".copilot")
-        hooks_path = os.path.join(copilot_home, "hooks", "otel-hooks.json")
-
-    doc = _load_json_file(hooks_path)
-    doc.setdefault("version", 1)
-    hooks = doc.setdefault("hooks", {})
-    added, updated, skipped = [], [], []
-
-    for event in _COPILOT_EVENTS:
-        # Native Copilot callbacks do not carry hook_event_name.
-        event_cmd = f"{hook_cmd} --event {event}"
-        event_hooks = hooks.setdefault(event, [])
-        plain = [h for h in event_hooks if "otel-hook" in h.get("bash", "") or "otel_hook" in h.get("bash", "")]
-        if plain:
-            changed = any("timeoutSec" not in h or h.get("bash") != event_cmd for h in plain)
-            for h in plain:
-                h["bash"] = event_cmd
-                h.setdefault("timeoutSec", 30)
-            (updated if changed else skipped).append(event)
-            continue
-
-        event_hooks.append({"type": "command", "bash": event_cmd, "timeoutSec": 30})
-        added.append(event)
-
-    _write_json_file(hooks_path, doc)
-    _log_setup_result("copilot", hooks_path, added, updated, skipped)
-
-
-def setup_gemini(global_: bool = True, cwd: str = ".") -> None:
-    """Register otel-hook in Gemini CLI's settings.json."""
-    hook_cmd = _resolve_hook_cmd()
-    if global_:
-        settings_path = os.path.join(os.path.expanduser("~"), ".gemini", "settings.json")
-    else:
-        repo = _find_repo_root(cwd)
-        settings_path = os.path.join(repo, ".gemini", "settings.json")
-
-    settings = _load_json_file(settings_path)
-    hooks = settings.setdefault("hooks", {})
-    added, updated, skipped = [], [], []
-
-    for event in _GEMINI_EVENTS:
-        event_list = hooks.setdefault(event, [])
-        others, exact = [], []
-        desired_cmd = _hook_cmd_for_agent("gemini")
-        for entry in event_list:
-            for h in entry.get("hooks", []):
-                cmd = h.get("command", "")
-                if "otel_hook" in cmd or "otel-hook" in cmd:
-                    (exact if cmd == desired_cmd else others).append(h)
-
-        if exact:
-            changed = False
-            for hook in exact:
-                changed = _configure_managed_hook_command(hook, "gemini") or changed
-            (updated if changed else skipped).append(event)
-            continue
-
-        if others:
-            for hook in others:
-                _configure_managed_hook_command(hook, "gemini")
-            updated.append(event)
-            continue
-
-        hook = {"type": "command", "command": hook_cmd, "name": "otel-hook"}
-        _configure_managed_hook_command(hook, "gemini")
-        hook_entry: dict = {"hooks": [hook]}
-        if event in _GEMINI_MATCHER_EVENTS:
-            hook_entry["matcher"] = "*"
-        event_list.append(hook_entry)
-        added.append(event)
-
-    _write_json_file(settings_path, settings)
-    _log_setup_result("gemini", settings_path, added, updated, skipped)
-
-
-def setup_codex(global_: bool = True, cwd: str = ".") -> None:
-    """Register otel-hook in Codex's hooks.json and enable Codex hooks."""
-    hook_cmd = _resolve_hook_cmd()
-    if global_:
-        codex_dir = os.path.join(os.path.expanduser("~"), ".codex")
-    else:
-        repo = _find_repo_root(cwd)
-        codex_dir = os.path.join(repo, ".codex")
-
-    hooks_path = os.path.join(codex_dir, "hooks.json")
-    config_path = os.path.join(codex_dir, "config.toml")
-    _ensure_toml_bool(config_path, "features", "hooks", True)
-    _remove_toml_key(config_path, "features", "codex_hooks")
-
-    doc = _load_json_file(hooks_path)
-    hooks = doc.setdefault("hooks", {})
-    added, updated, skipped = [], [], []
-
-    for event in _CODEX_EVENTS:
-        timeout = 3 if event in {"SessionEnd", "Interrupt"} else 30
-        event_list = hooks.setdefault(event, [])
-        matcher = _CODEX_MATCHERS.get(event)
-        if event == "SessionStart":
-            # Move only our legacy registration, even if the new one already exists.
-            for entry in list(event_list):
-                if entry.get("matcher") == "startup|resume|clear":
-                    entry["hooks"] = [h for h in entry.get("hooks", []) if not any(token in h.get("command", "") for token in ("otel-hook", "otel_hook"))]
-                    if not entry["hooks"]:
-                        event_list.remove(entry)
-        matches = []
-        for entry in event_list:
-            if matcher is not None and entry.get("matcher", "") != matcher:
-                continue
-            if matcher is None and "matcher" in entry:
-                continue
-            for h in entry.get("hooks", []):
-                cmd = h.get("command", "")
-                if "otel_hook" in cmd or "otel-hook" in cmd:
-                    matches.append(h)
-
-        if matches:
-            changed = False
-            desired_cmd = _hook_cmd_for_agent("codex")
-            for hook in matches:
-                if hook.get("command") != desired_cmd:
-                    hook["command"] = desired_cmd
-                    changed = True
-                if hook.get("type") != "command":
-                    hook["type"] = "command"
-                    changed = True
-                if "timeout" not in hook or (event in {"SessionEnd", "Interrupt"} and hook["timeout"] != timeout):
-                    hook["timeout"] = timeout
-                    changed = True
-                changed = _configure_managed_hook_command(hook, "codex") or changed
-            (updated if changed else skipped).append(event)
-            continue
-
-        hook = {"type": "command", "command": hook_cmd, "timeout": timeout}
-        _configure_managed_hook_command(hook, "codex")
-        hook_entry: dict = {
-            "hooks": [hook]
-        }
-        if matcher is not None:
-            hook_entry["matcher"] = matcher
-        event_list.append(hook_entry)
-        added.append(event)
-
-    _write_json_file(hooks_path, doc)
-    if added or updated:
-        click.echo(f"  ✓ [codex] Enabled hooks feature ({config_path})")
-    _log_setup_result("codex", hooks_path, added, updated, skipped)
-
-
-def setup_opencode(global_: bool = True, cwd: str = ".") -> None:
-    """Install the otel-hook TypeScript plugin into OpenCode's plugins directory.
-
-    Global install (default): ~/.config/opencode/plugins/otel-hook.ts
-    Project install:           <repo>/.opencode/plugins/otel-hook.ts
-    """
-    src = _find_opencode_plugin_source()
-    if src is None:
-        raise click.ClickException(
-            "Cannot find plugin/opencode.ts — ensure the opentelemetry-hooks package "
-            "is installed correctly (pip install opentelemetry-hooks)."
-        )
-
-    home = os.path.expanduser("~")
-    if global_:
-        plugins_dir = os.path.join(home, ".config", "opencode", "plugins")
-    else:
-        repo = _find_repo_root(cwd)
-        plugins_dir = os.path.join(repo, ".opencode", "plugins")
-
-    dest = os.path.join(plugins_dir, _OPENCODE_PLUGIN_FILENAME)
-
-    # Check if already installed and identical
-    if os.path.isfile(dest):
-        with open(src) as f:
-            src_content = f.read()
-        with open(dest) as f:
-            dest_content = f.read()
-        if src_content == dest_content:
-            click.echo(f"  · [opencode] Already up to date ({dest})")
-            return
-        # Content differs — update
-        os.makedirs(plugins_dir, exist_ok=True)
-        shutil.copy2(src, dest)
-        click.echo(f"  ✓ [opencode] Updated plugin ({dest})")
-        return
-
-    os.makedirs(plugins_dir, exist_ok=True)
-    shutil.copy2(src, dest)
-    click.echo(f"  ✓ [opencode] Installed plugin ({dest})")
-
-
-def setup_agent(agent: str, global_: bool = True, cwd: str = ".") -> None:
-    """Dispatcher: configure hooks for a single agent by name."""
-    if agent == "cursor":
-        setup_cursor(global_=global_, cwd=cwd)
-    elif agent == "windsurf":
-        setup_windsurf(global_=global_, cwd=cwd)
-    elif agent == "claude":
-        setup_claude(global_=global_, cwd=cwd)
-    elif agent == "copilot":
-        setup_copilot(cwd=cwd, global_=global_)
-    elif agent == "gemini":
-        setup_gemini(global_=global_, cwd=cwd)
-    elif agent == "codex":
-        setup_codex(global_=global_, cwd=cwd)
-    elif agent == "opencode":
-        setup_opencode(global_=global_, cwd=cwd)
-    else:
-        raise ValueError(f"Unknown agent: {agent}")
-
-
-def _log_setup_result(agent: str, path: str, added: list, updated: list, skipped: list) -> None:
-    if added:
-        click.echo(f"  ✓ [{agent}] Added {len(added)} events ({path})")
-    if updated:
-        click.echo(f"  ✓ [{agent}] Updated {len(updated)} events")
-    if not added and not updated:
-        click.echo(f"  · [{agent}] Already up to date ({path})")
-
-
-# ---------------------------------------------------------------------------
-# CLI entry point
-# ---------------------------------------------------------------------------
-
-@click.group(invoke_without_command=True)
-@click.option("--cursor", "hook_source", flag_value="cursor", default=None, help="Run hook as Cursor.")
-@click.option("--windsurf", "hook_source", flag_value="windsurf", help="Run hook as Windsurf.")
-@click.option("--claude", "hook_source", flag_value="claude", help="Run hook as Claude Code.")
-@click.option("--copilot", "hook_source", flag_value="copilot", help="Run hook as GitHub Copilot.")
-@click.option("--gemini", "hook_source", flag_value="gemini", help="Run hook as Gemini CLI.")
-@click.option("--codex", "hook_source", flag_value="codex", help="Run hook as Codex CLI.")
-@click.option("--opencode", "hook_source", flag_value="opencode", help="Run hook as OpenCode.")
-@click.option("--event", "hook_event", default=None, help="Hook event name for runners that omit it from stdin.")
-@click.pass_context
-def cli(ctx: click.Context, hook_source: Optional[str], hook_event: Optional[str]) -> None:
-    """otel-hook — OpenTelemetry hook runner and setup CLI for AI coding agents.
-
-    When called with no subcommand and piped stdin, runs as the hook runner
-    (IDE event JSON → OTel spans). Use subcommands to configure agent hooks.
-    """
-    global _CLI_HOOK_SOURCE, _CLI_HOOK_EVENT
-    _CLI_HOOK_SOURCE = hook_source
-    _CLI_HOOK_EVENT = hook_event
-    if ctx.invoked_subcommand is None:
-        if not sys.stdin.isatty():
-            raise SystemExit(main())
-        else:
-            click.echo(ctx.get_help())
-
-
-@cli.command("setup")
-@click.option(
-    "--agent", "agents",
-    type=click.Choice(["cursor", "windsurf", "claude", "copilot", "gemini", "codex", "opencode"]),
-    multiple=True,
-    help="Agent to configure. Omit to auto-detect all available agents.",
-)
-@click.option("--global/--no-global", "global_", default=True, show_default=True,
-              help="Install to global agent config (~/.claude, ~/.cursor, etc.)")
-@click.option("--cwd", default=".", show_default=True,
-              help="Project root for project-scoped installs.")
-def setup_cmd(agents: tuple, global_: bool, cwd: str) -> None:
-    """Register otel-hook in one or more AI agent configs."""
-    targets = list(agents) or _detect_available_agents()
-    if not targets:
-        click.echo("No agents detected. Use --agent cursor|windsurf|claude|copilot|gemini|codex|opencode to specify one.", err=True)
-        raise SystemExit(1)
-    errors = []
-    for agent in targets:
-        try:
-            setup_agent(agent, global_=global_, cwd=cwd)
-        except Exception as exc:
-            click.echo(f"  ✗ [{agent}] {exc}", err=True)
-            errors.append(agent)
-    if errors:
-        raise SystemExit(1)
-
-
-_SUPPORTED_AGENTS = ("cursor", "windsurf", "claude", "copilot", "gemini", "codex", "opencode")
-
-
-def _agent_config_paths(global_: bool, cwd: str) -> dict[str, str]:
-    home = os.path.expanduser("~")
-    repo_root = _find_repo_root(cwd)
-    return {
-        "cursor": os.path.join(home, ".cursor", "hooks.json") if global_ else os.path.join(repo_root, ".cursor", "hooks.json"),
-        "windsurf": os.path.join(home, ".codeium", "windsurf", "hooks.json") if global_ else (
-            os.path.join(repo_root, ".devin", "hooks.json") if _load_json_file(os.path.join(repo_root, ".devin", "hooks.json")).get("hooks")
-            else os.path.join(repo_root, ".windsurf", "hooks.json")
-        ),
-        "claude": os.path.join(home, ".claude", "settings.json") if global_ else os.path.join(repo_root, ".claude", "settings.json"),
-        "copilot": os.path.join(os.getenv("COPILOT_HOME") or os.path.join(home, ".copilot"), "hooks", "otel-hooks.json") if global_ else os.path.join(repo_root, ".github", "hooks", "otel-hooks.json"),
-        "gemini": os.path.join(home, ".gemini", "settings.json") if global_ else os.path.join(repo_root, ".gemini", "settings.json"),
-        "codex": os.path.join(home, ".codex", "hooks.json") if global_ else os.path.join(repo_root, ".codex", "hooks.json"),
-        "opencode": (
-            os.path.join(home, ".config", "opencode", "plugins", _OPENCODE_PLUGIN_FILENAME)
-            if global_
-            else os.path.join(repo_root, ".opencode", "plugins", _OPENCODE_PLUGIN_FILENAME)
-        ),
-    }
-
-
-def _registered_hook_events(agent: str, path: str) -> list[str]:
-    if agent == "opencode":
-        return ["plugin"] if os.path.isfile(path) else []
-    if not os.path.exists(path):
-        return []
-    doc = _load_json_file(path)
-    hooks = doc.get("hooks", {})
-    enabled = set()
-    for event_name, entries in hooks.items():
-        for entry in entries if isinstance(entries, list) else []:
-            for field in ("command", "bash"):
-                command = entry.get(field, "")
-                if "otel-hook" in command or "otel_hook" in command:
-                    enabled.add(event_name)
-            for nested in entry.get("hooks", []):
-                command = nested.get("command", "")
-                if "otel-hook" in command or "otel_hook" in command:
-                    enabled.add(event_name)
-    return sorted(enabled)
-
-
-def _pending_state_summary() -> dict:
-    def files(directory: str, pattern: str) -> list[str]:
-        return glob.glob(os.path.join(directory, pattern)) if os.path.isdir(directory) else []
-
-    sessions = files(_SESSION_DIR, "*.json")
-    batches = files(_BATCH_DIR, "*.jsonl")
-    locks = files(_LOCK_DIR, "*.lock")
-    mtimes = [os.path.getmtime(path) for path in sessions + batches if os.path.exists(path)]
-    oldest_age = max(0, int(time.time() - min(mtimes))) if mtimes else 0
-    return {
-        "sessions": len(sessions),
-        "batches": len(batches),
-        "locks": len(locks),
-        "oldest_pending_age_seconds": oldest_age,
-        "state_directory_writable": os.access(_STATE_DIR, os.W_OK) if os.path.exists(_STATE_DIR) else os.access(_HOOK_DIR, os.W_OK),
-    }
-
-
-def _doctor_report(agents: tuple, global_: bool, cwd: str) -> tuple[dict, int]:
-    targets = list(agents) or list(_SUPPORTED_AGENTS)
-    paths = _agent_config_paths(global_, cwd)
-    registrations = []
-    for agent in targets:
-        path = paths[agent]
-        enabled_events = _registered_hook_events(agent, path)
-        registrations.append({
-            "agent": agent,
-            "path": path,
-            "registered_events": len(enabled_events),
-            "enabled_events": enabled_events,
-        })
-
-    endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
-    health = _load_delivery_health()
-    signal_health = health.get("signals", {}) if isinstance(health, dict) else {}
-    logs_enabled = _safe_bool(os.getenv("IDE_OTEL_ENABLE_LOGS", "true"))
-
-    def signal_failed_recently(signal: str) -> bool:
-        record = signal_health.get(signal, {})
-        return bool(
-            isinstance(record, dict)
-            and record.get("last_failure_at_ns", 0)
-            >= record.get("last_success_at_ns", 0)
-            and record.get("last_failure_at_ns")
-        )
-
-    exporter_status = "disabled"
-    if endpoint:
-        exporter_status = "configured_unknown"
-        traces = signal_health.get("traces", {})
-        if signal_failed_recently("traces") or (logs_enabled and signal_failed_recently("logs")):
-            exporter_status = "failing_recent"
-        elif traces.get("last_success_at_ns"):
-            exporter_status = "healthy_recent"
-    elif _local_spans_enabled():
-        exporter_status = "local_only"
-
-    failures = []
-    for signal, record in signal_health.items():
-        if not isinstance(record, dict):
-            continue
-        if record.get("last_failure_at_ns", 0) >= record.get("last_success_at_ns", 0) and record.get("last_failure_at_ns"):
-            failures.append({
-                "signal": signal,
-                "at_ns": record.get("last_failure_at_ns"),
-                "endpoint": record.get("endpoint"),
-                "error": record.get("last_error"),
-            })
-
-    distro = _hook_distro_attributes()
-    report = {
-        "schema_version": 1,
-        "status": "healthy",
-        "package": {
-            "name": "opentelemetry-hooks",
-            "version": distro.get("telemetry.distro.version", "source-checkout"),
-            "executable": shutil.which("otel-hook"),
-        },
-        "detected_agent": _detect_ide({}),
-        "hook_schema_version": _HOOK_SCHEMA_VERSION,
-        "registrations": registrations,
-        "privacy": {
-            "conversation_content": _conversation_content_enabled(),
-            "conversation_logs": _safe_bool(os.getenv("IDE_OTEL_ENABLE_CONVERSATION_LOGS", "")),
-            "tool_input_content": _safe_bool(os.getenv("IDE_OTEL_CAPTURE_TOOL_INPUT_CONTENT", "")),
-            "user_identity": _safe_bool(os.getenv("IDE_OTEL_CAPTURE_USER_IDENTITY", "")),
-            "masking": _safe_bool(os.getenv("IDE_OTEL_MASK_PROMPTS", "")),
-        },
-        "exporter": {
-            "status": exporter_status,
-            "protocol": (os.getenv("OTEL_EXPORTER_OTLP_PROTOCOL") or "grpc").lower(),
-            "endpoint": _sanitized_exporter_endpoint(endpoint),
-            "logs_enabled": logs_enabled,
-            "headers_present": bool(os.getenv("OTEL_EXPORTER_OTLP_HEADERS")),
-        },
-        "state": _pending_state_summary(),
-        "recent_delivery_failures": failures,
-    }
-    warnings = []
-    if not any(item["registered_events"] for item in registrations):
-        warnings.append("no requested agent hooks are registered")
-    if exporter_status in {"disabled", "failing_recent"}:
-        warnings.append("authoritative trace exporter or enabled log exporter is not healthy")
-    if not report["state"]["state_directory_writable"]:
-        warnings.append("hook state directory is not writable")
-    if warnings:
-        report["status"] = "degraded"
-        report["warnings"] = warnings
-        return report, 1
-    return report, 0
-
-
-def _doctor_human_lines(report: dict) -> list[str]:
-    """Render complete or minimal doctor reports without raising another error."""
-    status = report.get("status") or "unknown"
-    lines = [f"otel-hook doctor: {status}"]
-    error = report.get("error")
-    if status == "error" or isinstance(error, dict):
-        error_type = error.get("type") if isinstance(error, dict) else None
-        lines.append(f"  error: {error_type or 'InternalError'}")
-        return lines
-
-    package = report.get("package") or {}
-    lines.append(
-        f"  package: {package.get('version', 'unknown')} "
-        f"({package.get('executable') or 'not on PATH'})"
-    )
-    lines.append(f"  detected agent: {report.get('detected_agent') or 'unknown'}")
-    for registration in report.get("registrations") or []:
-        if not isinstance(registration, dict):
-            continue
-        lines.append(
-            f"  [{registration.get('agent', 'unknown')}] "
-            f"{registration.get('registered_events', 0)} events "
-            f"({registration.get('path') or 'unknown path'})"
-        )
-    exporter = report.get("exporter") or {}
-    lines.append(
-        f"  exporter: {exporter.get('status', 'unknown')} "
-        f"({exporter.get('endpoint') or 'no endpoint'})"
-    )
-    state = report.get("state") or {}
-    lines.append(
-        f"  state: {state.get('sessions', 0)} sessions, "
-        f"{state.get('batches', 0)} batches"
-    )
-    for warning in report.get("warnings") or []:
-        lines.append(f"  warning: {warning}")
-    return lines
-
-
-@cli.command("doctor")
-@click.option(
-    "--agent", "agents",
-    type=click.Choice(list(_SUPPORTED_AGENTS)),
-    multiple=True,
-    help="Agent to inspect. Omit to inspect all.",
-)
-@click.option("--global/--no-global", "global_", default=True)
-@click.option("--cwd", default=".")
-@click.option("--json", "json_output", is_flag=True, help="Emit a stable machine-readable report.")
-def doctor_cmd(agents: tuple, global_: bool, cwd: str, json_output: bool) -> None:
-    """Inspect hook registration, privacy, exporter health, and pending state."""
-    try:
-        report, exit_code = _doctor_report(agents, global_, cwd)
-    except Exception as exc:
-        report = {
-            "schema_version": 1,
-            "status": "error",
-            "error": {"type": type(exc).__name__},
-        }
-        exit_code = 2
-    if json_output:
-        click.echo(json.dumps(report, ensure_ascii=True, sort_keys=True))
-    else:
-        for line in _doctor_human_lines(report):
-            click.echo(line)
-    if exit_code:
-        raise SystemExit(exit_code)
-
-
-@cli.command("diagnose")
-@click.option(
-    "--agent", "agents",
-    type=click.Choice(["cursor", "windsurf", "claude", "copilot", "gemini", "codex", "opencode"]),
-    multiple=True,
-    help="Agent to check. Omit to check all.",
-)
-@click.option("--global/--no-global", "global_", default=True)
-@click.option("--cwd", default=".")
-def diagnose_cmd(agents: tuple, global_: bool, cwd: str) -> None:
-    """Show hook registration status for each agent."""
-    targets = list(agents) or list(_SUPPORTED_AGENTS)
-    paths = _agent_config_paths(global_, cwd)
-
-    for agent in targets:
-        path = paths[agent]
-        if agent == "opencode":
-            if os.path.isfile(path):
-                click.echo(f"  ✓ [opencode] Plugin installed ({path})")
-            else:
-                click.echo(f"  · [opencode] Not installed ({path})")
-            continue
-        if not os.path.exists(path):
-            click.echo(f"  · [{agent}] Not found ({path})")
-            continue
-        doc = _load_json_file(path)
-        hooks = doc.get("hooks", {})
-        count = 0
-        for entries in hooks.values():
-            for entry in (entries if isinstance(entries, list) else []):
-                # cursor: {"command": "otel-hook"}
-                if "otel-hook" in entry.get("command", "") or "otel_hook" in entry.get("command", ""):
-                    count += 1
-                # copilot: {"bash": "otel-hook"}
-                if "otel-hook" in entry.get("bash", "") or "otel_hook" in entry.get("bash", ""):
-                    count += 1
-                # claude/gemini: {"hooks": [{"command": "otel-hook"}]}
-                for h in entry.get("hooks", []):
-                    if "otel-hook" in h.get("command", "") or "otel_hook" in h.get("command", ""):
-                        count += 1
-        status = f"{count} events registered" if count else "not registered"
-        click.echo(f"  {'✓' if count else '·'} [{agent}] {status} ({path})")
-
-
-@cli.command("uninstall")
-@click.option(
-    "--agent", "agents",
-    type=click.Choice(["cursor", "windsurf", "claude", "copilot", "gemini", "codex", "opencode"]),
-    multiple=True,
-    required=True,
-)
-@click.option("--global/--no-global", "global_", default=True)
-@click.option("--cwd", default=".")
-def uninstall_cmd(agents: tuple, global_: bool, cwd: str) -> None:
-    """Remove otel-hook entries from agent configs."""
-    home = os.path.expanduser("~")
-    for agent in agents:
-        if agent == "opencode":
-            path = (
-                os.path.join(home, ".config", "opencode", "plugins", _OPENCODE_PLUGIN_FILENAME)
-                if global_ else
-                os.path.join(_find_repo_root(cwd), ".opencode", "plugins", _OPENCODE_PLUGIN_FILENAME)
-            )
-            if os.path.isfile(path):
-                os.remove(path)
-                click.echo(f"  ✓ [opencode] Removed plugin ({path})")
-            else:
-                click.echo(f"  · [opencode] Not installed ({path})")
-            continue
-
-        elif agent == "cursor":
-            path = os.path.join(home, ".cursor", "hooks.json") if global_ else os.path.join(_find_repo_root(cwd), ".cursor", "hooks.json")
-            doc = _load_json_file(path)
-            hooks = doc.get("hooks", {})
-            removed = 0
-            for event in list(hooks.keys()):
-                before = len(hooks[event])
-                hooks[event] = [h for h in hooks[event] if "otel-hook" not in h.get("command", "") and "otel_hook" not in h.get("command", "")]
-                removed += before - len(hooks[event])
-                if not hooks[event]:
-                    del hooks[event]
-            if removed:
-                _write_json_file(path, doc)
-            click.echo(f"  {'✓' if removed else '·'} [cursor] Removed {removed} entries ({path})")
-
-        elif agent == "claude":
-            path = os.path.join(home, ".claude", "settings.json") if global_ else os.path.join(_find_repo_root(cwd), ".claude", "settings.json")
-            settings = _load_json_file(path)
-            hooks = settings.get("hooks", {})
-            removed = 0
-            for event in list(hooks.keys()):
-                new_list = []
-                for entry in hooks[event]:
-                    surviving = [h for h in entry.get("hooks", []) if "otel-hook" not in h.get("command", "") and "otel_hook" not in h.get("command", "")]
-                    if surviving:
-                        entry["hooks"] = surviving
-                        new_list.append(entry)
-                    else:
-                        removed += 1
-                hooks[event] = new_list
-                if not hooks[event]:
-                    del hooks[event]
-            if removed:
-                _write_json_file(path, settings)
-            click.echo(f"  {'✓' if removed else '·'} [claude] Removed {removed} entries ({path})")
-
-        elif agent == "copilot":
-            path = os.path.join(_find_repo_root(cwd), ".github", "hooks", "otel-hooks.json")
-            doc = _load_json_file(path)
-            hooks = doc.get("hooks", {})
-            removed = 0
-            for event in list(hooks.keys()):
-                before = len(hooks[event])
-                hooks[event] = [h for h in hooks[event] if "otel-hook" not in h.get("bash", "") and "otel_hook" not in h.get("bash", "")]
-                removed += before - len(hooks[event])
-                if not hooks[event]:
-                    del hooks[event]
-            if removed:
-                _write_json_file(path, doc)
-            click.echo(f"  {'✓' if removed else '·'} [copilot] Removed {removed} entries ({path})")
-
-        elif agent == "gemini":
-            path = os.path.join(home, ".gemini", "settings.json") if global_ else os.path.join(_find_repo_root(cwd), ".gemini", "settings.json")
-            settings = _load_json_file(path)
-            hooks = settings.get("hooks", {})
-            removed = 0
-            for event in list(hooks.keys()):
-                new_list = []
-                for entry in hooks[event]:
-                    surviving = [h for h in entry.get("hooks", []) if "otel-hook" not in h.get("command", "") and "otel_hook" not in h.get("command", "")]
-                    if surviving:
-                        entry["hooks"] = surviving
-                        new_list.append(entry)
-                    else:
-                        removed += 1
-                hooks[event] = new_list
-                if not hooks[event]:
-                    del hooks[event]
-            if removed:
-                _write_json_file(path, settings)
-            click.echo(f"  {'✓' if removed else '·'} [gemini] Removed {removed} entries ({path})")
-
-        elif agent == "codex":
-            path = os.path.join(home, ".codex", "hooks.json") if global_ else os.path.join(_find_repo_root(cwd), ".codex", "hooks.json")
-            doc = _load_json_file(path)
-            hooks = doc.get("hooks", {})
-            removed = 0
-            for event in list(hooks.keys()):
-                new_list = []
-                for entry in hooks[event]:
-                    before = len(entry.get("hooks", []))
-                    surviving = [
-                        h for h in entry.get("hooks", [])
-                        if "otel-hook" not in h.get("command", "") and "otel_hook" not in h.get("command", "")
-                    ]
-                    removed += before - len(surviving)
-                    if surviving:
-                        entry["hooks"] = surviving
-                        new_list.append(entry)
-                hooks[event] = new_list
-                if not hooks[event]:
-                    del hooks[event]
-            if removed:
-                _write_json_file(path, doc)
-            click.echo(f"  {'✓' if removed else '·'} [codex] Removed {removed} entries ({path})")
-
-
 if __name__ == "__main__":
-    cli()
+    from otel_hooks.cli import run_cli
+    run_cli(runtime=sys.modules[__name__])

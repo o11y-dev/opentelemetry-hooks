@@ -1,0 +1,75 @@
+{
+  "OTEL_EXPORTER_OTLP_ENDPOINT": "http://localhost:4317",
+  "OTEL_EXPORTER_OTLP_PROTOCOL": "grpc",
+  "OTEL_SERVICE_NAME": "coding-agent",
+  "batch": {
+    "on_stop": true
+  },
+  "local_spans": true,
+  "capture": {
+    "mode": "full",
+    "span_include": [
+      "cwd",
+      "file_path",
+      "workspace_path",
+      "root_workspace_path",
+      "transcript_path",
+      "command",
+      "exit_code",
+      "tool_input",
+      "tool_output",
+      "tool_response.output",
+      "tool_response.stdout",
+      "tool_response.exit_code",
+      "tool_response.status",
+      "tool_response.is_error",
+      "tool_response.success",
+      "tool_response.duration_ms",
+      "metadata",
+      "model_params",
+      "usage",
+      "tool_calls.*.tool_name",
+      "tool_calls.*.tool_use_id",
+      "prompt",
+      "user_prompt",
+      "last_assistant_message",
+      "response",
+      "prompt_response",
+      "tool_info.cwd",
+      "tool_info.file_path",
+      "tool_info.command_line",
+      "tool_info.user_prompt",
+      "tool_info.response",
+      "tool_info.mcp_tool_arguments",
+      "tool_info.mcp_result.output",
+      "tool_info.mcp_result.exit_code",
+      "tool_info.mcp_result.status",
+      "tool_result.text_result_for_llm",
+      "llm_request.model",
+      "permission_request_id",
+      "elicitation_id",
+      "tool_call_id",
+      "call_id",
+      "task_id",
+      "agent_id",
+      "parent_agent_id"
+    ],
+    "mappings": {
+      "tool_response.exit_code": "process.exit.code",
+      "exit_code": "process.exit.code",
+      "tool_info.mcp_result.exit_code": "process.exit.code"
+    },
+    "max_attributes": 96,
+    "max_string_length": 4000,
+    "max_depth": 16,
+    "max_array_length": 128,
+    "max_attribute_bytes": 32768
+  },
+  "logs": {
+    "enabled": true
+  },
+  "diagnostics": {
+    "level": "WARNING"
+  },
+  "OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT": 256
+}

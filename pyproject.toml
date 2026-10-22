@@ -7,7 +7,7 @@ name = "opentelemetry-hooks"
 version = "0.15.0"
 description = "OpenTelemetry integration for AI coding agents (Codex, Cursor IDE/CLI, GitHub Copilot, Claude Code, Gemini CLI, Antigravity, OpenCode-compatible runners)"
 readme = "README.md"
-license = {text = "MIT"}
+license = {file = "LICENSE"}
 requires-python = ">=3.12"
 keywords = ["opentelemetry", "observability", "ai-agents", "codex", "claude", "copilot", "cursor", "gemini", "telemetry", "hooks", "tracing"]
 classifiers = [
@@ -36,10 +36,13 @@ Issues = "https://github.com/o11y-dev/opentelemetry-hooks/issues"
 Changelog = "https://github.com/o11y-dev/opentelemetry-hooks/blob/main/CHANGELOG.md"
 
 [project.scripts]
-otel-hook = "otel_hook:cli"
+otel-hook = "otel_hooks.cli:run_cli"
 
 [tool.setuptools]
 py-modules = ["otel_hook", "enrichment_connectors"]
+
+[tool.setuptools.packages.find]
+include = ["otel_hooks*"]
 
 [tool.setuptools.data-files]
 "share/opentelemetry-hooks" = ["otel_config.example.json"]
@@ -53,7 +56,35 @@ py-modules = ["otel_hook", "enrichment_connectors"]
     "examples/cursor-hooks.example.json",
     "examples/hooks.example.json",
     "examples/opencode-plugin.example.ts",
+    "examples/otel_config.gateway.example.json",
+    "examples/otel_config.reflect.example.json",
+    "examples/otel_config.reflect.minimal.example.json",
 ]
+
+"share/opentelemetry-hooks/examples/capture" = [
+    "examples/capture/cursor.example.json",
+    "examples/capture/claude.example.json",
+    "examples/capture/codex.example.json",
+    "examples/capture/gemini.example.json",
+    "examples/capture/windsurf.example.json",
+    "examples/capture/copilot.example.json",
+    "examples/capture/opencode.example.json",
+    "examples/capture/antigravity.example.json",
+]
+
+"share/opentelemetry-hooks/examples/mdm" = [
+    "examples/mdm/README.md",
+    "examples/mdm/deploy-jamf.sh",
+    "examples/mdm/deploy-intune.ps1",
+    "examples/mdm/runtime-constraints.txt",
+    "examples/mdm/opentelemetry-hook.mobileconfig",
+    "examples/mdm/opentelemetry-hook.reg",
+    "examples/mdm/claude-shared.mobileconfig",
+    "examples/mdm/claude-shared.reg",
+]
+
+"share/opentelemetry-hooks/docs" = ["docs/*.md"]
+"share/opentelemetry-hooks/scripts" = ["scripts/build_mdm_bundle.py"]
 
 [tool.ruff]
 line-length = 120

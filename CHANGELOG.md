@@ -1,5 +1,35 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- Current OTel cache-write and tool identity attributes alongside legacy names, an explicit project total-token attribute, and a source-pinned Coralogix/OTel compatibility audit with remaining conformance validation.
+- Jamf/Intune offline hash-locked deployment, explicit machine/user registration, SDK-independent detection, shared Claude managed telemetry configuration, enforced exporter policy and operator lifecycle documentation.
+- Original observation/event timing, provider-aware inclusive token accounting, UTF-8 payload facts, capture-policy provenance, protected identity/usage mappings and shared canonical/recursive attribute budgets.
+- Optional `logs.max_body_bytes` and bounded `batch.max_export_attempts` with retained policy-local quarantine records.
+- Persisted replay identities, branch-local buffered boundaries, streaming generation/tool/subagent scopes and nanosecond native log correlation with failure severity.
+- Enterprise upgrade/rollback guidance, explicit Reflect integration requirements, and security reporting and community support documentation.
+- Span-only `capture.span_include` allowlist with normalized paths and wildcards, retaining canonical span attributes and full permitted JSON logs. Examples select legacy hook field groups; a Reflect example includes file-path mappings.
+- Structured, unprefixed JSON settings with legacy `IDE_OTEL_*` compatibility; configurable metadata, selected-content and full hook capture across providers.
+- Bounded lowercase recursive span attributes and extraction mappings; optional policy-filtered raw JSON log bodies with trace/span correlation with one record per emitted callback.
+- Capture policy isolation for pending state, managed capture/log precedence, validation, and enterprise setup/configuration documentation.
+- Document uv tool installation and upgrades, and support `setup.sh --reinstall --installer uv` while retaining the pipx default.
+- SDK-independent parser package with a shared `BaseParser`, typed canonical events, a provider registry and separate provider modules. Existing adapter imports remain compatible.
+- Native Windows installed-wheel CI covering parser contracts, UTF-8 input, local session capture and PowerShell/cmd command execution.
+
+### Changed
+- Adopt semantic schema 3 without backward aliases: reserve `gen_ai.*` for current OTel fields, move hook metadata to `o11y.*`, remove deprecated system/cache/total attributes, and name reconstructed tool/agent invocations with their semantic operation. Validate structured content against pinned upstream JSON schemas and propagate matching terminal failures to invocation spans.
+- Use one capture pipeline for every configuration; metadata-only capture and disabled hook logs are the defaults.
+- Remove separate MCP, shell, tool and conversation log emitters and duplicate tool/metadata flattening. Consumers must migrate old log queries and configure their own attribute mappings.
+- Retire per-content and per-event log switches; capture mode and path selection govern content, while `logs.enabled` controls hook logs.
+
+### Fixed
+- Retain OpenAI Responses cache/reasoning usage details and explicit provider aliases through default capture, and emit integer `gen_ai.request.top_k` values.
+- Preserve Cursor subagent/parent relationship IDs, Claude elicitation IDs and failure duration, and OpenCode tool invocation IDs in canonical attributes.
+- Detect PowerShell-only Copilot registrations in `doctor` and retry incomplete bootstrap installs until dependency provisioning succeeds.
+- Use Windows application-data and virtual-environment paths, argv-based dependency bootstrapping, quoted executable paths, Claude exec-form hooks and Copilot PowerShell registrations.
+- Recognize both Copilot shell fields during setup, diagnosis and removal, including user-level removal; mask Windows usernames when text masking is enabled.
+
 ## 0.15.0 (2026-10-12)
 
 ### Added

@@ -1,0 +1,8 @@
+{
+  "capture": {
+    "mode": "full",
+    "span_include": [
+      "exit_code"
+    ]
+  }
+}

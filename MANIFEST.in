@@ -1,6 +1,9 @@
 include CHANGELOG.md
-recursive-include docs *.md
+include CONTRIBUTING.md
+include SECURITY.md
+recursive-include docs *.md *.json
 recursive-include examples *.json
 recursive-include examples *.md
 recursive-include examples *.ts
+recursive-include examples *.sh *.ps1 *.reg *.mobileconfig *.txt
 recursive-include scripts *.py

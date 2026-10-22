@@ -41,7 +41,7 @@ defines these integration boundaries:
   IDs and have at-most-once delivery. Avoid adding native and hook tool counts.
 
 These are downstream integration inputs, not new callback registrations. Keep
-native-source provenance separate from `gen_ai.client.telemetry_source=hook`.
+native-source provenance separate from `o11y.client.telemetry_source=hook`.
 
 ## Coverage recheck
 
@@ -87,15 +87,15 @@ in the scope where the old hooks were installed.
 |---|---|---|
 | Windsurf | Cursor-style event names written to `settings.json` | Run `otel-hook setup --agent windsurf` (add `--no-global` for project scope). Setup writes native events to `hooks.json`; it does **not** remove entries from the old `settings.json`. Review that file and remove only obsolete `otel-hook` registrations, preserving other settings. Legacy compatible-runner payload aliases remain accepted. |
 | Gemini CLI | Model callbacks opened/closed turns; agent callbacks appeared as subagents | Rerun Gemini setup for added events. Update queries that relied on those old mappings: `BeforeAgent` / `AfterAgent` now delimit turns and model callbacks remain observations. Historical telemetry is not rewritten; Antigravity retains its separate compatibility mapping. |
-| Copilot | CLI setup was repository-only; native payloads could lack event identity | Use `otel-hook setup --agent copilot --no-global` to upgrade repository hooks, or omit `--no-global` for user-level CLI hooks. Setup adds `--copilot --event <name>`. `bash setup.sh --copilot` and direct Python `setup_copilot()` calls retain their repository default. |
+| Copilot | CLI setup was repository-only; native payloads could lack event identity | Use `otel-hook setup --agent copilot --no-global` to upgrade repository hooks, or omit `--no-global` for user-level CLI hooks. Setup adds `--copilot --event <name>`. `bash setup.sh --copilot` and direct Python `otel_hooks.cli.setup_copilot()` calls retain their repository default. |
 | Codex | No end/interruption registrations; SessionStart matcher omitted compaction | Rerun Codex setup. Managed legacy matchers migrate while unrelated commands remain intact; SessionEnd and Interrupt use three-second timeouts. Stale-session cleanup remains a fallback. |
 | OpenCode | Errors closed the session; idle/message callbacks read incorrect payload fields | Rerun OpenCode setup to replace the installed plugin. Update queries expecting every error to imply SessionEnd; recoverable errors now emit ErrorOccurred. |
 
-The `IDE_OTEL_*` settings, `--agent` option, identity aliases and existing telemetry
-names remain supported. A terminology change alone does not require new keys or
-defaults. Prefer managed source flags for new registrations and the narrower
-`IDE_OTEL_CAPTURE_CONVERSATION_CONTENT` setting for conversation capture; legacy
-source detection and `IDE_OTEL_CAPTURE_TEXT` remain available for compatibility.
+Registration options are separate from the [semantic schema](semantic-conventions.md).
+Schema 3 changes emitted fields and operation names without a compatibility mode.
+Update consumers to standard GenAI fields and project-owned `o11y.*` metadata.
+Use structured capture settings for content selection; retired content switches
+do not restore capture or older telemetry names.
 
 ## Validation and rollout
 

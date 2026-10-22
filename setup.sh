@@ -18,12 +18,13 @@
 #   bash setup.sh --opencode         # OpenCode project-level (.opencode/plugins/)
 #   bash setup.sh --opencode --global # OpenCode global (~/.config/opencode/plugins/)
 #   bash setup.sh --reinstall        # pipx install --force . then register hooks
+#   bash setup.sh --reinstall --installer uv # uv tool install --reinstall .
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
 HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-# Prefer the system-installed otel-hook command (pip/pipx deployment) when it is
+# Prefer the system-installed otel-hook command (uv/pipx/pip deployment) when it is
 # on PATH; fall back to the local script for source-checkout / copied-source use.
 if command -v otel-hook &>/dev/null; then
   HOOK_CMD="$(command -v otel-hook)"
@@ -83,6 +84,7 @@ GEMINI_GLOBAL=""
 CODEX_GLOBAL=""
 WANT_GLOBAL=""
 DO_REINSTALL=""
+INSTALLER="pipx"
 DO_CLEAN=""
 DO_UNINSTALL=""
 DO_DIAGNOSE=""
@@ -97,6 +99,11 @@ while [[ $# -gt 0 ]]; do
     --codex)      DO_CODEX=1; shift ;;
     --global)    WANT_GLOBAL=1; shift ;;
     --reinstall) DO_REINSTALL=1; shift ;;
+    --installer)
+      case "${2:-}" in
+        uv|pipx) INSTALLER="$2"; shift 2 ;;
+        *) echo "Error: --installer requires uv or pipx."; exit 1 ;;
+      esac ;;
     --clean)     DO_CLEAN=1; shift ;;
     --uninstall) DO_UNINSTALL=1; shift ;;
     --diagnose)  DO_DIAGNOSE=1; shift ;;
@@ -192,14 +199,18 @@ echo "✅ python3 found: $PYTHON3_VERSION"
 echo "✅ hook command: $HOOK_CMD"
 echo ""
 
-# ─── Optional: reinstall package via pipx ───────────────────────────────────
+# ─── Optional: reinstall package via the selected tool installer ────────────
 if [[ -n "$DO_REINSTALL" ]]; then
-  if ! command -v pipx &>/dev/null; then
-    echo "❌ pipx not found. Install pipx and re-run with --reinstall."
+  if ! command -v "$INSTALLER" &>/dev/null; then
+    echo "❌ $INSTALLER not found. Install it and re-run with --reinstall --installer $INSTALLER."
     exit 1
   fi
-  echo "📦 Reinstalling package: pipx install --force \"$HOOK_DIR\""
-  pipx install --force "$HOOK_DIR"
+  echo "📦 Reinstalling package with $INSTALLER from $HOOK_DIR"
+  if [[ "$INSTALLER" == "uv" ]]; then
+    uv tool install --reinstall "$HOOK_DIR"
+  else
+    pipx install --force "$HOOK_DIR"
+  fi
   echo "✅ Package reinstalled"
   echo ""
   # Refresh HOOK_CMD in case otel-hook just became available on PATH

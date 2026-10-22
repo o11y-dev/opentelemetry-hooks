@@ -1,0 +1,10 @@
+Windows Registry Editor Version 5.00
+
+; Replace placeholders through Intune/GPO. Do not combine with claude-shared.reg.
+[HKEY_LOCAL_MACHINE\SOFTWARE\Policies\OpenTelemetryHook]
+"enforce_export"="true"
+"OTEL_EXPORTER_OTLP_ENDPOINT"="https://collector.example.com"
+"OTEL_EXPORTER_OTLP_PROTOCOL"="http/protobuf"
+"OTEL_EXPORTER_OTLP_HEADERS"="Authorization=REPLACE_THROUGH_MDM"
+"capture"="{\"mode\":\"metadata_only\"}"
+"logs"="{\"enabled\":false}"
