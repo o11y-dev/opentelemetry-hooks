@@ -1,6 +1,8 @@
 """Schema-v2 acceptance checks against SDK spans and decoded OTLP protobuf."""
 import json
 import logging
+from pathlib import Path
+import sysconfig
 
 import pytest
 from opentelemetry.sdk.trace import TracerProvider
@@ -42,6 +44,90 @@ def test_usage_inclusive_cache_and_reasoning_with_real_zeros():
     assert 'gen_ai.usage.input_tokens' not in usage_attributes({'input_tokens': True}, None)
     assert usage_attributes({'input_tokens': 1000, 'output_tokens': 200,
                              'cache_read_input_tokens': 600}, 'openai')['gen_ai.usage.total_tokens'] == 1200
+
+
+@pytest.mark.parametrize('details', [
+    {'input_tokens': 1000, 'output_tokens': 200,
+     'input_tokens_details': {'cached_tokens': 600},
+     'output_tokens_details': {'reasoning_tokens': 50}},
+    {'prompt_tokens': 1000, 'completion_tokens': 200,
+     'prompt_tokens_details': {'cached_tokens': 600},
+     'completion_tokens_details': {'reasoning_tokens': 50}},
+])
+@pytest.mark.parametrize('nested', [False, True])
+def test_default_capture_preserves_openai_usage_details_in_otlp(runtime, monkeypatch, details, nested):
+    tracer, exporter = runtime
+    config_path = Path(__file__).parents[1] / 'otel_config.example.json'
+    if not config_path.is_file():
+        config_path = Path(sysconfig.get_path('data')) / 'share/opentelemetry-hooks/otel_config.example.json'
+    config = json.loads(config_path.read_text())
+    policy = CapturePolicy.from_config(config)
+    monkeypatch.setattr(hook, '_CAPTURE_POLICY', policy)
+    payload = {'provider': 'openai', 'model': 'gpt-4.1',
+               **({'usage': details} if nested else details), 'prompt': 'private content'}
+    permitted = policy.filter(payload)
+    assert 'prompt' not in permitted
+    data = hook.CursorEventAdapter(capture_policy=policy).parse('stop', permitted).to_lifecycle_data()
+    with tracer.start_as_current_span('callback') as span:
+        hook._populate_span(span, 'Stop', data, 'cursor')
+    encoded = encode_spans(exporter.get_finished_spans())
+    decoded = type(encoded).FromString(encoded.SerializeToString())
+    attrs = {a.key: a.value for a in decoded.resource_spans[0].scope_spans[0].spans[0].attributes}
+    for key, value in {'input_tokens': 1000, 'output_tokens': 200,
+                       'cache_read.input_tokens': 600, 'reasoning.output_tokens': 50,
+                       'total_tokens': 1200}.items():
+        attr = attrs['gen_ai.usage.' + key]
+        assert attr.WhichOneof('value') == 'int_value'
+        assert attr.int_value == value
+    assert attrs['o11y.usage.total_tokens'].int_value == 1200
+    assert attrs['gen_ai.provider.name'].string_value == 'openai'
+    assert attrs['gen_ai.system'].string_value == 'cursor'  # retained legacy harness alias
+    assert not any(key.startswith('hook.') for key in attrs)
+
+
+@pytest.mark.parametrize('write_key', ['cache_creation_input_tokens', 'cache_write_input_tokens'])
+@pytest.mark.parametrize('write', [0, 100])
+def test_cache_write_standard_and_legacy_aliases_preserve_inclusive_accounting(write_key, write):
+    permitted = CapturePolicy().filter({'usage': {
+        'input_tokens': 300, 'cache_read_input_tokens': 600, write_key: write, 'output_tokens': 200,
+    }})
+    attrs = usage_attributes(permitted, 'anthropic')
+    assert attrs['gen_ai.usage.cache_write.input_tokens'] == write
+    assert attrs['gen_ai.usage.cache_creation.input_tokens'] == write
+    assert attrs['gen_ai.usage.input_tokens'] == 900 + write
+    assert attrs['o11y.usage.total_tokens'] == attrs['gen_ai.usage.total_tokens'] == 1100 + write
+
+
+@pytest.mark.parametrize('value', [True, -1, 1.5, '50'])
+def test_usage_details_reject_non_integer_token_counts(value):
+    attrs = usage_attributes(CapturePolicy().filter({'usage': {
+        'input_tokens_details': {'cached_tokens': value},
+        'output_tokens_details': {'reasoning_tokens': value},
+    }}), 'openai')
+    assert 'gen_ai.usage.cache_read.input_tokens' not in attrs
+    assert 'gen_ai.usage.reasoning.output_tokens' not in attrs
+
+
+@pytest.mark.parametrize('event,fields,legacy', [
+    ('PreToolUse', {'tool_name': 'Read', 'tool_type': 'function'}, 'gen_ai.client.tool_name'),
+    ('AfterMCPExecution', {'mcp_tool': 'search', 'tool_type': 'extension'}, 'gen_ai.client.mcp_tool'),
+])
+def test_default_tool_semantics_keep_legacy_names(runtime, event, fields, legacy):
+    tracer, _ = runtime
+    with tracer.start_as_current_span('callback') as span:
+        hook._populate_span(span, event, CapturePolicy().filter(fields), 'cursor')
+    assert span.attributes['gen_ai.tool.name'] == span.attributes[legacy]
+    assert span.attributes['gen_ai.tool.type'] == fields['tool_type']
+    assert span.attributes['gen_ai.operation.name'] == 'execute_tool'
+
+
+def test_context_occupancy_is_not_billed_usage_and_top_k_is_integer(runtime):
+    tracer, _ = runtime
+    with tracer.start_as_current_span('callback') as span:
+        hook._populate_span(span, 'PreCompact', {'context_tokens': 1000, 'top_k': 40}, 'cursor')
+    assert span.attributes['gen_ai.client.context_tokens'] == 1000
+    assert not any(key.startswith('gen_ai.usage.') for key in span.attributes)
+    assert type(span.attributes['gen_ai.request.top_k']) is int
 
 
 def test_parallel_boundaries_and_final_callback():
@@ -153,7 +239,8 @@ def test_decoded_otlp_log_body_type_timestamp_status_and_native_context(runtime,
 
 
 def test_policy_protected_fields_and_log_limit_validation():
-    for target in ('gen_ai.usage.input_tokens', 'gen_ai.client.session_id', 'gen_ai.client.status', 'gen_ai.tool.call.id'):
+    for target in ('gen_ai.usage.input_tokens', 'gen_ai.client.session_id', 'gen_ai.client.status',
+                   'gen_ai.tool.call.id', 'gen_ai.tool.name', 'gen_ai.tool.type'):
         with pytest.raises(ValueError, match='protected'):
             CapturePolicy.from_config({'capture': {'mappings': {'x': target}}})
     for limit in (0, -1, True, '100'):

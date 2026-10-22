@@ -398,6 +398,11 @@ def _apply_genai_semconv(span, event_name: str, data: dict, ide: str, session_ct
         span.set_attribute("gen_ai.provider.name", provider)
     span.set_attribute("gen_ai.system", _resolve_client_name(ide, data=data, session_ctx=session_ctx))
     _set_if_present(span, "gen_ai.operation.name", _genai_operation(event_name))
+    if event_name in _OP_TOOL_EVENTS:
+        # Keep gen_ai.client.tool_name / mcp_tool for existing consumers and
+        # also publish the standard identity used by GenAI backends.
+        _set_if_present(span, "gen_ai.tool.name", _first_present(data, ("tool_name", "mcp_tool")))
+        _set_if_present(span, "gen_ai.tool.type", data.get("tool_type"))
     _set_if_present(span, "gen_ai.conversation.id", data.get("conversation_id") or data.get("session_id"))
     _set_if_present(
         span,
@@ -438,7 +443,9 @@ def _apply_genai_semconv(span, event_name: str, data: dict, ide: str, session_ct
     for source in (data, data.get("metadata") or {}):
         _set_if_present(span, "gen_ai.request.temperature", _float_or_none(_first_present(source, ("temperature",))))
         _set_if_present(span, "gen_ai.request.top_p", _float_or_none(_first_present(source, ("top_p",))))
-        _set_if_present(span, "gen_ai.request.top_k", _float_or_none(_first_present(source, ("top_k",))))
+        top_k = _first_present(source, ("top_k",))
+        if type(top_k) is int and top_k >= 0:
+            span.set_attribute("gen_ai.request.top_k", top_k)
         _set_if_present(span, "gen_ai.request.max_tokens", _int_or_none(_first_present(source, ("max_tokens",))))
         _set_if_present(span, "gen_ai.request.frequency_penalty", _float_or_none(_first_present(source, ("frequency_penalty",))))
         _set_if_present(span, "gen_ai.request.presence_penalty", _float_or_none(_first_present(source, ("presence_penalty",))))

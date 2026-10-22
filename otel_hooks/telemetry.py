@@ -7,28 +7,23 @@ def usage_attributes(data, provider):
     """Normalize only known accounting models; never add output subsets twice."""
     source = {**data, **(data.get('usage') if isinstance(data.get('usage'), dict) else {})}
 
-    def number(*keys):
-        for key in keys:
-            value = source.get(key)
+    def number(*paths):
+        for path in paths:
+            value = source
+            for key in path.split('.'):
+                value = value.get(key) if isinstance(value, dict) else None
             if type(value) is int and value >= 0:
                 return value
         return None
 
     inp = number('input_tokens', 'prompt_tokens')
     out = number('output_tokens', 'completion_tokens')
-    read = number('cache_read_input_tokens', 'cached_input_tokens', 'cache_read_tokens')
-    write = number('cache_creation_input_tokens', 'cache_creation_tokens', 'cache_write_tokens')
-    reasoning = number('reasoning_tokens')
-    details = source.get('completion_tokens_details')
-    if reasoning is None and isinstance(details, dict):
-        value = details.get('reasoning_tokens')
-        if type(value) is int and value >= 0:
-            reasoning = value
-    details = source.get('prompt_tokens_details')
-    if read is None and isinstance(details, dict):
-        value = details.get('cached_tokens')
-        if type(value) is int and value >= 0:
-            read = value
+    read = number('cache_read_input_tokens', 'cached_input_tokens', 'cache_read_tokens',
+                  'input_tokens_details.cached_tokens', 'prompt_tokens_details.cached_tokens')
+    write = number('cache_write_input_tokens', 'cache_creation_input_tokens',
+                   'cache_creation_tokens', 'cache_write_tokens')
+    reasoning = number('reasoning_tokens', 'output_tokens_details.reasoning_tokens',
+                       'completion_tokens_details.reasoning_tokens')
     basis = 'provider_reported'
     # Anthropic reports new input separately from cache reads and writes.
     if provider == 'anthropic' and inp is not None and number('input_tokens') is not None:
@@ -39,10 +34,15 @@ def usage_attributes(data, provider):
         total = inp + out
     result = {}
     for key, value in [('input_tokens', inp), ('output_tokens', out), ('total_tokens', total),
-                       ('cache_read.input_tokens', read), ('cache_creation.input_tokens', write),
+                       ('cache_read.input_tokens', read), ('cache_write.input_tokens', write),
+                       ('cache_creation.input_tokens', write),
                        ('reasoning.output_tokens', reasoning)]:
         if value is not None:
             result['gen_ai.usage.' + key] = value
+    if total is not None:
+        # total_tokens is not in the OTel registry. Keep the historical name as
+        # an alias while identifying the derived total in our own namespace.
+        result['o11y.usage.total_tokens'] = total
     if result:
         result['o11y.usage.basis'] = basis
         if inp is not None:

@@ -24,6 +24,19 @@ modes and aliases, SDK-free CLI boundaries, process-separated lifecycle replay,
 policy isolation, native Windows registration and installed-command execution.
 Windows CI now includes the v2 acceptance tests against the installed wheel.
 
+### Coralogix and current OTel naming audit
+
+The [source-pinned compatibility audit](coralogix-compatibility.md) records the
+2026-10-22 comparison. Fifteen additional cases cover OpenAI Responses and Chat
+Completions usage under the default policy, cache-write aliases and inclusive
+accounting, invalid counts, standard/legacy tool identity and context occupancy.
+The schema-v2, capture and runtime suites pass 431 tests. Contract, current-hook
+and managed-deployment checks pass 123 tests with one Windows-only skip; two
+setup tests use the explicit temporary project roots described below because
+of sandbox ancestor markers. The rebuilt installed wheel passes all 35 schema-v2
+cases outside the checkout. Ruff, whitespace checks and wheel/sdist builds pass.
+No live Coralogix payload or AI Center recognition test was performed.
+
 The managed sandbox injects empty agent/project marker directories above test
 folders. Setup autodetection tests can therefore discover `/tmp` as a project.
 This reproduces on the unchanged baseline. Local setup validation used a temporary

@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Added
+- Current OTel cache-write and tool identity attributes alongside legacy names, an explicit project total-token attribute, and a source-pinned Coralogix/OTel compatibility audit with remaining conformance validation.
 - Jamf/Intune offline hash-locked deployment, explicit machine/user registration, SDK-independent detection, shared Claude managed telemetry configuration, enforced exporter policy and operator lifecycle documentation.
 - Telemetry schema v2: original observation/event timing, provider-aware inclusive token accounting, UTF-8 payload facts, capture-policy provenance, protected identity/usage mappings and shared canonical/recursive attribute budgets.
 - Optional `logs.max_body_bytes` and bounded `batch.max_export_attempts` with retained policy-local quarantine records.
@@ -22,6 +23,7 @@
 - Retire per-content and per-event log switches; capture mode and path selection govern content, while `logs.enabled` controls hook logs.
 
 ### Fixed
+- Retain OpenAI Responses cache/reasoning usage details and explicit provider aliases through default capture, and emit integer `gen_ai.request.top_k` values.
 - Preserve Cursor subagent/parent relationship IDs, Claude elicitation IDs and failure duration, and OpenCode tool invocation IDs in canonical attributes.
 - Detect PowerShell-only Copilot registrations in `doctor` and retry incomplete bootstrap installs until dependency provisioning succeeds.
 - Use Windows application-data and virtual-environment paths, argv-based dependency bootstrapping, quoted executable paths, Claude exec-form hooks and Copilot PowerShell registrations.

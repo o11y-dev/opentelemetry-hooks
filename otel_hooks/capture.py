@@ -22,10 +22,10 @@ def attribute_name(value: str) -> str:
 _METADATA = set("""
 hook_event_name event_name event type session_id conversation_id generation_id
 turn_id trajectory_id execution_id event_id hook_event_id callback_id version
-model model_id model_name request_model response_model provider_name status
+model model_id model_name request_model response_model provider_name provider model_provider vendor status
 reason final_status trigger composer_mode tool_name tool_type tool_id tool_use_id
 tool_call_id call_id subagent_id agent_id parent_agent_id parent_conversation_id parent_tool_call_id
-agent_type subagent_type agent_engine client_name client_version agent_version
+agent_type subagent_type agent_engine client_name client_version agent_name agent_version
 permission_mode permission_request_id permission_response elicitation_id action mode
 mcp_server mcp_server_name mcp_tool server_name tool duration duration_ms exit_code
 is_interrupt stop_hook_active loop_count response_id message_id index final
@@ -38,7 +38,7 @@ trace_id span_id parent_span_id trace_flags traceparent tracestate
 native_trace_id native_span_id native_parent_span_id native_source
 input_tokens prompt_tokens output_tokens completion_tokens total_tokens
 cache_read_tokens cache_write_tokens cache_read_input_tokens
-cache_creation_input_tokens cache_creation_tokens cached_input_tokens
+cache_creation_input_tokens cache_write_input_tokens cache_creation_tokens cached_input_tokens
 reasoning_tokens cached_tokens usage_semantics is_partial truncated temperature top_p top_k max_tokens frequency_penalty presence_penalty seed
 """.split())
 _NUMERIC = set("""
@@ -46,7 +46,7 @@ duration duration_ms exit_code loop_count index context_tokens context_usage_per
 context_window_size message_count messages_to_compact timestamp_ms timestamp_ns
 estimated_cache_write_usd input_tokens prompt_tokens output_tokens completion_tokens
 total_tokens cache_read_tokens cache_write_tokens cache_read_input_tokens
-cache_creation_input_tokens cache_creation_tokens cached_input_tokens temperature
+cache_creation_input_tokens cache_write_input_tokens cache_creation_tokens cached_input_tokens reasoning_tokens cached_tokens temperature
 top_p top_k max_tokens frequency_penalty presence_penalty seed
 """.split())
 _BOOLEAN = {"is_partial", "truncated", "is_interrupt", "stop_hook_active", "final", "is_first_compaction", "prompt_cache_warm"}
@@ -111,7 +111,7 @@ class CapturePolicy:
         ):
             raise ValueError("capture.mappings must map paths to lowercase attribute names")
         # Canonical identity, status and accounting semantics are runtime-owned.
-        protected = ('gen_ai.usage.', 'gen_ai.client.hook', 'gen_ai.agent.',
+        protected = ('gen_ai.usage.', 'gen_ai.tool.', 'gen_ai.client.hook', 'gen_ai.agent.',
                      'gen_ai.conversation.', 'error.', 'o11y.', 'otel.')
         if any(v.startswith(protected) or v in {'trace_id', 'span_id', 'parent_span_id', 'gen_ai.tool.call.id',
                          'gen_ai.client.session_id', 'gen_ai.client.generation_id',
@@ -177,7 +177,8 @@ class CapturePolicy:
                 return _MISSING
             parts = path.split(".")
             # Known usage/request metadata containers have the same scalar schema.
-            permitted = len(parts) == 1 or (len(parts) == 2 and parts[0] in {"usage", "metadata", "model_params", "prompt_tokens_details", "completion_tokens_details"}) or (len(parts) == 3 and parts[0] == "usage" and parts[1] in {"prompt_tokens_details", "completion_tokens_details"})
+            token_details = {"prompt_tokens_details", "completion_tokens_details", "input_tokens_details", "output_tokens_details"}
+            permitted = len(parts) == 1 or (len(parts) == 2 and parts[0] in {"usage", "metadata", "model_params", *token_details}) or (len(parts) == 3 and parts[0] == "usage" and parts[1] in token_details)
             name = parts[-1]
             if not permitted or name not in _METADATA:
                 return _MISSING

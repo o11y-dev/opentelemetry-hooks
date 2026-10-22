@@ -4,6 +4,11 @@ Spans contain canonical attributes and bounded recursive `hook.*` fields.
 Optional logs carry the permitted original callback JSON. All configurations use
 this one pipeline; see [configuration](configuration.md).
 
+See the [Coralogix and OTel compatibility audit](coralogix-compatibility.md) for
+the pinned convention revision, retained legacy aliases and conformance limits.
+`gen_ai.client.*` fields describe this project's hook contract, not the OTel
+GenAI registry merely because they share its prefix.
+
 ## Span Attributes
 
 ### Common (All Spans)
@@ -23,7 +28,7 @@ this one pipeline; see [configuration](configuration.md).
 | `gen_ai.client.repository.remote.sha256` | SHA-256 of the credential-free normalized Git remote |
 | `gen_ai.client.native_trace_id` / `gen_ai.client.native_span_id` | Valid explicit native source identifiers; generic trace fields are reserved for upstream parenting |
 | `gen_ai.client.timestamp` | Original hook observation timestamp (ISO 8601), retained on replay |
-| `gen_ai.system` | Deprecated legacy GenAI system/provider attribute retained for backward compatibility |
+| `gen_ai.system` | Deprecated legacy harness identity retained for backward compatibility; use `gen_ai.provider.name` for the model provider |
 | `gen_ai.operation.name` | `chat`, `execute_tool`, or `invoke_agent` |
 | `telemetry.distro.name` / `telemetry.distro.version` | Hook package provenance on the OTel resource and in the local JSON span's `resource` object. The version is resolved from installed package metadata rather than duplicated in hook logic; neither field overwrites agent `service.name` or `service.version` |
 
@@ -37,13 +42,15 @@ this one pipeline; see [configuration](configuration.md).
 | `gen_ai.conversation.id` | Session / conversation ID |
 | `gen_ai.usage.input_tokens` | Input token count |
 | `gen_ai.usage.output_tokens` | Output token count |
-| `gen_ai.usage.cache_creation.input_tokens` | Cache-write input token count when provided |
+| `gen_ai.usage.cache_write.input_tokens` | Current standard cache-write input token count when provided |
+| `gen_ai.usage.cache_creation.input_tokens` | Historical cache-write alias retained for existing queries and Coralogix; same count, do not sum aliases |
 | `gen_ai.usage.cache_read.input_tokens` | Cache-read input token count when provided |
 | `gen_ai.request.temperature` | Temperature setting |
 | `gen_ai.request.max_tokens` | Max tokens setting |
 | `gen_ai.request.choice.count` | Requested number of choices/candidates |
 | `gen_ai.output.type` | Requested output modality (`text`, `json`, `image`, `speech`) |
 | `gen_ai.agent.id` / `gen_ai.agent.name` | Agent identity when the hook payload includes agent metadata |
+| `gen_ai.tool.name` / `gen_ai.tool.type` | Tool identity when provided, alongside legacy `gen_ai.client.tool_name` / MCP fields |
 | `gen_ai.response.finish_reasons` | Finish reasons array |
 | `gen_ai.system_instructions` | System instructions (opt-in text capture) |
 | `gen_ai.input.messages` | Input messages (opt-in) |
@@ -111,7 +118,7 @@ trace and log instrumentation scopes carry its installed package version.
 | `o11y.model.basis` | string | `provider`, `session`, `generation`, or `configuration` |
 | `o11y.usage.basis` / `input_basis` / `output_basis` | string | Provider-reported accounting, or normalized inclusive input |
 | `o11y.usage.semantics` | string | Explicit `per_call`, `cumulative`, `delta`, or `correction`; omitted if unspecified |
-| `gen_ai.usage.total_tokens` | integer, tokens | Inclusive input plus output when both are available |
+| `o11y.usage.total_tokens` / `gen_ai.usage.total_tokens` | integer, tokens | Project total and historical alias, not a standard total attribute; inclusive input plus output when both are available |
 | `gen_ai.usage.reasoning.output_tokens` | integer, tokens | Reasoning subset of output; never added a second time |
 | `gen_ai.tool.call.id` | string | Available invocation ID, distinct from the callback ID |
 | `o11y.capture.mode` / `policy_id` | string | Effective capture mode and policy fingerprint |

@@ -50,6 +50,13 @@ the approved capture policy. Rerun setup after upgrading callback registrations.
 Compare a full session and concurrent subagent session before expanding rollout.
 No live vendor canary or production rollout is implied by fixture replay.
 
+The [Coralogix/OTel audit](coralogix-compatibility.md) records current naming and
+remaining conformance checks. Cache writes now also emit
+`gen_ai.usage.cache_write.input_tokens`; `cache_creation.input_tokens` retains
+the same value. Tool names now also emit `gen_ai.tool.name`. Existing hook span
+names and legacy fields remain; do not sum aliases or interpret `gen_ai.system`
+as the provider. `gen_ai.request.top_k` is now emitted as an integer.
+
 For rollback, stop the canary, preserve policy-specific queues/quarantine for
 investigation, restore the prior package and configuration, rerun setup, and
 verify delivery. Do not copy schema-v2 records into an older policy queue or
