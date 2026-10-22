@@ -3,6 +3,11 @@
 Audit date: 2026-10-22. This compares public hook source and documentation; it
 does not inspect a customer's Coralogix tenant or an actual production payload.
 
+OpenTelemetry semantic conventions are the implementation target. Coralogix is
+comparison research, not a compatibility requirement. Vendor-specific attribute
+aliases, span construction and dashboard behavior are outside the implementation
+plan. Existing aliases are retained for consumers of our previous telemetry.
+
 ## Default contract
 
 The default configuration uses standard `OTEL_*` exporter settings and emits
@@ -32,7 +37,7 @@ signals or to every future revision.
 | Input and output usage | `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens` | Standard integer counts; input includes cache subsets |
 | Cache reads | `gen_ai.usage.cache_read.input_tokens` | Current standard and Coralogix documented name |
 | Cache writes | `gen_ai.usage.cache_write.input_tokens` | Current standard |
-| Historical cache writes | `gen_ai.usage.cache_creation.input_tokens` | Retained alias with the same count; still documented by Coralogix |
+| Historical cache writes | `gen_ai.usage.cache_creation.input_tokens` | Retained for our existing consumers, with the same count as the standard field |
 | Reasoning output | `gen_ai.usage.reasoning.output_tokens` | Standard subset of output, never added twice |
 | Combined usage | `o11y.usage.total_tokens` and `gen_ai.usage.total_tokens` | Project extension and historical alias; combined total is not a current standard attribute |
 | Model provider | `gen_ai.provider.name` | Explicit provider or model-based inference; unknown providers are omitted |
@@ -90,10 +95,10 @@ Coralogix's separate
 collects Admin API data and derives metrics such as `cursor_event_tokens_total`.
 That is a different source from the local Cursor hook. Its
 [AI cost documentation](https://coralogix.com/docs/user-guides/ai/cost/#send-cache-and-cost-data-to-coralogix)
-still lists `gen_ai.usage.cache_creation.input_tokens`; keeping that alias
-preserves the documented cache-write lookup while also emitting the current OTel
-name. Dashboard compatibility must be tested with its actual queries; using
-OTLP alone does not guarantee a vendor dashboard recognizes hook spans.
+still lists `gen_ai.usage.cache_creation.input_tokens`. This name already existed
+in our telemetry and remains for our existing consumers; the current OTel
+cache-write name is preferred for new queries. Dashboard recognition is a
+separate backend concern and is not a requirement for OTel conformance.
 
 ## Conformance scope and remaining validation
 
@@ -115,9 +120,9 @@ Before claiming full GenAI conformance for a harness, the plan requires:
 - Verify each supported provider's usage shape, inclusive input/output bases,
   modality subsets and per-call versus cumulative accounting. Other response
   formats require explicit adapters and fixtures.
-- Validate Coralogix AI Center recognition, model pricing and cache attribution
-  with a known-value canary; preserve native and hook source identities and
-  establish the consumer's deduplication policy.
+- Validate exported OTLP attributes and token accounting with a known-value
+  collector canary; preserve native and hook source identities and establish
+  the consumer's deduplication policy.
 
 The automated checks in `tests/test_telemetry_v2.py` cover decoded OTLP integer
 types, default-policy usage retention, old/new cache-write aliases, legacy tool

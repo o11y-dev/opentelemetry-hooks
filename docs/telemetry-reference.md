@@ -43,7 +43,7 @@ GenAI registry merely because they share its prefix.
 | `gen_ai.usage.input_tokens` | Input token count |
 | `gen_ai.usage.output_tokens` | Output token count |
 | `gen_ai.usage.cache_write.input_tokens` | Current standard cache-write input token count when provided |
-| `gen_ai.usage.cache_creation.input_tokens` | Historical cache-write alias retained for existing queries and Coralogix; same count, do not sum aliases |
+| `gen_ai.usage.cache_creation.input_tokens` | Historical cache-write alias retained for our existing queries; same count, do not sum aliases |
 | `gen_ai.usage.cache_read.input_tokens` | Cache-read input token count when provided |
 | `gen_ai.request.temperature` | Temperature setting |
 | `gen_ai.request.max_tokens` | Max tokens setting |
